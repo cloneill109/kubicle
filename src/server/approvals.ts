@@ -65,6 +65,12 @@ export class Approvals {
     if (v) this.#onChange(v);
   }
 
+  /** Hand one agent's in-flight wait (if any) to the terminal; pending stays, unanswerable. */
+  release(agentId: string): void {
+    const w = this.#byAgent.get(agentId);
+    if (w) this.#release(w);
+  }
+
   releaseAll(): void {
     for (const w of [...this.#waiting.values()]) this.#release(w);
   }

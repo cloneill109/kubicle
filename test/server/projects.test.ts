@@ -138,3 +138,34 @@ test('setApprovals persists and preserves other fields', () => {
     assert.throws(() => p.setApprovals('/nope', 'off'));
   } finally { rmSync(t, { recursive: true, force: true }); }
 });
+
+test('update renames, archives, and swaps wings keeping them unique', () => {
+  const t = tmp();
+  try {
+    const store = openStore(':memory:');
+    const p = new Projects(store);
+    const a = p.resolve(mk(t, 'a'), 100);
+    const b = p.resolve(mk(t, 'b'), 200);
+    const c = p.resolve(mk(t, 'c'), 300);
+    assert.deepEqual([a.wing, b.wing, c.wing], [0, 1, 2]);
+
+    const r = p.update(a.id, { name: 'Alpha' });
+    assert.equal(r.name, 'Alpha');
+    assert.equal(r.firstSeen, 100);
+    assert.equal(p.update(b.id, { archived: true }).archived, true);
+
+    p.update(c.id, { wing: 0 }); // swap with a
+    const byId = new Map(p.list().map((x) => [x.id, x]));
+    assert.equal(byId.get(c.id)!.wing, 0);
+    assert.equal(byId.get(a.id)!.wing, 2);
+    assert.equal(byId.get(a.id)!.name, 'Alpha');
+    assert.equal(byId.get(a.id)!.firstSeen, 100);
+    assert.equal(byId.get(c.id)!.firstSeen, 300);
+    const wings = p.list().map((x) => x.wing);
+    assert.equal(new Set(wings).size, wings.length);
+
+    p.update(b.id, { wing: 7 }); // free number: just moves
+    assert.equal(p.list().find((x) => x.id === b.id)!.wing, 7);
+    assert.throws(() => p.update('/nope', { name: 'x' }), /unknown project/);
+  } finally { rmSync(t, { recursive: true, force: true }); }
+});

@@ -170,3 +170,15 @@ test('cancelFor with a different tool keeps the wait; same tool cancels', async 
   assert.equal(await p, null);
   assert.equal(reg.get('s1')?.pending, undefined);
 });
+
+test('release(agentId) hands only that agent to the terminal', async () => {
+  const { reg, ap, perm } = setup({ mode: 'office' });
+  const p = ap.request(perm);
+  ap.release('other');
+  assert.equal(reg.get('s1')?.pending?.answerable, true);
+  ap.release('s1');
+  assert.equal(await p, null);
+  const pend = reg.get('s1')?.pending;
+  assert.equal(pend?.answerable, false);
+  assert.equal(ap.answer(pend!.id, 'allow'), 'expired');
+});

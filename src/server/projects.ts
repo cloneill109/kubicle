@@ -68,4 +68,21 @@ export class Projects {
     this.#store.upsertProject(next); // carries original firstSeen
     return next;
   }
+
+  /** Rename, archive, or move a wing. Moving onto a taken wing swaps numbers so they stay unique. */
+  update(id: string, patch: { name?: string; archived?: boolean; wing?: number }): ProjectRow {
+    const rows = this.#store.listProjects();
+    const cur = rows.find((r) => r.id === id);
+    if (!cur) throw new Error(`unknown project: ${id}`);
+    const next: ProjectRow = { ...cur };
+    if (patch.name !== undefined) next.name = patch.name;
+    if (patch.archived !== undefined) next.archived = patch.archived;
+    if (patch.wing !== undefined && patch.wing !== cur.wing) {
+      const other = rows.find((r) => r.id !== id && r.wing === patch.wing);
+      if (other) this.#store.upsertProject({ ...other, wing: cur.wing }); // carries original firstSeen
+      next.wing = patch.wing;
+    }
+    this.#store.upsertProject(next);
+    return next;
+  }
 }
