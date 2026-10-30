@@ -17,8 +17,12 @@ export const LOGIN_HINT = 'This login link was already used. Restart the server 
 const NAME_MAX = 80;
 const WING_MAX = 999;
 
-const CSP = "default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; img-src 'self' data:; " +
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com";
+// connect-src names the bound port; frame-ancestors blocks clickjacking from other local ports
+// (SameSite ignores ports, so a page on localhost:5173 could otherwise frame the UI with the cookie).
+function csp(port: number): string {
+  return `default-src 'self'; connect-src 'self' ws://127.0.0.1:${port} ws://localhost:${port}; img-src 'self' data:; ` +
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; frame-ancestors 'none'";
+}
 
 const TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -44,6 +48,8 @@ export interface HttpDeps {
   pushFeed(item: FeedItem): void;
   /** Repo root: serves `src/ui/index.html`, `src/ui/styles.css`, `dist/ui/*`. */
   rootDir: string;
+  /** Actual bound port (for the CSP connect-src). */
+  port: number;
   log(s: string): void;
 }
 
@@ -52,7 +58,7 @@ class HttpError extends Error {
   constructor(status: number, msg: string) { super(msg); this.status = status; }
 }
 
-const BASE_HEADERS = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
+const BASE_HEADERS = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY' };
 
 function send(res: ServerResponse, status: number, body = '', headers: Record<string, string> = {}): void {
   if (res.headersSent || res.destroyed) return;
@@ -111,6 +117,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
   const broadcastAgents = (as: AgentView[]) => { for (const a of as) broadcast({ t: 'agent', agent: a }); };
   const uiDir = resolve(d.rootDir, 'src', 'ui');
   const distDir = resolve(d.rootDir, 'dist', 'ui');
+  const pageCsp = csp(d.port);
 
   function ingest(e: AgentEvent): void {
     d.writer.push(e);
@@ -226,7 +233,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
   }
 
   async function staticUi(res: ServerResponse, pathname: string): Promise<void> {
-    if (pathname === '/') return serveFile(res, join(uiDir, 'index.html'), { 'content-security-policy': CSP });
+    if (pathname === '/') return serveFile(res, join(uiDir, 'index.html'), { 'content-security-policy': pageCsp });
     if (pathname === '/ui/styles.css') return serveFile(res, join(uiDir, 'styles.css'));
     const rel = param(pathname.slice('/ui/'.length));
     if (!rel || rel.includes('\0')) return send(res, 404, 'not found');

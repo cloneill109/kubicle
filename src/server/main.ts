@@ -76,7 +76,7 @@ export async function startServer(
   const url = `http://127.0.0.1:${port}`;
   const loginUrl = `${url}/login?code=${auth.newLoginCode()}`;
   server.on('request', createHandler({
-    cfg, ingestToken, auth, store, writer, projects, registry, approvals, hub, pushFeed, rootDir: ROOT, log,
+    cfg, ingestToken, auth, store, writer, projects, registry, approvals, hub, pushFeed, rootDir: ROOT, port, log,
   }));
   hub.attach(server, auth);
 

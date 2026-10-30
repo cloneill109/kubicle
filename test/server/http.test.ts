@@ -433,3 +433,22 @@ test('HEAD /login does not consume the code', async () => {
   assert.equal((await fetch(s.loginUrl, { method: 'HEAD', redirect: 'manual' })).status, 404);
   await login(s);
 });
+
+test('anti-framing: X-Frame-Options DENY everywhere, CSP frame-ancestors none and bound-port connect-src', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const port = new URL(s.url).port;
+  const page = await fetch(`${s.url}/`, { headers: { cookie } });
+  assert.equal(page.status, 200);
+  assert.equal(page.headers.get('x-frame-options'), 'DENY');
+  const csp = page.headers.get('content-security-policy') ?? '';
+  assert.match(csp, /frame-ancestors 'none'/);
+  assert.match(csp, new RegExp(`connect-src 'self' ws://127\\.0\\.0\\.1:${port} ws://localhost:${port};`));
+  assert.doesNotMatch(csp, /:\*/);
+  assert.match(csp, /font-src 'self' https:\/\/fonts\.gstatic\.com/);
+  // Static asset (served via dist/ui path; 404 here as the bundle may be absent) and other responses.
+  const asset = await fetch(`${s.url}/ui/main.js`, { headers: { cookie } });
+  assert.equal(asset.headers.get('x-frame-options'), 'DENY');
+  const denied = await fetch(`${s.url}/`);
+  assert.equal(denied.headers.get('x-frame-options'), 'DENY');
+});
