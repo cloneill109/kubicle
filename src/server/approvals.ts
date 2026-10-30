@@ -109,7 +109,7 @@ export class Approvals {
     const w = this.#waiting.get(approvalId);
     if (!w) return this.#resolved.has(approvalId) ? 'expired' : 'not-found';
     this.#settle(w, d);
-    const v = this.#registry.setPending(w.agentId, undefined);
+    const v = this.#registry.answered(w.agentId);
     if (v) this.#onChange(v);
     return 'ok';
   }

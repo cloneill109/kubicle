@@ -319,6 +319,15 @@ export class Registry {
     return snap(a);
   }
 
+  /** The owner answered from the office: the prompt is gone and the agent carries on. */
+  answered(agentId: string): AgentView | undefined {
+    const a = this.#agents.get(agentId);
+    if (!a) return undefined;
+    a.pending = undefined;
+    if (a.status === 'waiting') a.status = 'working';
+    return snap(a);
+  }
+
   refreshApprovals(): AgentView[] {
     const out: AgentView[] = [];
     for (const a of this.#agents.values()) {

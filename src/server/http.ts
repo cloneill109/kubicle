@@ -118,6 +118,9 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
   const uiDir = resolve(d.rootDir, 'src', 'ui');
   const distDir = resolve(d.rootDir, 'dist', 'ui');
   const pageCsp = csp(d.port);
+  // A new project appears during ingest (inside registry.apply): broadcast the list before the
+  // agent update that references it, so clients already have its wing.
+  d.projects.onCreate = () => broadcast({ t: 'projects', projects: d.projects.list() });
 
   function ingest(e: AgentEvent): void {
     d.writer.push(e);

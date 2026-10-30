@@ -2,12 +2,86 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Agent Office</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="/ui/styles.css">
 </head>
-<body>
-  <div id="app"></div>
-  <script type="module" src="/ui/main.js"></script>
+<body data-conn="connecting">
+<header class="top">
+  <div class="brand">
+    <h1>Agent Office</h1>
+    <p>Your Claude Code sessions, live. Click anyone on the floor.</p>
+  </div>
+  <div class="counts" id="counts" aria-live="polite"></div>
+  <div class="tools">
+    <button class="btn chime" id="chime" type="button" aria-pressed="false" title="Play a sound when an agent starts waiting on you">Chime off</button>
+    <nav class="styles" role="tablist" aria-label="Visual style" id="styleTabs"></nav>
+  </div>
+</header>
+
+<div class="banner" id="banner" role="status" hidden></div>
+
+<div class="layout">
+  <section class="stage">
+    <div class="map-wrap" id="mapWrap">
+      <div class="map-scroll" id="mapScroll"><canvas id="map" aria-label="Office floor: one wing per project, agents at their desks"></canvas></div>
+      <div class="offline" id="disconnected" hidden><p>Disconnected from the office server. Reconnecting…</p></div>
+    </div>
+    <p class="note" id="styleNote"></p>
+    <div class="legend" id="legend"></div>
+    <div class="archived" id="archived" hidden></div>
+    <section class="feed">
+      <header><h2>Hook events</h2><span>What your Claude sessions report to the office</span></header>
+      <ol id="feed"></ol>
+    </section>
+  </section>
+
+  <aside class="inspector insp" id="inspector" aria-live="polite">
+    <div class="insp-empty" id="iEmpty">
+      <h2 id="iEmptyTitle">Nobody selected</h2>
+      <p id="iEmptyText">Click someone on the floor to see what they are doing.</p>
+    </div>
+    <div class="insp-body" id="iBody" hidden>
+      <div class="insp-head">
+        <canvas id="avatar" width="12" height="14"></canvas>
+        <div><h2 id="iName"></h2><p id="iRole"></p></div>
+        <span class="pill" id="iStatus"></span>
+      </div>
+      <div class="pending" id="iPending" hidden>
+        <p><b>Needs your approval</b> to run:</p>
+        <code id="iPendingCmd"></code>
+        <div class="btns" id="iPendingBtns"><button class="btn primary" id="approve" type="button">Approve</button><button class="btn" id="deny" type="button">Deny</button></div>
+        <p class="conn" id="iPendingNote"></p>
+      </div>
+      <dl class="facts">
+        <dt>Task</dt><dd id="iTask"></dd>
+        <dt>Doing</dt><dd id="iDoing" class="mono"></dd>
+        <dt>Model</dt><dd id="iModel" class="mono"></dd>
+        <dt>Link</dt><dd id="iConn"></dd>
+      </dl>
+      <fieldset class="routing">
+        <legend>Answer approvals here</legend>
+        <label><input type="checkbox" id="routeSession"> this session</label>
+        <label><input type="checkbox" id="routeProject"> this project</label>
+        <p class="conn" id="routeNote"></p>
+      </fieldset>
+      <div>
+        <div class="tabs" role="tablist">
+          <button type="button" role="tab" id="tabAsk" aria-selected="true" disabled>Ask (btw)</button>
+          <button type="button" role="tab" id="tabAssign" aria-selected="false" disabled>Assign work</button>
+        </div>
+        <p class="conn tabs-note">Available for agents launched from the office (stage 2)</p>
+      </div>
+      <div><h3>Recent activity</h3><ol class="log" id="iLog"></ol></div>
+    </div>
+  </aside>
+</div>
+
+<div class="wing-menu" id="wingMenu" role="menu" hidden></div>
+
+<script type="module" src="/ui/main.js"></script>
 </body>
 </html>

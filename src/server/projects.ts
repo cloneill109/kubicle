@@ -44,6 +44,8 @@ export function projectRoot(cwd: string): string {
 
 export class Projects {
   #store: Store;
+  /** Called after a project row is created for a cwd seen for the first time. */
+  onCreate: ((row: ProjectRow) => void) | null = null;
   constructor(store: Store) { this.#store = store; }
 
   resolve(cwd: string, now: number): ProjectRow {
@@ -56,6 +58,7 @@ export class Projects {
     const wing = rows.reduce((m, r) => Math.max(m, r.wing), -1) + 1;
     const row: ProjectRow = { id: root, name, wing, approvals: 'off', archived: false, firstSeen: now };
     this.#store.upsertProject(row);
+    this.onCreate?.(row);
     return row;
   }
 

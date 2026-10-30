@@ -182,3 +182,23 @@ test('release(agentId) hands only that agent to the terminal', async () => {
   assert.equal(pend?.answerable, false);
   assert.equal(ap.answer(pend!.id, 'allow'), 'expired');
 });
+
+test('an office answer moves the agent out of waiting (it no longer needs the owner)', async () => {
+  for (const d of ['allow', 'deny'] as const) {
+    const { reg, ap, perm, changes } = setup({ mode: 'office' });
+    const p = ap.request(perm);
+    assert.equal(reg.get('s1')?.status, 'waiting');
+    assert.equal(ap.answer(reg.get('s1')!.pending!.id, d), 'ok');
+    await p;
+    assert.equal(reg.get('s1')?.status, 'working', `${d}: working again`);
+    assert.equal(changes.at(-1)?.status, 'working', `${d}: broadcast says working`);
+  }
+});
+
+test('a released wait (to the terminal) stays waiting', async () => {
+  const { reg, ap, perm } = setup({ mode: 'office' });
+  const p = ap.request(perm);
+  ap.release('s1');
+  assert.equal(await p, null);
+  assert.equal(reg.get('s1')?.status, 'waiting');
+});

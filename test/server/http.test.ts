@@ -452,3 +452,21 @@ test('anti-framing: X-Frame-Options DENY everywhere, CSP frame-ancestors none an
   const denied = await fetch(`${s.url}/`);
   assert.equal(denied.headers.get('x-frame-options'), 'DENY');
 });
+
+test('a hook from a new project broadcasts the project list before the agent', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  await c.waitFor((m) => m.t === 'snapshot');
+  const cwd = tmpHome();
+  mkdirSync(join(cwd, '.git'));
+  await postHook(s, { ...fixture('SessionStart'), session_id: 'sNew', cwd });
+  const pm = await c.waitFor((m) => m.t === 'projects' && m.projects.some((p) => p.id === cwd));
+  const am = await c.waitFor(isAgent((a) => a.id === 'sNew' && a.projectId === cwd));
+  assert.ok(c.msgs.indexOf(pm) < c.msgs.indexOf(am), 'projects first, so the wing exists when the agent arrives');
+  // A second event from the same project does not re-broadcast the list.
+  const n = c.msgs.filter((m) => m.t === 'projects').length;
+  await postHook(s, { ...fixture('PreToolUse'), session_id: 'sNew', cwd });
+  await c.waitFor(isAgent((a) => a.id === 'sNew' && a.activity !== ''));
+  assert.equal(c.msgs.filter((m) => m.t === 'projects').length, n);
+});
