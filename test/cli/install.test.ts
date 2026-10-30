@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, symlinkSync, lstatSync, utimesSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HOOK_EVENTS, planInstall, planUninstall } from '../../src/cli/install.ts';
+import { HOOK_EVENTS, planInstall, planUninstall, quote } from '../../src/cli/install.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CLI = join(root, 'src', 'cli', 'install.ts');
@@ -38,9 +38,9 @@ test('planInstall keeps user hooks and adds ours', () => {
   const pre = out.hooks.PreToolUse;
   assert.equal(pre.length, 2);
   assert.equal(pre[0].hooks[0].command, '/usr/local/bin/mine');
-  assert.deepEqual(pre[1], { matcher: '*', hooks: [{ type: 'command', command: `"${SHIM}" 2`, timeout: 5 }] });
-  assert.deepEqual(out.hooks.SessionStart, [{ hooks: [{ type: 'command', command: `"${SHIM}" 2`, timeout: 5 }] }]);
-  assert.deepEqual(out.hooks.PermissionRequest, [{ matcher: '*', hooks: [{ type: 'command', command: `"${SHIM}" 140`, timeout: 150 }] }]);
+  assert.deepEqual(pre[1], { matcher: '*', hooks: [{ type: 'command', command: `'${SHIM}' 2`, timeout: 5 }] });
+  assert.deepEqual(out.hooks.SessionStart, [{ hooks: [{ type: 'command', command: `'${SHIM}' 2`, timeout: 5 }] }]);
+  assert.deepEqual(out.hooks.PermissionRequest, [{ matcher: '*', hooks: [{ type: 'command', command: `'${SHIM}' 140`, timeout: 150 }] }]);
   for (const e of HOOK_EVENTS) assert.ok(out.hooks[e], e);
 });
 
@@ -140,4 +140,97 @@ test('uninstall on missing file does not create it', () => {
   const r = cli(['uninstall', '--settings', file], join(dir, 'home'));
   assert.equal(r.status, 0);
   assert.ok(!existsSync(file));
+});
+
+test('symlinked settings.json stays a symlink; target gets hooks', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'office-inst-'));
+  mkdirSync(join(dir, 'dot'));
+  const target = join(dir, 'dot', 'settings.json');
+  const link = join(dir, 'settings.json');
+  const orig = JSON.stringify(userSettings(), null, 2) + '\n';
+  writeFileSync(target, orig);
+  symlinkSync(target, link);
+  const r = cli(['install', '--settings', link], join(dir, 'home'));
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(lstatSync(link).isSymbolicLink());
+  assert.equal(JSON.parse(readFileSync(target, 'utf8')).hooks.SessionStart.length, 1);
+  assert.equal(readFileSync(target + '.agent-office.bak', 'utf8'), orig);
+  const u = cli(['uninstall', '--settings', link], join(dir, 'home'));
+  assert.equal(u.status, 0, u.stderr);
+  assert.ok(lstatSync(link).isSymbolicLink());
+  assert.deepEqual(JSON.parse(readFileSync(target, 'utf8')), userSettings());
+});
+
+test('bad arguments exit 2 and never touch HOME/.claude', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'office-inst-'));
+  const forms = [
+    ['install', '--settings'],
+    ['install', '--settings', '--foo'],
+    ['install', '--settings='],
+    ['install', '--bogus'],
+    ['install', 'extra'],
+    ['uninstall', '--settings', '-'],
+  ];
+  for (const args of forms) {
+    const r = spawnSync('node', ['--disable-warning=ExperimentalWarning', CLI, ...args], {
+      env: { ...process.env, HOME: dir, AGENT_OFFICE_HOME: join(dir, 'home') }, encoding: 'utf8',
+    });
+    assert.equal(r.status, 2, args.join(' '));
+    assert.match(r.stderr, /usage/);
+  }
+  assert.ok(!existsSync(join(dir, '.claude')));
+});
+
+test('--settings=<path> form works', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'office-inst-'));
+  const file = join(dir, 's.json');
+  const r = cli([`install`, `--settings=${file}`], join(dir, 'home'));
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(existsSync(file));
+});
+
+test('quote: plain unquoted, specials single-quoted, embedded quote escaped', () => {
+  assert.equal(quote('/tmp/x/bin/office-hook'), '/tmp/x/bin/office-hook');
+  assert.equal(quote('/tmp/R&D/bin/office-hook'), "'/tmp/R&D/bin/office-hook'");
+  assert.equal(quote("/tmp/it's/bin/office-hook"), "'/tmp/it'\\''s/bin/office-hook'");
+});
+
+test('produced command actually executes for awkward paths', () => {
+  const base = mkdtempSync(join(tmpdir(), 'office-inst-'));
+  for (const name of ['R&D (x) $y', "it's `here`"]) {
+    const d = join(base, name, 'bin');
+    mkdirSync(d, { recursive: true });
+    const stub = join(d, 'office-hook');
+    writeFileSync(stub, '#!/bin/bash\necho "ran:$1"\n', { mode: 0o755 });
+    const cmd = planInstall({}, stub).hooks.Stop[0].hooks[0].command;
+    const r = spawnSync('bash', ['-c', cmd], { encoding: 'utf8' });
+    assert.equal(r.stdout.trim(), 'ran:2', cmd);
+  }
+});
+
+test('backup keeps the ORIGINAL across repeated installs; no-op rewrites nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'office-inst-'));
+  const file = join(dir, 'settings.json');
+  const orig = JSON.stringify(userSettings(), null, 2) + '\n';
+  writeFileSync(file, orig);
+  assert.equal(cli(['install', '--settings', file], join(dir, 'home')).status, 0);
+  const after = readFileSync(file, 'utf8');
+  const old = new Date(2020, 0, 1);
+  utimesSync(file, old, old);
+  const mtime = statSync(file).mtimeMs;
+  // change the file so a real second write happens, then reinstall
+  const edited = JSON.parse(after); edited.theme = 'light';
+  writeFileSync(file, JSON.stringify(edited, null, 2) + '\n');
+  assert.equal(cli(['install', '--settings', file], join(dir, 'home')).status, 0);
+  assert.equal(readFileSync(file + '.agent-office.bak', 'utf8'), orig);
+  // no-op reinstall: bytes and mtime unchanged
+  const bytes = readFileSync(file, 'utf8');
+  utimesSync(file, old, old);
+  const m2 = statSync(file).mtimeMs;
+  const r = cli(['install', '--settings', file], join(dir, 'home'));
+  assert.equal(r.status, 0);
+  assert.equal(readFileSync(file, 'utf8'), bytes);
+  assert.equal(statSync(file).mtimeMs, m2);
+  assert.equal(readFileSync(file + '.agent-office.bak', 'utf8'), orig);
+  void mtime;
 });

@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync, renameSync, statSync, mkdirSync, copyFileSync, chmodSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, statSync, lstatSync, realpathSync, mkdirSync, copyFileSync, chmodSync, unlinkSync, constants } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,7 +43,7 @@ function stripOurs(groups: any[]): any[] {
   return out;
 }
 
-const quote = (p: string) => (/[\s"'$`\\]/.test(p) ? `"${p.replace(/(["$`\\])/g, '\\$1')}"` : p);
+export const quote = (p: string): string => (/^[A-Za-z0-9_./+-]+$/.test(p) ? p : `'${p.replace(/'/g, `'\\''`)}'`);
 
 export function planInstall(settings: any, shimPath: string): any {
   checkShape(settings);
@@ -98,16 +99,39 @@ function main(argv: string[]): number {
     console.error('usage: install.ts install|uninstall [--settings <path>]');
     return 2;
   }
-  const i = argv.indexOf('--settings');
-  const file = resolve(i >= 0 && argv[i + 1] ? argv[i + 1]! : join(homedir(), '.claude', 'settings.json'));
+  const usage = 'usage: install.ts install|uninstall [--settings <path> | --settings=<path>]';
+  let settingsArg: string | undefined;
+  const rest = argv.slice(1);
+  for (let k = 0; k < rest.length; k++) {
+    const a = rest[k]!;
+    if (a === '--settings') {
+      const v = rest[++k];
+      if (v === undefined || v === '' || v.startsWith('-')) { console.error(`--settings needs a path\n${usage}`); return 2; }
+      settingsArg = v;
+    } else if (a.startsWith('--settings=')) {
+      const v = a.slice('--settings='.length);
+      if (v === '' || v.startsWith('-')) { console.error(`--settings needs a path\n${usage}`); return 2; }
+      settingsArg = v;
+    } else {
+      console.error(`unknown argument: ${a}\n${usage}`);
+      return 2;
+    }
+  }
+  const given = resolve(settingsArg ?? join(homedir(), '.claude', 'settings.json'));
 
+  // Follow symlinks (stow/chezmoi): read, back up and write the real target.
+  let file = given;
   let raw: string | null = null;
   let mode = 0o644;
   try {
+    file = realpathSync(given);
     raw = readFileSync(file, 'utf8');
     mode = statSync(file).mode & 0o777;
   } catch (e: any) {
-    if (e?.code !== 'ENOENT') { console.error(`cannot read ${file}: ${e.message}`); return 1; }
+    if (e?.code !== 'ENOENT') { console.error(`cannot read ${given}: ${e.message}`); return 1; }
+    let dangling = false;
+    try { dangling = lstatSync(given).isSymbolicLink(); } catch { /* not there at all */ }
+    if (dangling) { console.error(`${given} is a dangling symlink; nothing was changed.`); return 1; }
   }
 
   let current: any = {};
@@ -134,8 +158,16 @@ function main(argv: string[]): number {
 
   let backup = '';
   if (raw !== null) {
+    if (isDeepStrictEqual(next, current)) {
+      console.log(`Settings: ${file}`);
+      console.log(cmd === 'install' ? 'Hooks already installed; nothing changed.' : 'No Agent Office hooks found; nothing changed.');
+      if (cmd === 'install') ensureIngestToken(loadConfig(process.env).home);
+      return 0;
+    }
     backup = `${file}.agent-office.bak`;
-    copyFileSync(file, backup);
+    try { copyFileSync(file, backup, constants.COPYFILE_EXCL); } catch (e: any) {
+      if (e?.code !== 'EEXIST') throw e; // keep the first (original) backup
+    }
   }
   writeAtomic(file, JSON.stringify(next, null, 2) + '\n', mode);
 
