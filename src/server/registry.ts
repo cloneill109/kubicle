@@ -269,7 +269,6 @@ export class Registry {
   tick(now: number): { changed: AgentView[]; removed: { id: string; reason: 'expired' }[]; banner: string | null } {
     const changed: AgentView[] = [];
     const removed: { id: string; reason: 'expired' }[] = [];
-    const wasWorking = [...this.#agents.values()].some((a) => a.status === 'working');
 
     for (const a of [...this.#agents.values()]) {
       if (!this.#agents.has(a.id)) continue; // already cascaded
@@ -296,7 +295,8 @@ export class Registry {
       }
     }
 
-    const banner = wasWorking && this.#agents.size > 0 && now - this.#lastEventTs > this.#cfg.bannerMs ? BANNER : null;
+    const active = [...this.#agents.values()].some((a) => a.status === 'working' || a.status === 'quiet');
+    const banner = active && now - this.#lastEventTs > this.#cfg.bannerMs ? BANNER : null;
     return { changed, removed, banner };
   }
 

@@ -182,7 +182,14 @@ test('banner appears and clears', () => {
   assert.equal(reg.tick(11 * MIN + 2).banner, null);
 });
 
-test('banner null when nothing is working', () => {
+test('banner fires for a quiet agent after 11 min silence (default config)', () => {
+  const { reg } = mk();
+  reg.apply(ev('UserPromptSubmit', { ts: 0 }));
+  assert.equal(reg.tick(11 * MIN).banner, 'No hook events for 10 min. Are the hooks installed?');
+  assert.equal(reg.get('s1')!.status, 'quiet');
+});
+
+test('banner null when only idle agents', () => {
   const { reg } = mk();
   reg.apply(ev('SessionStart', { ts: 0 }));
   assert.equal(reg.tick(11 * MIN).banner, null);
