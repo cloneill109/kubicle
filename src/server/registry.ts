@@ -49,6 +49,7 @@ export class Registry {
   #stat: (p: string) => number | null;
   #agents = new Map<string, AgentView>();
   #transcripts = new Map<string, string>();
+  #quietMtime = new Map<string, number | null>();
   #lastEventTs = 0;
 
   constructor(projects: Projects, store: Store, cfg: Config, statMtime?: (p: string) => number | null) {
@@ -156,7 +157,9 @@ export class Registry {
     const feedName = target ? target.name : nameFor(subId ?? e.sessionId);
 
     if (target) {
-      target.lastSeen = e.ts;
+      target.lastSeen = Math.max(target.lastSeen, e.ts);
+      this.#quietMtime.delete(target.id);
+      if (session && session !== target) session.lastSeen = Math.max(session.lastSeen, e.ts);
       if (e.model) target.model = e.model;
       if (e.transcriptPath) this.#transcripts.set(target.id, e.transcriptPath);
       if (e.cwd && (e.event === 'CwdChanged' || e.event === 'SessionStart' || !target.cwd || target.projectId === '')) {
@@ -228,7 +231,7 @@ export class Registry {
         case 'SubagentStop':
           if (t.kind === 'subagent') {
             this.#agents.delete(t.id);
-            this.#transcripts.delete(t.id);
+            this.#transcripts.delete(t.id); this.#quietMtime.delete(t.id);
             touched.delete(t);
             removed.push({ id: t.id, reason: 'ended' });
           }
@@ -237,7 +240,7 @@ export class Registry {
           for (const [id, a] of [...this.#agents]) {
             if (a.sessionId === e.sessionId) {
               this.#agents.delete(id);
-              this.#transcripts.delete(id);
+              this.#transcripts.delete(id); this.#quietMtime.delete(id);
               touched.delete(a);
               removed.push({ id, reason: 'ended' });
             }
@@ -277,17 +280,21 @@ export class Registry {
         for (const [id, x] of [...this.#agents]) {
           if (id === a.id || (a.kind === 'session' && x.parentId === a.id)) {
             this.#agents.delete(id);
-            this.#transcripts.delete(id);
+            this.#transcripts.delete(id); this.#quietMtime.delete(id);
             removed.push({ id, reason: 'expired' });
           }
         }
         continue;
       }
       let next: AgentStatus = a.status;
-      if ((a.status === 'working' || a.status === 'quiet') && idle > this.#cfg.lostMs && this.#transcriptStale(a)) {
-        next = 'lost';
+      if (a.status === 'quiet' && idle > this.#cfg.lostMs) {
+        const cur = this.#mtime(a);
+        if (cur === null || (this.#quietMtime.has(a.id) && cur === this.#quietMtime.get(a.id))) next = 'lost';
+        else this.#quietMtime.set(a.id, cur); // transcript still changing: alive
       } else if (a.status === 'working' && idle > this.#cfg.quietMs) {
-        next = 'quiet';
+        const cur = this.#mtime(a);
+        if (idle > this.#cfg.lostMs && cur === null) next = 'lost';
+        else { next = 'quiet'; this.#quietMtime.set(a.id, cur); }
       }
       if (next !== a.status) {
         a.status = next;
@@ -300,11 +307,9 @@ export class Registry {
     return { changed, removed, banner };
   }
 
-  #transcriptStale(a: AgentView): boolean {
+  #mtime(a: AgentView): number | null {
     const p = this.#transcripts.get(a.id) ?? (a.parentId ? this.#transcripts.get(a.parentId) : undefined);
-    if (!p) return true;
-    const m = this.#stat(p);
-    return m === null || m <= a.lastSeen;
+    return p ? this.#stat(p) : null;
   }
 
   setPending(agentId: string, p: PendingApproval | undefined): AgentView | undefined {
@@ -329,9 +334,13 @@ export class Registry {
   rebuild(events: AgentEvent[]): void {
     this.#agents.clear();
     this.#transcripts.clear();
+    this.#quietMtime.clear();
     this.#lastEventTs = 0;
     const sorted = events.map((e, i) => ({ e, i })).sort((x, y) => x.e.ts - y.e.ts || x.i - y.i);
     for (const { e } of sorted) this.apply(e);
-    for (const a of this.#agents.values()) if (a.status === 'working') a.status = 'quiet';
+    for (const a of this.#agents.values()) {
+      if (a.status === 'working') a.status = 'quiet';
+      if (a.status === 'quiet') this.#quietMtime.set(a.id, this.#mtime(a));
+    }
   }
 }

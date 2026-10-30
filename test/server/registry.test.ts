@@ -232,3 +232,51 @@ test('returned views are snapshots', () => {
   reg.apply(ev('UserPromptSubmit'));
   assert.equal(v.status, 'idle');
 });
+
+test('lost: mtime slightly after lastSeen but unchanged -> lost', () => {
+  const { reg } = mk(() => 50);
+  reg.apply(ev('UserPromptSubmit', { ts: 0, transcriptPath: '/t' }));
+  reg.tick(6 * MIN);
+  assert.equal(reg.get('s1')!.status, 'quiet');
+  reg.tick(31 * MIN);
+  assert.equal(reg.get('s1')!.status, 'lost');
+});
+
+test('mtime advancing between ticks keeps quiet', () => {
+  let m = 50;
+  const { reg } = mk(() => m);
+  reg.apply(ev('UserPromptSubmit', { ts: 0, transcriptPath: '/t' }));
+  reg.tick(6 * MIN);
+  m = 100;
+  reg.tick(31 * MIN);
+  assert.equal(reg.get('s1')!.status, 'quiet');
+  m = 200;
+  reg.tick(32 * MIN);
+  assert.equal(reg.get('s1')!.status, 'quiet');
+  reg.tick(33 * MIN); // unchanged since last tick
+  assert.equal(reg.get('s1')!.status, 'lost');
+});
+
+test('rebuild: quiet with unchanged mtime goes lost and banner clears', () => {
+  const { reg } = mk(() => 50);
+  reg.rebuild([ev('UserPromptSubmit', { ts: 0, transcriptPath: '/t' })]);
+  assert.equal(reg.get('s1')!.status, 'quiet');
+  const r = reg.tick(31 * MIN);
+  assert.equal(reg.get('s1')!.status, 'lost');
+  assert.equal(r.banner, null);
+});
+
+test('subagent events keep parent working and lastSeen never goes backward', () => {
+  const { reg } = mk();
+  reg.apply(ev('UserPromptSubmit', { ts: 0 }));
+  reg.apply(ev('SubagentStart', { agentId: 'a', agentType: 'Plan', ts: 0 }));
+  for (let m = 1; m <= 10; m++) {
+    reg.apply(ev('PreToolUse', { agentId: 'a', toolName: 'T', activity: `x${m}`, ts: m * MIN }));
+    reg.tick(m * MIN);
+  }
+  assert.equal(reg.get('s1')!.status, 'working');
+  assert.equal(reg.get('s1')!.lastSeen, 10 * MIN);
+  reg.apply(ev('PreToolUse', { agentId: 'a', toolName: 'T', activity: 'old', ts: 5 * MIN }));
+  assert.equal(reg.get('s1')!.lastSeen, 10 * MIN);
+  assert.equal(reg.get('s1:a')!.lastSeen, 10 * MIN);
+});
