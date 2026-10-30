@@ -8,6 +8,7 @@
   },
   "scripts": {
     "test": "node --disable-warning=ExperimentalWarning --test 'test/**/*.test.ts'",
+    "test:e2e": "node --disable-warning=ExperimentalWarning --test 'test/e2e/*.e2e.ts'",
     "typecheck": "tsc --noEmit",
     "build:ui": "esbuild src/ui/main.ts --bundle --format=esm --outfile=dist/ui/main.js",
     "start": "npm run build:ui && node --disable-warning=ExperimentalWarning src/server/main.ts",

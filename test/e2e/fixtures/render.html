@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Office render harness</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 16px; background: #11131a; color: #ebe7dc; font: 14px/1.45 "IBM Plex Sans", system-ui, sans-serif; }
+    h2 { font: 600 13px "IBM Plex Sans", sans-serif; letter-spacing: .06em; text-transform: uppercase; color: #9a9db0; margin: 16px 2px 8px; }
+    .map-wrap { border: 1px solid #2c3142; border-radius: 6px; overflow-x: auto; overflow-y: hidden; background: #0c0d12; max-width: 100%; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <h2 id="t3">3 projects</h2>
+  <div class="map-wrap" id="wrap3"><canvas id="world3"></canvas></div>
+  <h2 id="t12">12 projects</h2>
+  <div class="map-wrap" id="wrap12"><canvas id="world12"></canvas></div>
+  <script src="harness.js"></script>
+</body>
+</html>
