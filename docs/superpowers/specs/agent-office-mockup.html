@@ -1,0 +1,1202 @@
+<title>Agent Office</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: control-room chrome around one live floor plan; inspector docks right, hook event feed runs under the map */
+:root {
+  color-scheme: dark;
+  --bg: #11131a;
+  --panel: #181b25;
+  --panel-2: #212534;
+  --line: #2c3142;
+  --fg: #ebe7dc;
+  --muted: #9a9db0;
+  --accent: #f2b84b;
+  --ok: #62d391;
+  --info: #7aa9ff;
+  --danger: #ef6b6b;
+  --display: "Pixelify Sans", ui-monospace, Menlo, monospace;
+  --body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--body);
+  font-size: 14px;
+  line-height: 1.45;
+  padding-block: 18px 40px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+[hidden] { display: none !important; }
+button, input { font: inherit; color: inherit; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.top { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 28px; margin-bottom: 14px; }
+.brand h1 { font-family: var(--display); font-weight: 600; font-size: 28px; line-height: 1; margin: 0; letter-spacing: .5px; }
+.brand p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+.counts { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip { font: 500 12px var(--mono); padding: 4px 9px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.chip b { color: var(--fg); font-weight: 500; }
+.chip.warn { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.chip.warn b { color: var(--accent); }
+.styles { margin-left: auto; display: flex; flex-wrap: wrap; gap: 4px; background: var(--panel); border: 1px solid var(--line); padding: 4px; border-radius: 6px; }
+.styles button { color: var(--muted); background: none; border: 0; padding: 7px 13px; border-radius: 4px; cursor: pointer; font-weight: 500; font-size: 13px; }
+.styles button:hover { color: var(--fg); }
+.styles button[aria-selected="true"] { background: var(--panel-2); color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
+
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
+.stage { min-width: 0; }
+.map-wrap { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: #0c0d12; }
+#map { display: block; width: 100%; touch-action: manipulation; }
+.note { color: var(--muted); font-size: 13px; margin: 10px 2px 0; max-width: 80ch; }
+.note b { color: var(--fg); font-weight: 600; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 10px 2px 0; font-size: 12px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+.feed { margin-top: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+.feed header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.feed h2 { margin: 0; font: 600 13px var(--body); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.feed header span { font-size: 12px; color: var(--muted); }
+#feed { list-style: none; margin: 0; padding: 4px 0; max-height: 210px; overflow: auto; font: 12px/1.5 var(--mono); }
+#feed li { display: grid; grid-template-columns: 64px 128px minmax(0, 1fr); gap: 10px; padding: 2px 14px; }
+#feed li .t { color: var(--muted); font-variant-numeric: tabular-nums; }
+#feed li .k { color: var(--muted); }
+#feed li .k[data-k="SessionStart"] { color: var(--ok); }
+#feed li .k[data-k="SubagentStart"], #feed li .k[data-k="SubagentStop"] { color: var(--info); }
+#feed li .k[data-k="Notification"] { color: var(--accent); }
+#feed li .k[data-k="UserPromptSubmit"] { color: var(--fg); }
+#feed li .d { overflow-wrap: anywhere; }
+@media (max-width: 560px) { #feed li { grid-template-columns: 58px minmax(0, 1fr); } #feed li .k { grid-column: 2; } #feed li .d { grid-column: 2; } }
+
+.inspector { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 16px; display: flex; flex-direction: column; gap: 14px; position: sticky; top: calc(env(safe-area-inset-top, 0px) + 16px); min-width: 0; }
+@media (max-width: 1000px) { .layout { grid-template-columns: minmax(0, 1fr); } .inspector { position: static; } }
+.insp-head { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; gap: 12px; align-items: center; }
+#avatar { width: 48px; height: 48px; image-rendering: pixelated; background: var(--panel-2); border-radius: 4px; }
+.insp-head h2 { margin: 0; font: 600 20px/1.1 var(--display); }
+.insp-head p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
+.pill { font: 500 11.5px var(--mono); padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
+.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.pill[data-s="working"]::before { background: var(--ok); }
+.pill[data-s="walking"]::before, .pill[data-s="talking"]::before { background: var(--info); }
+.pill[data-s="waiting"] { border-color: var(--accent); color: var(--accent); }
+.pill[data-s="waiting"]::before { background: var(--accent); }
+.pending { border: 1px solid var(--accent); border-radius: 6px; padding: 12px; background: color-mix(in srgb, var(--accent) 8%, var(--panel)); display: grid; gap: 8px; }
+.pending p { margin: 0; font-size: 13px; }
+.pending code { font: 12.5px var(--mono); background: var(--bg); padding: 6px 8px; border-radius: 4px; overflow-wrap: anywhere; }
+.btns { display: flex; gap: 8px; }
+.btn { border: 1px solid var(--line); background: var(--panel-2); padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: 500; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #1b1608; }
+.facts { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 6px 10px; margin: 0; font-size: 13px; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+.facts dd.mono { font: 12.5px var(--mono); }
+.conn { font-size: 12px; color: var(--muted); }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); }
+.tabs button { background: none; border: 0; padding: 7px 10px; cursor: pointer; color: var(--muted); font-weight: 500; font-size: 13px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+.thread { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; max-height: 190px; overflow: auto; }
+.thread li { font-size: 13px; padding: 7px 10px; border-radius: 6px; background: var(--panel-2); max-width: 92%; overflow-wrap: anywhere; }
+.thread li.you { align-self: flex-end; background: color-mix(in srgb, var(--accent) 18%, var(--panel-2)); }
+.thread li small { display: block; color: var(--muted); font-size: 11px; margin-top: 3px; }
+.thread .empty { background: none; color: var(--muted); padding: 0; font-size: 12.5px; }
+form.send { display: flex; gap: 6px; margin-top: 8px; }
+form.send input { flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 7px 9px; font-size: 13px; }
+.insp h3 { margin: 0 0 6px; font: 600 12px var(--body); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.log { list-style: none; margin: 0; padding: 0; font: 12px/1.6 var(--mono); color: var(--muted); }
+.log li { overflow-wrap: anywhere; }
+.log li:first-child { color: var(--fg); }
+</style>
+
+<header class="top">
+  <div class="brand">
+    <h1>Agent Office</h1>
+    <p>Style mockup. Agents and events are simulated. Click anyone on the floor.</p>
+  </div>
+  <div class="counts" id="counts"></div>
+  <nav class="styles" role="tablist" aria-label="Visual style" id="styleTabs"></nav>
+</header>
+
+<div class="layout">
+  <section class="stage">
+    <div class="map-wrap" id="mapWrap"><canvas id="map" aria-label="Office floor with animated agents"></canvas></div>
+    <p class="note" id="styleNote"></p>
+    <div class="legend" id="legend"></div>
+    <section class="feed">
+      <header><h2>Hook events</h2><span>What each Claude session would report to the office server</span></header>
+      <ol id="feed"></ol>
+    </section>
+  </section>
+
+  <aside class="inspector insp" id="inspector" aria-live="polite">
+    <div class="insp-head">
+      <canvas id="avatar" width="12" height="14"></canvas>
+      <div><h2 id="iName"></h2><p id="iRole"></p></div>
+      <span class="pill" id="iStatus"></span>
+    </div>
+    <div class="pending" id="iPending" hidden>
+      <p><b>Needs your approval</b> to run:</p>
+      <code id="iPendingCmd"></code>
+      <div class="btns"><button class="btn primary" id="approve" type="button">Approve</button><button class="btn" id="deny" type="button">Deny</button></div>
+    </div>
+    <dl class="facts">
+      <dt>Task</dt><dd id="iTask"></dd>
+      <dt>Doing</dt><dd id="iDoing" class="mono"></dd>
+      <dt>Model</dt><dd id="iModel" class="mono"></dd>
+      <dt>Link</dt><dd id="iConn"></dd>
+    </dl>
+    <div>
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" id="tabAsk" aria-selected="true">Ask (btw)</button>
+        <button type="button" role="tab" id="tabAssign" aria-selected="false">Assign work</button>
+      </div>
+      <div id="paneAsk">
+        <ol class="thread" id="chat"></ol>
+        <form class="send" id="askForm"><input id="askInput" autocomplete="off" placeholder="Ask without interrupting"><button class="btn" type="submit">Ask</button></form>
+      </div>
+      <div id="paneAssign" hidden>
+        <ol class="thread" id="queue"></ol>
+        <form class="send" id="assignForm"><input id="assignInput" autocomplete="off" placeholder="Describe the task"><button class="btn" type="submit">Assign</button></form>
+      </div>
+    </div>
+    <div><h3>Recent activity</h3><ol class="log" id="iLog"></ol></div>
+  </aside>
+</div>
+
+<script>
+(() => {
+'use strict';
+// ---------- world ----------
+const COLS = 48, ROWS = 30;
+const grid = Array.from({ length: ROWS }, () => Array.from({ length: COLS }, () => ({ wall: true, room: null, block: false })));
+const carve = (x0, y0, x1, y1, room) => { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { grid[y][x].wall = false; grid[y][x].room = room; } };
+const ROOMS = {
+  wingA: { name: 'agent-manager', x0: 2, y0: 2, x1: 15, y1: 11, doors: [[9, 12], [10, 12]] },
+  mgr:   { name: 'Coordinator', x0: 19, y0: 2, x1: 28, y1: 11, doors: [[23, 12], [24, 12]] },
+  wingB: { name: 'yt-pipeline', auto: true, x0: 32, y0: 2, x1: 45, y1: 11, doors: [[38, 12], [39, 12]] },
+  wingC: { name: 'portfolio-site', x0: 2, y0: 18, x1: 20, y1: 27, doors: [[11, 17], [12, 17]] },
+  brk:   { name: 'Break room', x0: 27, y0: 18, x1: 45, y1: 27, doors: [[33, 17], [34, 17]] },
+};
+carve(1, 13, 46, 16, 'hall');
+carve(22, 17, 25, 28, 'hall');
+for (const [id, r] of Object.entries(ROOMS)) {
+  carve(r.x0, r.y0, r.x1, r.y1, id);
+  for (const [x, y] of r.doors) { carve(x, y, x, y, 'hall'); grid[y][x].door = true; }
+}
+const FURN = [];
+function furn(type, x, y, w, h, room, extra = {}) {
+  const f = { type, x, y, w, h, room, ...extra };
+  FURN.push(f);
+  if (!f.decor) for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) grid[yy][xx].block = true;
+  return f;
+}
+for (const [x, y] of [[3, 3], [7, 3], [11, 3], [3, 7], [7, 7], [11, 7]]) furn('desk', x, y, 2, 1, 'wingA');
+for (const [x, y] of [[33, 3], [37, 3], [41, 3], [33, 7], [37, 7], [41, 7]]) furn('desk', x, y, 2, 1, 'wingB');
+for (const [x, y] of [[3, 19], [7, 19], [11, 19], [15, 19], [3, 23], [7, 23], [11, 23], [15, 23]]) furn('desk', x, y, 2, 1, 'wingC');
+const BIGDESK = furn('bigdesk', 22, 4, 4, 1, 'mgr');
+furn('table', 21, 8, 6, 2, 'mgr');
+furn('shelf', 25, 2, 3, 1, 'mgr');
+for (const [x, y, r] of [[2, 11, 'wingA'], [15, 11, 'wingA'], [32, 11, 'wingB'], [45, 11, 'wingB'], [19, 2, 'mgr'], [19, 11, 'mgr'], [28, 11, 'mgr'], [2, 27, 'wingC'], [20, 27, 'wingC'], [27, 27, 'brk'], [45, 27, 'brk']]) furn('plant', x, y, 1, 1, r);
+furn('couch', 28, 18, 4, 1, 'brk');
+furn('arcade', 40, 18, 1, 1, 'brk');
+furn('fridge', 43, 18, 1, 1, 'brk');
+furn('coffee', 45, 18, 1, 1, 'brk');
+furn('roundtable', 35, 22, 2, 2, 'brk');
+furn('board', 5, 1, 4, 1, 'wingA', { decor: true });
+furn('board', 36, 1, 4, 1, 'wingB', { decor: true });
+furn('board', 5, 17, 4, 1, 'wingC', { decor: true });
+const ELEVATOR = { x: 23, y: 29 };
+const BREAK_SPOTS = [[28, 19], [29, 19], [30, 19], [31, 19], [34, 21], [37, 21], [34, 24], [37, 24], [40, 19], [43, 19], [45, 19], [39, 23]];
+const SKINS = ['#f1c9a5', '#e0ac85', '#c68863', '#9a6243', '#6e432b'];
+const HAIRS = ['#2b1d16', '#5a3a22', '#c9a05a', '#1d1d26', '#8a3b2a', '#d8d2c4'];
+
+const walkable = (x, y) => x >= 0 && y >= 0 && x < COLS && y < ROWS && !grid[y][x].wall && !grid[y][x].block;
+const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+function bfs(sx, sy, tx, ty) {
+  if (!walkable(tx, ty)) return null;
+  const prev = new Int32Array(COLS * ROWS).fill(-1);
+  const s = sy * COLS + sx, goal = ty * COLS + tx;
+  const q = [s]; prev[s] = s;
+  for (let h = 0; h < q.length; h++) {
+    const c = q[h];
+    if (c === goal) break;
+    const cx = c % COLS, cy = (c / COLS) | 0;
+    for (const [dx, dy] of DIRS) {
+      const nx = cx + dx, ny = cy + dy;
+      if (!walkable(nx, ny)) continue;
+      const n = ny * COLS + nx;
+      if (prev[n] !== -1) continue;
+      prev[n] = c; q.push(n);
+    }
+  }
+  if (prev[goal] === -1) return null;
+  const out = [];
+  for (let c = goal; c !== s; c = prev[c]) out.push({ x: c % COLS, y: (c / COLS) | 0 });
+  return out.reverse();
+}
+
+// ---------- roles & content ----------
+const ROLE = {
+  manager:   { label: 'Coordinator',   color: '#f2b84b' },
+  frontend:  { label: 'Front end',     color: '#5b93f5' },
+  backend:   { label: 'Back end',      color: '#2fb79c' },
+  animation: { label: 'Animation',     color: '#d571d9' },
+  security:  { label: 'Cybersecurity', color: '#ec5f5f' },
+  imagegen:  { label: 'Image gen',     color: '#f38b3d' },
+  writer:    { label: 'Script writer', color: '#9b80f2' },
+  publisher: { label: 'Publisher',     color: '#53c6ea' },
+  subagent:  { label: 'Subagent',      color: '#b4b9c9' },
+};
+const ACT = {
+  manager: ['Splitting “wing signs” into 3 tasks', 'Routing audit request → Sentry', 'Reviewing Basalt’s diff', 'Updating the project board', 'Reading yt-pipeline run log'],
+  frontend: ['Read src/components/OfficeMap.tsx', 'Edit src/components/AgentPanel.tsx', 'Bash(npm run dev)', 'Grep "useAgentStore"', 'Bash(npx playwright test)', 'Edit src/styles/tokens.css'],
+  backend: ['Edit server/hooks.ts', 'Bash(curl localhost:4317/events)', 'Read server/db.ts', 'Edit server/ws.ts', 'Bash(npm test -- events)'],
+  animation: ['Edit sprites/walk-cycle.ts', 'Read lib/tween.ts', 'Edit renderer/iso.ts', 'Bash(node scripts/pack-sprites.js)'],
+  security: ['Grep "process.env"', 'Read server/auth.ts', 'Bash(npm audit --omit=dev)', 'Read .github/workflows/deploy.yml', 'Bash(semgrep --config auto)'],
+  imagegen: ['Generate thumb_v3.png (1280×720)', 'Read briefs/ep-14.md', 'Upscale thumb_v3.png', 'Bash(ffmpeg -i frames/%03d.png)'],
+  writer: ['Write scripts/ep-14.md', 'Read research/notes.md', 'WebSearch("tensor cores explained")', 'Edit scripts/ep-14.md'],
+  publisher: ['Bash(yt upload ep-13.mp4 --dry-run)', 'Read schedule.json', 'Edit metadata/ep-13.json', 'Bash(ffprobe ep-13.mp4)'],
+  subagent: ['Grep "onEvent"', 'Read docs/hooks.md', 'Glob "src/**/*.test.ts"', 'Read package.json'],
+};
+const PERMS = {
+  manager: ['Spawn 2 agents in portfolio-site'], frontend: ['Bash(npm install framer-motion)'], backend: ['Bash(git push origin main)', 'Bash(rm -rf .data/events.db)'],
+  animation: ['Bash(npm install pixi.js)'], security: ['Bash(nmap -sV localhost)', 'Read ~/.ssh/config'], imagegen: ['Bash(rm frames/*.png)'],
+  writer: ['WebFetch(arxiv.org/abs/2106.09685)'], publisher: ['Bash(yt upload ep-13.mp4 --public)'], subagent: ['Bash(npm test)'],
+};
+const SUBKINDS = [
+  { tag: 'explore', task: p => `Find every place ${p.name}'s change touches` },
+  { tag: 'review', task: () => 'Review the current diff for regressions' },
+  { tag: 'research', task: () => 'Look up the right ffmpeg flags' },
+  { tag: 'tests', task: () => 'Write tests for the event parser' },
+];
+const LINES = {
+  peer: [['Got a sec? This touches your code.', 'Sure, send me the diff.'], ['Does this API shape work for you?', 'Looks good. Ship it.', 'Merging.'], ['Main is red after my change.', 'Seeing it. One minute.'], ['Can I borrow your fixture?', "It's in test/fixtures."]],
+  boss: [['How is “{task}” going?', 'Most of the way. {act} now.'], ['Can you take one more ticket?', 'After this one, yes.'], ['Anything blocking you?', 'Nope, all clear.']],
+  report: [['Finished a chunk of {task}.', 'Nice. Grab the next one.'], ['I need a call on scope.', 'Keep it small. Ship v1.']],
+  audit: [['Quick security pass on your inputs?', "Go ahead, it's in server/."], ['Found a key in a log line.', 'Yikes. Rotating it.']],
+};
+const fill = (s, a) => s.replace('{task}', a.task.length > 26 ? a.task.slice(0, 25) + '…' : a.task).replace('{act}', a.activity.split('(')[0].split(' ')[0]);
+
+// ---------- agents ----------
+let now = 0;
+const agents = [];
+let uid = 0;
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+const seatOf = d => ({ x: d.x + d.w / 2, y: d.y + d.h + 0.45 });
+const tileOf = p => ({ x: Math.floor(p.x - 0.001), y: Math.floor(p.y) });
+
+function addAgent(o) {
+  const a = Object.assign({
+    id: ++uid, kind: 'session', status: 'working', dir: 'up', path: [], onArrive: null, next: now + rand(2, 7),
+    walkPhase: 0, bubble: null, log: [], chat: [], queue: [], pending: null, partner: null, goal: '',
+    skin: pick(SKINS), hair: pick(HAIRS), born: now,
+  }, o);
+  if (a.desk) a.home = seatOf(a.desk);
+  if (!a.x) { a.x = a.home.x; a.y = a.home.y; }
+  a.activity = a.activity || pick(ACT[a.role]);
+  agents.push(a);
+  return a;
+}
+const desksIn = room => FURN.filter(f => f.type === 'desk' && f.room === room);
+const ROSTER = [
+  { name: 'Atlas', role: 'manager', room: 'mgr', desk: BIGDESK, task: 'Coordinating three projects', conn: 'office', model: 'claude-opus-5-5' },
+  { name: 'Juniper', role: 'frontend', room: 'wingA', d: 0, task: 'Build the agent detail panel', conn: 'terminal', model: 'claude-opus-5-5' },
+  { name: 'Basalt', role: 'backend', room: 'wingA', d: 2, task: 'Hook receiver for session events', conn: 'terminal', model: 'claude-sonnet-5-5' },
+  { name: 'Kite', role: 'animation', room: 'wingA', d: 4, task: 'Four-direction walk cycle', conn: 'office', model: 'claude-sonnet-5-5' },
+  { name: 'Quill', role: 'writer', room: 'wingB', d: 0, task: 'Script for ep. 14, “Why GPUs love matrices”', conn: 'office', model: 'claude-opus-5-5' },
+  { name: 'Prism', role: 'imagegen', room: 'wingB', d: 2, task: 'Thumbnails for ep. 14', conn: 'office', model: 'claude-sonnet-5-5' },
+  { name: 'Relay', role: 'publisher', room: 'wingB', d: 4, task: 'Schedule ep. 13 for Friday 9:00', conn: 'office', model: 'claude-haiku-5-5' },
+  { name: 'Sentry', role: 'security', room: 'wingC', d: 1, task: 'Audit the contact form and API keys', conn: 'terminal', model: 'claude-opus-5-5' },
+  { name: 'Wren', role: 'frontend', room: 'wingC', d: 4, task: 'Responsive project gallery', conn: 'terminal', model: 'claude-sonnet-5-5' },
+  { name: 'Cobalt', role: 'backend', room: 'wingC', d: 6, task: 'Contact endpoint with rate limiting', conn: 'office', model: 'claude-sonnet-5-5' },
+];
+for (const r of ROSTER) addAgent({ ...r, desk: r.desk || desksIn(r.room)[r.d] });
+const MANAGER = agents[0];
+const byName = n => agents.find(a => a.name === n);
+
+const timers = [];
+const later = (s, fn) => timers.push({ t: now + s, fn });
+const say = (a, text) => { a.bubble = { text, until: now + 2.6 }; };
+const atHome = a => a.home && Math.hypot(a.x - a.home.x, a.y - a.home.y) < 0.05;
+function face(a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  a.dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
+}
+function logAct(a, text) { a.log.unshift(text); if (a.log.length > 7) a.log.pop(); }
+
+function walkTo(a, tile, final, onArrive, goal) {
+  const p = bfs(Math.floor(a.x), Math.floor(a.y), tile.x, tile.y) || [];
+  a.path = p.map(t => ({ x: t.x + 0.5, y: t.y + 0.5 }));
+  if (final) a.path.push(final);
+  a.onArrive = onArrive; a.status = 'walking'; a.goal = goal || '';
+}
+function goHome(a) {
+  walkTo(a, tileOf(a.home), a.home, () => { a.status = 'working'; a.dir = 'up'; a.next = now + rand(4, 8); }, 'Back to desk');
+}
+function spotNear(t) {
+  const b = tileOf(t);
+  for (const [dx, dy] of [[0, 1], [1, 1], [-1, 1], [1, 0], [-1, 0], [0, -1]]) if (walkable(b.x + dx, b.y + dy)) return { x: b.x + dx, y: b.y + dy };
+  return null;
+}
+function visit(a, b, lines, goal) {
+  const spot = spotNear(b);
+  if (!spot) return false;
+  walkTo(a, spot, null, () => {
+    if (b.status === 'working' && atHome(b)) talk(a, b, lines, () => goHome(a));
+    else { say(a, 'Left a note on your desk.'); later(1.5, () => goHome(a)); a.status = 'talking'; }
+  }, goal);
+  return true;
+}
+function talk(a, b, lines, after) {
+  a.status = 'talking'; a.partner = b; face(a, b);
+  b.status = 'talking'; b.partner = a; face(b, a);
+  const L = lines.map(s => fill(s, b));
+  say(a, L[0]);
+  later(1.9, () => say(b, L[1]));
+  if (L[2]) later(3.8, () => say(a, L[2]));
+  later(L[2] ? 5.4 : 4.2, () => {
+    if (b.partner === a && b.status === 'talking') { b.status = 'working'; b.partner = null; b.dir = 'up'; b.next = now + rand(3, 6); }
+    a.partner = null;
+    after();
+  });
+  logAct(a, `Talked with ${b.name}`); logAct(b, `Talked with ${a.name}`);
+}
+function newActivity(a) {
+  a.activity = pick(ACT[a.role]);
+  logAct(a, a.activity);
+  if (Math.random() < 0.55) event('PreToolUse', a, a.activity);
+  a.next = now + rand(4, 9);
+}
+const waitingCount = () => agents.filter(a => a.status === 'waiting').length;
+function askPermission(a) {
+  a.status = 'waiting'; a.pending = pick(PERMS[a.role]); a.waitSince = now;
+  event('Notification', a, `needs approval: ${a.pending}`);
+  logAct(a, `Waiting on you: ${a.pending}`);
+}
+function resolve(a, ok, auto) {
+  if (a.status !== 'waiting') return;
+  logAct(a, `${ok ? 'Approved' : 'Denied'}${auto ? ' by allowlist' : ''}: ${a.pending}`);
+  event(ok ? 'PostToolUse' : 'PermissionDenied', a, a.pending);
+  if (!ok) say(a, 'Okay, trying another way.');
+  a.pending = null; a.status = 'working'; a.next = now + rand(2, 5);
+  if (a === selected) renderPanel(true);
+}
+
+function decide(a) {
+  if (a.kind === 'subagent') {
+    if (now > a.born + a.life) return leave(a);
+    return newActivity(a);
+  }
+  const r = Math.random();
+  if (a === MANAGER) {
+    const targets = agents.filter(b => b !== a && b.kind === 'session' && b.status === 'working' && atHome(b));
+    if (r < 0.4 && targets.length) {
+      const b = pick(targets);
+      if (visit(a, b, pick(LINES.boss), `Checking in with ${b.name}`)) { logAct(a, `Checking in on ${b.name}`); return; }
+    }
+    return newActivity(a);
+  }
+  const mates = agents.filter(b => b !== a && b.room === a.room && b.kind === 'session' && b.status === 'working' && atHome(b));
+  if (r < 0.5) return newActivity(a);
+  if (r < 0.62 && mates.length) { const b = pick(mates); if (visit(a, b, pick(LINES.peer), `Visiting ${b.name}`)) return; }
+  if (r < 0.71 && MANAGER.status === 'working' && atHome(MANAGER)) { if (visit(a, MANAGER, pick(LINES.report), 'Reporting to Atlas')) return; }
+  if (r < 0.79) {
+    const [x, y] = pick(BREAK_SPOTS);
+    walkTo(a, { x, y }, null, () => {
+      a.status = 'break'; a.dir = 'up'; say(a, pick(['Coffee.', 'Stretching.', 'Two minutes.', 'Rebooting myself.']));
+      later(rand(5, 9), () => goHome(a));
+    }, 'Coffee break');
+    logAct(a, 'Coffee break');
+    return;
+  }
+  if (r < 0.85 && a.role === 'security') {
+    const others = agents.filter(b => b.room !== a.room && b.room !== 'mgr' && b.kind === 'session' && b.status === 'working' && atHome(b));
+    if (others.length) { const b = pick(others); if (visit(a, b, pick(LINES.audit), `Auditing ${b.name}'s work`)) return; }
+  }
+  if (r < 0.9 && waitingCount() < 2) return askPermission(a);
+  newActivity(a);
+}
+
+function spawnSub() {
+  const parents = agents.filter(a => a.kind === 'session' && a !== MANAGER && a.status === 'working');
+  if (!parents.length || agents.filter(a => a.kind === 'subagent').length >= 3) return;
+  const p = pick(parents), k = pick(SUBKINDS);
+  const used = new Set(agents.map(a => a.desk).filter(Boolean));
+  const free = desksIn(p.room).filter(d => !used.has(d));
+  const desk = free.length ? pick(free) : null;
+  const home = desk ? seatOf(desk) : (() => { const s = spotNear(p); return { x: s.x + 0.5, y: s.y + 0.5 }; })();
+  const s = addAgent({
+    name: `${p.name}·${k.tag}`, role: 'subagent', kind: 'subagent', parent: p, room: p.room, desk, home,
+    x: ELEVATOR.x + 0.5, y: ELEVATOR.y - 0.5, task: k.task(p), conn: 'office', model: 'claude-haiku-5-5', life: rand(16, 26), skin: p.skin, hair: '#c9ced9',
+  });
+  elevatorOpen = now + 1.8;
+  event('SubagentStart', s, `spawned by ${p.name}: ${s.task}`);
+  logAct(p, `Spawned subagent ${s.name}`);
+  say(p, 'Sending a helper.');
+  walkTo(s, tileOf(home), home, () => { s.status = 'working'; s.dir = 'up'; s.next = now + rand(3, 5); }, `Heading to ${ROOMS[p.room].name}`);
+}
+function leave(a) {
+  walkTo(a, { x: ELEVATOR.x, y: ELEVATOR.y - 1 }, { x: ELEVATOR.x + 0.5, y: ELEVATOR.y - 0.3 }, () => {
+    elevatorOpen = now + 1.4;
+    agents.splice(agents.indexOf(a), 1);
+    event('SubagentStop', a, `finished: ${a.task}`);
+    logAct(a.parent, `${a.name} finished`);
+    if (selected === a) select(a.parent);
+  }, 'Done. Leaving');
+  logAct(a, 'Finished, reporting back');
+}
+let elevatorOpen = 0;
+
+function update(dt) {
+  for (let i = timers.length - 1; i >= 0; i--) if (timers[i].t <= now) { const t = timers[i]; timers.splice(i, 1); t.fn(); }
+  for (const a of [...agents]) {
+    if (a.status === 'walking') {
+      if (!a.path.length) { const f = a.onArrive; a.onArrive = null; if (f) f(); else a.status = 'working'; continue; }
+      const t = a.path[0], dx = t.x - a.x, dy = t.y - a.y, d = Math.hypot(dx, dy), sp = (a.kind === 'subagent' ? 3.6 : 3.0) * dt;
+      if (d > 0.001) a.dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
+      if (d <= sp) { a.x = t.x; a.y = t.y; a.path.shift(); } else { a.x += dx / d * sp; a.y += dy / d * sp; }
+      a.walkPhase += dt * 7;
+    } else if (a.status === 'working' && now > a.next) decide(a);
+    else if (a.status === 'waiting' && now - a.waitSince > 50) resolve(a, true, true);
+  }
+  if (now > nextSpawn) { spawnSub(); nextSpawn = now + rand(10, 18); }
+}
+let nextSpawn = 3;
+
+// ---------- events ----------
+const feedEl = document.getElementById('feed');
+function event(kind, a, detail) {
+  const li = document.createElement('li');
+  const t = new Date().toLocaleTimeString([], { hour12: false });
+  li.innerHTML = '<span class="t"></span><span class="k"></span><span class="d"></span>';
+  li.children[0].textContent = t;
+  li.children[1].textContent = kind; li.children[1].dataset.k = kind;
+  li.children[2].textContent = `${a.name} · ${detail}`;
+  feedEl.prepend(li);
+  while (feedEl.children.length > 60) feedEl.lastChild.remove();
+}
+
+// ---------- drawing helpers ----------
+function shade(hex, amt) {
+  const n = parseInt(hex.slice(1), 16);
+  let r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+  const f = amt < 0 ? 0 : 255, p = Math.abs(amt);
+  r = Math.round((f - r) * p + r); g = Math.round((f - g) * p + g); b = Math.round((f - b) * p + b);
+  return `rgb(${r},${g},${b})`;
+}
+const mk = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+function nearFloor(x, y) {
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const nx = x + dx, ny = y + dy;
+    if (nx >= 0 && ny >= 0 && nx < COLS && ny < ROWS && !grid[ny][nx].wall) return true;
+  }
+  return false;
+}
+const isWall = (x, y) => x < 0 || y < 0 || x >= COLS || y >= ROWS || grid[y][x].wall;
+const seatedWorking = a => (a.status === 'working' || a.status === 'waiting') && atHome(a);
+function deskScreen(d) {
+  const a = agents.find(a => a.desk === d && atHome(a));
+  if (!a) return null;
+  if (a.status === 'waiting') return Math.floor(now * 3) % 2 ? '#f2b84b' : '#7a5a1f';
+  if (a.status === 'working') return a.kind === 'subagent' ? '#c9d2e6' : shade(ROLE[a.role].color, 0.25 + 0.1 * Math.sin(now * 5 + a.id));
+  return '#3b4870';
+}
+
+// 7x10 sprite, feet at (px, py)
+function sprite(g, px, py, a) {
+  const body = a.kind === 'subagent' ? ROLE.subagent.color : ROLE[a.role].color;
+  const arm = shade(body, -0.22), skin = a.skin, hair = a.hair;
+  const x = px - 3, y = py - 10;
+  const walking = a.status === 'walking', f = walking ? (Math.floor(a.walkPhase) & 1) : 0;
+  g.globalAlpha = a.kind === 'subagent' ? 0.9 : 1;
+  g.fillStyle = 'rgba(0,0,0,.28)'; g.fillRect(x, py - 1, 7, 2);
+  g.fillStyle = '#2a2c3a';
+  g.fillRect(x + 1, y + 7, 2, walking && f ? 2 : 3);
+  g.fillRect(x + 4, y + 7, 2, walking && !f ? 2 : 3);
+  g.fillStyle = body; g.fillRect(x + 1, y + 4, 5, 3);
+  g.fillStyle = arm; g.fillRect(x, y + 4, 1, 3); g.fillRect(x + 6, y + 4, 1, 3);
+  if (a.role === 'manager') { g.fillStyle = '#7a2e2e'; g.fillRect(x + 3, y + 4, 1, 2); }
+  g.fillStyle = skin;
+  if (seatedWorking(a) && a.status === 'working') { const k = Math.floor(now * 6 + a.id) & 1; g.fillRect(k ? x : x + 6, y + 6, 1, 1); }
+  else { g.fillRect(x, y + 7, 1, 1); g.fillRect(x + 6, y + 7, 1, 1); }
+  g.fillRect(x + 1, y + 1, 5, 3);
+  g.fillStyle = hair; g.fillRect(x + 1, y, 5, 1);
+  if (a.dir === 'up') g.fillRect(x + 1, y + 1, 5, 2);
+  else if (a.dir === 'down') { g.fillRect(x + 1, y + 1, 1, 1); g.fillRect(x + 5, y + 1, 1, 1); g.fillStyle = '#1d1b26'; g.fillRect(x + 2, y + 2, 1, 1); g.fillRect(x + 4, y + 2, 1, 1); }
+  else if (a.dir === 'left') { g.fillRect(x + 3, y + 1, 3, 1); g.fillStyle = '#1d1b26'; g.fillRect(x + 2, y + 2, 1, 1); }
+  else { g.fillRect(x + 1, y + 1, 3, 1); g.fillStyle = '#1d1b26'; g.fillRect(x + 4, y + 2, 1, 1); }
+  if (a.kind === 'subagent') { g.fillStyle = '#c9ced9'; g.fillRect(x + 3, y - 2, 1, 2); g.fillStyle = ROLE[a.parent.role].color; g.fillRect(x + 3, y - 3, 1, 1); }
+  g.globalAlpha = 1;
+}
+function rr(g, x, y, w, h, r) { g.beginPath(); g.roundRect ? g.roundRect(x, y, w, h, r) : g.rect(x, y, w, h); }
+
+// ---------- style 1: pixel top-down ----------
+const FLOOR_PX = { hall: ['#cdbf9f', '#c3b493'], mgr: ['#a36f44', '#8c5c36'], wingA: ['#566a8e', '#4e6084'], wingB: ['#70567f', '#664d74'], wingC: ['#507a5e', '#487055'], brk: ['#dcd0b4', '#d1c4a6'] };
+const Pixel = {
+  bg: '#191823', S: 1, ox: 0, oy: 0, stat: null, buf: null,
+  build() {
+    const c = mk(COLS * 8, ROWS * 8), g = c.getContext('2d');
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+      const X = x * 8, Y = y * 8, cell = grid[y][x];
+      if (cell.wall) {
+        if (!nearFloor(x, y)) { g.fillStyle = '#191823'; g.fillRect(X, Y, 8, 8); continue; }
+        const faceBelow = y + 1 < ROWS && !grid[y + 1][x].wall;
+        g.fillStyle = '#3b3350'; g.fillRect(X, Y, 8, 8);
+        if (faceBelow) { g.fillStyle = '#5b4f70'; g.fillRect(X, Y + 3, 8, 5); g.fillStyle = '#6a5d80'; g.fillRect(X, Y + 3, 8, 1); g.fillStyle = '#2b2538'; g.fillRect(X, Y + 7, 8, 1); }
+        continue;
+      }
+      const [a, b] = FLOOR_PX[cell.room];
+      if (cell.room === 'hall' || cell.room === 'brk') {
+        g.fillStyle = (x + y) & 1 ? a : b; g.fillRect(X, Y, 8, 8);
+        g.fillStyle = 'rgba(0,0,0,.07)'; g.fillRect(X, Y + 7, 8, 1); g.fillRect(X + 7, Y, 1, 8);
+      } else if (cell.room === 'mgr') {
+        g.fillStyle = a; g.fillRect(X, Y, 8, 8); g.fillStyle = b;
+        g.fillRect(X, Y + 3, 8, 1); g.fillRect(X, Y + 7, 8, 1);
+        g.fillRect(X + ((x * 5 + y * 3) % 8), Y, 1, 3); g.fillRect(X + ((x * 5 + y * 3 + 4) % 8), Y + 4, 1, 3);
+      } else {
+        g.fillStyle = a; g.fillRect(X, Y, 8, 8); g.fillStyle = b;
+        for (let i = 0; i < 4; i++) g.fillRect(X + (x * 13 + y * 7 + i * 5) % 8, Y + (x * 3 + y * 11 + i * 3) % 8, 1, 1);
+      }
+      if (isWall(x, y - 1)) { g.fillStyle = 'rgba(0,0,0,.2)'; g.fillRect(X, Y, 8, 2); }
+      if (isWall(x - 1, y)) { g.fillStyle = 'rgba(0,0,0,.1)'; g.fillRect(X, Y, 1, 8); }
+    }
+    for (const f of FURN) this.furn(g, f);
+    for (const d of FURN.filter(f => f.type === 'desk' || f.type === 'bigdesk')) {
+      const s = seatOf(d), X = Math.round(s.x * 8), Y = Math.round(s.y * 8);
+      g.fillStyle = '#3a3f55'; g.fillRect(X - 3, Y - 2, 6, 5); g.fillStyle = '#4b5270'; g.fillRect(X - 3, Y - 2, 6, 1);
+    }
+    for (const y of [7, 10]) for (let x = 21; x <= 26; x++) { g.fillStyle = '#3a3f55'; g.fillRect(x * 8 + 2, y * 8 + (y === 7 ? 3 : 1), 4, 4); }
+    return c;
+  },
+  furn(g, f) {
+    const X = f.x * 8, Y = f.y * 8, W = f.w * 8, H = f.h * 8;
+    switch (f.type) {
+      case 'desk': case 'bigdesk':
+        g.fillStyle = '#6e4429'; g.fillRect(X, Y + 2, W, 6);
+        g.fillStyle = f.type === 'bigdesk' ? '#7d5233' : '#a06c41'; g.fillRect(X, Y, W, 5);
+        g.fillStyle = f.type === 'bigdesk' ? '#91613d' : '#b57d4e'; g.fillRect(X, Y, W, 1);
+        g.fillStyle = '#e3ddcf'; g.fillRect(X + W / 2 - 3, Y + 3, 6, 1);
+        if (f.type === 'bigdesk') { g.fillStyle = '#f2efe6'; g.fillRect(X + 3, Y + 1, 4, 3); g.fillRect(X + W - 8, Y + 1, 3, 3); }
+        break;
+      case 'table':
+        g.fillStyle = '#7a4e2e'; g.fillRect(X, Y + H - 3, W, 3);
+        g.fillStyle = '#b07a4c'; g.fillRect(X, Y, W, H - 3); g.fillStyle = '#c28b5a'; g.fillRect(X, Y, W, 1);
+        g.fillStyle = '#f2efe6'; g.fillRect(X + 10, Y + 4, 5, 4); g.fillRect(X + 28, Y + 6, 4, 3);
+        break;
+      case 'roundtable':
+        g.fillStyle = '#7a4e2e'; g.fillRect(X + 3, Y + 4, W - 6, H - 5);
+        g.fillStyle = '#b07a4c'; g.fillRect(X + 3, Y + 1, W - 6, H - 5); g.fillRect(X + 1, Y + 3, W - 2, H - 9);
+        g.fillStyle = '#f5f1e8'; g.fillRect(X + 6, Y + 5, 2, 2); g.fillRect(X + 9, Y + 7, 2, 2);
+        break;
+      case 'plant':
+        g.fillStyle = '#a85a37'; g.fillRect(X + 2, Y + 4, 4, 4); g.fillStyle = '#c06b44'; g.fillRect(X + 1, Y + 4, 6, 1);
+        g.fillStyle = '#3d8a4b'; g.fillRect(X + 1, Y, 6, 4); g.fillRect(X + 2, Y - 2, 4, 2); g.fillRect(X, Y + 1, 8, 2);
+        g.fillStyle = '#62b26e'; g.fillRect(X + 2, Y - 1, 1, 1); g.fillRect(X + 5, Y + 1, 1, 1); g.fillRect(X + 3, Y + 2, 1, 1);
+        break;
+      case 'couch':
+        g.fillStyle = '#5f3043'; g.fillRect(X, Y, W, 8);
+        g.fillStyle = '#7b3f55'; g.fillRect(X + 1, Y + 3, W - 2, 5);
+        g.fillStyle = '#8f4d66'; g.fillRect(X + 2, Y + 3, W / 2 - 3, 3); g.fillRect(X + W / 2 + 1, Y + 3, W / 2 - 3, 3);
+        break;
+      case 'coffee':
+        g.fillStyle = '#30323f'; g.fillRect(X + 1, Y - 3, 6, 10); g.fillStyle = '#454858'; g.fillRect(X + 1, Y - 3, 6, 2);
+        g.fillStyle = '#ff5a5a'; g.fillRect(X + 5, Y, 1, 1); g.fillStyle = '#f5f1e8'; g.fillRect(X + 3, Y + 4, 2, 2);
+        break;
+      case 'fridge':
+        g.fillStyle = '#c8cfd9'; g.fillRect(X, Y - 4, 8, 12); g.fillStyle = '#e4e9ef'; g.fillRect(X, Y - 4, 8, 1);
+        g.fillStyle = '#9aa3b2'; g.fillRect(X, Y + 1, 8, 1); g.fillRect(X + 6, Y - 2, 1, 2); g.fillRect(X + 6, Y + 3, 1, 2);
+        break;
+      case 'arcade':
+        g.fillStyle = '#2f2560'; g.fillRect(X, Y - 5, 8, 13); g.fillStyle = '#59e0c9'; g.fillRect(X + 1, Y - 4, 6, 4);
+        g.fillStyle = '#ff5a8a'; g.fillRect(X + 2, Y + 2, 1, 1); g.fillStyle = '#f2b84b'; g.fillRect(X + 5, Y + 2, 1, 1);
+        break;
+      case 'shelf':
+        g.fillStyle = '#5a391f'; g.fillRect(X, Y - 3, W, 11);
+        for (let i = 0; i < W - 2; i += 2) { g.fillStyle = ['#c0504d', '#4f81bd', '#9bbb59', '#f2b84b', '#8064a2'][(i / 2) % 5]; g.fillRect(X + 1 + i, Y - 2, 1, 4); g.fillRect(X + 1 + ((i + 3) % (W - 2)), Y + 3, 1, 4); }
+        break;
+      case 'board':
+        g.fillStyle = '#9aa1ad'; g.fillRect(X + 1, Y + 3, W - 2, 5); g.fillStyle = '#f1f3f5'; g.fillRect(X + 2, Y + 4, W - 4, 3);
+        g.fillStyle = '#4f81bd'; g.fillRect(X + 4, Y + 5, 6, 1); g.fillStyle = '#c0504d'; g.fillRect(X + 13, Y + 5, 8, 1);
+        break;
+    }
+  },
+  frame(ctx, w, h) {
+    if (!this.stat) { this.stat = this.build(); this.buf = mk(COLS * 8, ROWS * 8); }
+    const g = this.buf.getContext('2d');
+    g.drawImage(this.stat, 0, 0);
+    for (const d of FURN) if (d.type === 'desk' || d.type === 'bigdesk') {
+      const cx = (d.x + d.w / 2) * 8, Y = d.y * 8, col = deskScreen(d) || '#2c3550';
+      g.fillStyle = '#20232e'; g.fillRect(cx - 4, Y - 4, 8, 6); g.fillStyle = col; g.fillRect(cx - 3, Y - 3, 6, 4);
+    }
+    const open = elevatorOpen > now, ex = ELEVATOR.x * 8, ey = ELEVATOR.y * 8;
+    g.fillStyle = '#5c6475'; g.fillRect(ex - 1, ey, 18, 8);
+    g.fillStyle = '#0f1116'; g.fillRect(ex, ey + 1, 16, 7);
+    g.fillStyle = '#a9b2c2'; const gap = open ? 5 : 0; g.fillRect(ex, ey + 1, 8 - gap, 7); g.fillRect(ex + 8 + gap, ey + 1, 8 - gap, 7);
+    g.fillStyle = open ? '#62d391' : '#f2b84b'; g.fillRect(ex + 7, ey, 2, 1);
+    for (const a of [...agents].sort((p, q) => p.y - q.y)) sprite(g, Math.round(a.x * 8), Math.round(a.y * 8) + 3, a);
+    this.S = Math.min(w / (COLS * 8), h / (ROWS * 8));
+    this.ox = (w - COLS * 8 * this.S) / 2; this.oy = (h - ROWS * 8 * this.S) / 2;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.buf, this.ox, this.oy, COLS * 8 * this.S, ROWS * 8 * this.S);
+  },
+  pt(x, y) { return { x: this.ox + x * 8 * this.S, y: this.oy + y * 8 * this.S }; },
+  feet(a) { return { x: this.ox + Math.round(a.x * 8) * this.S, y: this.oy + (Math.round(a.y * 8) + 3) * this.S }; },
+  top(a) { const f = this.feet(a); return { x: f.x, y: f.y - 11 * this.S }; },
+  center(a) { const f = this.feet(a); return { x: f.x, y: f.y - 5 * this.S }; },
+  unit() { return 8 * this.S; },
+};
+
+// ---------- style 2: isometric pixel ----------
+const FLOOR_ISO = { hall: ['#cdbf9f', '#c5b696'], mgr: ['#a36f44', '#996840'], wingA: ['#5b6f94', '#55688c'], wingB: ['#745a84', '#6d547c'], wingC: ['#557f63', '#4f775c'], brk: ['#dcd0b4', '#d2c6a9'] };
+const Iso = {
+  bg: '#151722', BW: 640, BH: 360, OX: 248, OY: 34, S: 1, ox: 0, oy: 0, stat: null, buf: null,
+  I(x, y) { return { x: Math.round((x - y) * 8 + this.OX), y: Math.round((x + y) * 4 + this.OY) }; },
+  dia(g, X, Y, l, r) {
+    for (let k = 0; k < 8; k++) {
+      const hw = k < 4 ? (k + 1) * 2 : (8 - k) * 2;
+      g.fillStyle = l; g.fillRect(X - hw, Y + k, hw, 1);
+      g.fillStyle = r; g.fillRect(X, Y + k, hw, 1);
+    }
+  },
+  prism(g, x, y, w, d, h, top, left, right) {
+    const tiles = [];
+    for (let ty = y; ty < y + d; ty++) for (let tx = x; tx < x + w; tx++) tiles.push([tx, ty]);
+    tiles.sort((p, q) => p[0] + p[1] - q[0] - q[1]);
+    for (const [tx, ty] of tiles) { const p = this.I(tx, ty); for (let k = 0; k < h; k++) this.dia(g, p.x, p.y - k, left, right); }
+    for (const [tx, ty] of tiles) { const p = this.I(tx, ty); this.dia(g, p.x, p.y - h, top, top); }
+  },
+  build() {
+    const c = mk(this.BW, this.BH), g = c.getContext('2d');
+    for (let s = 0; s < COLS + ROWS; s++) for (let y = 0; y < ROWS; y++) {
+      const x = s - y; if (x < 0 || x >= COLS) continue;
+      const cell = grid[y][x];
+      if (cell.wall) continue;
+      const [a, b] = FLOOR_ISO[cell.room], p = this.I(x, y), col = (x + y) & 1 ? a : b;
+      this.dia(g, p.x, p.y, col, col);
+    }
+    const walls = [];
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (grid[y][x].wall && nearFloor(x, y)) walls.push([x, y]);
+    walls.sort((p, q) => p[0] + p[1] - q[0] - q[1]);
+    for (const [x, y] of walls) { const p = this.I(x, y); for (let k = 0; k < 7; k++) this.dia(g, p.x, p.y - k, '#3e3556', '#2e2742'); }
+    for (const [x, y] of walls) { const p = this.I(x, y); this.dia(g, p.x, p.y - 7, '#5b4f73', '#5b4f73'); }
+    return c;
+  },
+  drawFurn(g, f) {
+    const P = (k, a, b, c) => this.prism(g, f.x, f.y, f.w, f.h, k, a, b, c);
+    switch (f.type) {
+      case 'desk': P(4, '#b07848', '#8a5a36', '#6e4429'); break;
+      case 'bigdesk': P(4, '#8a5a38', '#6e4429', '#583520'); break;
+      case 'table': P(4, '#b98352', '#8a5a36', '#6e4429'); break;
+      case 'roundtable': P(4, '#b98352', '#8a5a36', '#6e4429'); break;
+      case 'couch': P(4, '#8f4d66', '#6b3549', '#552a3a'); break;
+      case 'coffee': P(10, '#4a4d5e', '#30323f', '#25262f'); break;
+      case 'fridge': P(12, '#eef1f5', '#c8cfd9', '#a9b2c2'); break;
+      case 'arcade': P(11, '#59e0c9', '#3a2f72', '#2a2257'); break;
+      case 'shelf': P(12, '#7a5231', '#5a391f', '#47301b'); break;
+      case 'plant': {
+        const p = this.I(f.x + 0.5, f.y + 0.5);
+        g.fillStyle = '#a85a37'; g.fillRect(p.x - 2, p.y - 5, 5, 5); g.fillStyle = '#c06b44'; g.fillRect(p.x - 3, p.y - 5, 7, 1);
+        g.fillStyle = '#3d8a4b'; g.fillRect(p.x - 4, p.y - 11, 9, 6); g.fillRect(p.x - 2, p.y - 13, 5, 2);
+        g.fillStyle = '#62b26e'; g.fillRect(p.x - 2, p.y - 10, 1, 1); g.fillRect(p.x + 2, p.y - 12, 1, 1);
+        return;
+      }
+      default: return;
+    }
+    if (f.type === 'desk' || f.type === 'bigdesk') {
+      const p = this.I(f.x + f.w / 2, f.y + 0.5), col = deskScreen(f) || '#2c3550';
+      g.fillStyle = '#20232e'; g.fillRect(p.x - 4, p.y - 13, 8, 7); g.fillStyle = col; g.fillRect(p.x - 3, p.y - 12, 6, 5);
+      g.fillStyle = '#20232e'; g.fillRect(p.x, p.y - 6, 1, 2);
+    }
+  },
+  frame(ctx, w, h) {
+    if (!this.stat) { this.stat = this.build(); this.buf = mk(this.BW, this.BH); }
+    const g = this.buf.getContext('2d');
+    g.clearRect(0, 0, this.BW, this.BH);
+    g.drawImage(this.stat, 0, 0);
+    const items = [];
+    for (const f of FURN) if (!f.decor) items.push({ k: f.x + f.w / 2 + f.y + f.h / 2, f });
+    for (const a of agents) items.push({ k: a.x + a.y + 0.2, a });
+    const open = elevatorOpen > now;
+    items.push({ k: ELEVATOR.x + 1 + ELEVATOR.y + 0.5, el: true });
+    items.sort((p, q) => p.k - q.k);
+    for (const it of items) {
+      if (it.f) this.drawFurn(g, it.f);
+      else if (it.a) { const p = this.I(it.a.x, it.a.y); sprite(g, p.x, p.y + 1, it.a); }
+      else {
+        this.prism(g, ELEVATOR.x, ELEVATOR.y, 2, 1, 13, '#c3cad6', '#8f98a8', '#737c8c');
+        const p = this.I(ELEVATOR.x + 1, ELEVATOR.y + 0.5);
+        g.fillStyle = open ? '#62d391' : '#f2b84b'; g.fillRect(p.x - 1, p.y - 16, 3, 2);
+      }
+    }
+    this.S = Math.min(w / this.BW, h / this.BH);
+    this.ox = (w - this.BW * this.S) / 2; this.oy = (h - this.BH * this.S) / 2;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.buf, this.ox, this.oy, this.BW * this.S, this.BH * this.S);
+  },
+  pt(x, y) { const p = this.I(x, y); return { x: this.ox + p.x * this.S, y: this.oy + p.y * this.S }; },
+  feet(a) { const p = this.I(a.x, a.y); return { x: this.ox + p.x * this.S, y: this.oy + (p.y + 1) * this.S }; },
+  top(a) { const f = this.feet(a); return { x: f.x, y: f.y - 11 * this.S }; },
+  center(a) { const f = this.feet(a); return { x: f.x, y: f.y - 5 * this.S }; },
+  unit() { return 8 * this.S; },
+};
+
+// ---------- style 3: blueprint ----------
+const INK = '#e9f2ff';
+const Blueprint = {
+  bg: '#163f6c', T: 10, ox: 0, oy: 0, stat: null, key: '',
+  layout(w, h) { this.T = Math.min(w / COLS, h / ROWS); this.ox = (w - COLS * this.T) / 2; this.oy = (h - ROWS * this.T) / 2; },
+  build(w, h, dpr) {
+    const c = mk(Math.round(w * dpr), Math.round(h * dpr)), g = c.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const T = this.T, ox = this.ox, oy = this.oy;
+    g.fillStyle = this.bg; g.fillRect(0, 0, w, h);
+    g.lineWidth = 1;
+    for (let x = 0; x <= COLS; x++) { g.strokeStyle = x % 4 ? 'rgba(233,242,255,.05)' : 'rgba(233,242,255,.11)'; g.beginPath(); g.moveTo(ox + x * T, oy); g.lineTo(ox + x * T, oy + ROWS * T); g.stroke(); }
+    for (let y = 0; y <= ROWS; y++) { g.strokeStyle = y % 4 ? 'rgba(233,242,255,.05)' : 'rgba(233,242,255,.11)'; g.beginPath(); g.moveTo(ox, oy + y * T); g.lineTo(ox + COLS * T, oy + y * T); g.stroke(); }
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (grid[y][x].wall && nearFloor(x, y)) { g.fillStyle = 'rgba(233,242,255,.13)'; g.fillRect(ox + x * T, oy + y * T, T, T); }
+    g.strokeStyle = INK; g.lineWidth = Math.max(1.5, T * 0.12); g.lineCap = 'square';
+    g.beginPath();
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+      if (grid[y][x].wall) continue;
+      const X = ox + x * T, Y = oy + y * T;
+      if (isWall(x, y - 1)) { g.moveTo(X, Y); g.lineTo(X + T, Y); }
+      if (isWall(x, y + 1)) { g.moveTo(X, Y + T); g.lineTo(X + T, Y + T); }
+      if (isWall(x - 1, y)) { g.moveTo(X, Y); g.lineTo(X, Y + T); }
+      if (isWall(x + 1, y)) { g.moveTo(X + T, Y); g.lineTo(X + T, Y + T); }
+    }
+    g.stroke();
+    g.lineWidth = 1; g.setLineDash([3, 3]); g.strokeStyle = 'rgba(233,242,255,.6)';
+    for (const r of Object.values(ROOMS)) {
+      const [dx, dy] = r.doors[0], top = dy < 13;
+      const hx = ox + dx * T, hy = oy + (top ? dy : dy + 1) * T;
+      g.beginPath(); top ? g.arc(hx, hy, 2 * T, -Math.PI / 2, 0) : g.arc(hx, hy, 2 * T, 0, Math.PI / 2); g.stroke();
+      g.beginPath(); g.moveTo(hx, hy); g.lineTo(hx, hy + (top ? -2 * T : 2 * T)); g.stroke();
+    }
+    g.setLineDash([]);
+    g.strokeStyle = 'rgba(233,242,255,.85)'; g.fillStyle = INK;
+    const fs = Math.max(7, T * 0.5);
+    for (const f of FURN) {
+      const X = ox + f.x * T, Y = oy + f.y * T, W = f.w * T, H = f.h * T;
+      g.lineWidth = 1;
+      if (f.type === 'plant') { g.beginPath(); g.arc(X + T / 2, Y + T / 2, T * 0.36, 0, 7); g.stroke(); g.beginPath(); g.moveTo(X + T * .3, Y + T * .5); g.lineTo(X + T * .7, Y + T * .5); g.moveTo(X + T * .5, Y + T * .3); g.lineTo(X + T * .5, Y + T * .7); g.stroke(); continue; }
+      if (f.type === 'roundtable') { g.beginPath(); g.arc(X + W / 2, Y + H / 2, W * 0.42, 0, 7); g.stroke(); continue; }
+      if (f.type === 'board') { g.strokeRect(X + T * .15, Y + T * .55, W - T * .3, T * .25); continue; }
+      g.strokeRect(X + 0.5, Y + T * 0.1, W - 1, H - T * 0.2);
+      if (f.type === 'desk' || f.type === 'bigdesk') { const s = seatOf(f); g.beginPath(); g.arc(ox + s.x * T, oy + s.y * T, T * 0.26, 0, 7); g.stroke(); }
+      if (f.type === 'couch') { g.beginPath(); g.moveTo(X, Y + H * .45); g.lineTo(X + W, Y + H * .45); g.moveTo(X + W / 2, Y + H * .45); g.lineTo(X + W / 2, Y + H); g.stroke(); }
+      if (f.type === 'table') for (let i = 0; i < 6; i++) for (const yy of [7.55, 10.45]) { g.beginPath(); g.arc(ox + (21.5 + i) * T, oy + yy * T, T * 0.22, 0, 7); g.stroke(); }
+      if (['coffee', 'fridge', 'arcade', 'shelf'].includes(f.type)) {
+        g.beginPath(); g.moveTo(X, Y + T * .1); g.lineTo(X + W, Y + H - T * .1); g.moveTo(X + W, Y + T * .1); g.lineTo(X, Y + H - T * .1); g.stroke();
+      }
+    }
+    const EX = ox + ELEVATOR.x * T, EY = oy + ELEVATOR.y * T;
+    g.strokeRect(EX, EY + 1, 2 * T, T - 2); g.beginPath(); g.moveTo(EX, EY + 1); g.lineTo(EX + 2 * T, EY + T - 1); g.moveTo(EX + 2 * T, EY + 1); g.lineTo(EX, EY + T - 1); g.stroke();
+    g.font = `500 ${fs}px "IBM Plex Mono", monospace`; g.textBaseline = 'alphabetic';
+    for (const r of Object.values(ROOMS)) {
+      const X = ox + (r.x0 + 1.4) * T, Y = oy + (r.y1 + 0.75) * T;
+      g.fillStyle = 'rgba(233,242,255,.55)';
+      g.fillText(`${r.x1 - r.x0 + 1}.0 × ${r.y1 - r.y0 + 1}.0 m`, X, Y);
+    }
+    g.fillStyle = 'rgba(233,242,255,.7)';
+    g.fillText('AGENT OFFICE · LEVEL 1 · 1 SQ = 1 M · DWG A-101', ox + 1.3 * T, oy + 29.7 * T);
+    g.fillText('LIFT', EX + 2.3 * T, EY + T * .75);
+    return c;
+  },
+  frame(ctx, w, h, dpr) {
+    const key = `${w}x${h}x${dpr}`;
+    if (this.key !== key) { this.layout(w, h); this.stat = this.build(w, h, dpr); this.key = key; }
+    ctx.drawImage(this.stat, 0, 0, w, h);
+    const T = this.T, ox = this.ox, oy = this.oy;
+    for (const d of FURN) if (d.type === 'desk' || d.type === 'bigdesk') {
+      const col = deskScreen(d); if (!col) continue;
+      ctx.fillStyle = col; ctx.fillRect(ox + (d.x + d.w / 2 - 0.4) * T, oy + (d.y + 0.25) * T, 0.8 * T, 0.18 * T);
+    }
+    if (elevatorOpen > now) { ctx.fillStyle = 'rgba(98,211,145,.35)'; ctx.fillRect(ox + ELEVATOR.x * T, oy + ELEVATOR.y * T, 2 * T, T); }
+    ctx.lineWidth = 1.2;
+    for (const a of agents) if (a.status === 'walking' && a.path.length) {
+      ctx.strokeStyle = a.kind === 'subagent' ? 'rgba(233,242,255,.5)' : ROLE[a.role].color; ctx.setLineDash([2, 4]); ctx.lineDashOffset = -now * 12;
+      ctx.beginPath(); ctx.moveTo(ox + a.x * T, oy + a.y * T); for (const p of a.path) ctx.lineTo(ox + p.x * T, oy + p.y * T); ctx.stroke();
+      const e = a.path[a.path.length - 1]; ctx.setLineDash([]); ctx.strokeRect(ox + e.x * T - 3, oy + e.y * T - 3, 6, 6);
+    }
+    ctx.setLineDash([]);
+    for (const a of agents) if (a.status === 'talking' && a.partner && a.id < a.partner.id) {
+      ctx.strokeStyle = 'rgba(242,184,75,.9)'; ctx.setLineDash([4, 3]);
+      ctx.beginPath(); ctx.moveTo(ox + a.x * T, oy + a.y * T); ctx.lineTo(ox + a.partner.x * T, oy + a.partner.y * T); ctx.stroke(); ctx.setLineDash([]);
+    }
+    const fs = Math.max(8, T * 0.42);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = `600 ${fs}px "IBM Plex Mono", monospace`;
+    for (const a of agents) {
+      const X = ox + a.x * T, Y = oy + a.y * T, sub = a.kind === 'subagent', R = T * (sub ? 0.28 : 0.38);
+      const col = sub ? INK : ROLE[a.role].color;
+      if (a.status === 'waiting') { ctx.strokeStyle = 'rgba(242,184,75,.8)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(X, Y, R + 3 + 3 * Math.abs(Math.sin(now * 3)), 0, 7); ctx.stroke(); }
+      ctx.fillStyle = this.bg; ctx.strokeStyle = col; ctx.lineWidth = 2;
+      if (sub) ctx.setLineDash([2, 2]);
+      ctx.beginPath(); ctx.arc(X, Y, R, 0, 7); ctx.fill(); ctx.stroke(); ctx.setLineDash([]);
+      const v = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }[a.dir];
+      ctx.beginPath(); ctx.moveTo(X + v[0] * R, Y + v[1] * R); ctx.lineTo(X + v[0] * (R + 4), Y + v[1] * (R + 4)); ctx.stroke();
+      if (!sub) { ctx.fillStyle = col; ctx.fillText(a.name[0], X, Y + 0.5); }
+    }
+    ctx.textAlign = 'left';
+  },
+  pt(x, y) { return { x: this.ox + x * this.T, y: this.oy + y * this.T }; },
+  feet(a) { return this.pt(a.x, a.y); },
+  top(a) { const f = this.feet(a); return { x: f.x, y: f.y - this.T * 0.45 }; },
+  center(a) { return this.feet(a); },
+  unit() { return this.T; },
+};
+
+// ---------- style 4: cozy flat ----------
+const FLOOR_CZ = { hall: '#e6e0d4', mgr: '#d6b08a', wingA: '#cad6ea', wingB: '#dcd1ea', wingC: '#cfe2d2', brk: '#f0e5d0' };
+const Cozy = {
+  bg: '#2b303b', T: 10, ox: 0, oy: 0, stat: null, key: '',
+  layout(w, h) { this.T = Math.min(w / COLS, h / ROWS); this.ox = (w - COLS * this.T) / 2; this.oy = (h - ROWS * this.T) / 2; },
+  build(w, h, dpr) {
+    const c = mk(Math.round(w * dpr), Math.round(h * dpr)), g = c.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const T = this.T, ox = this.ox, oy = this.oy;
+    g.fillStyle = this.bg; g.fillRect(0, 0, w, h);
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+      const cell = grid[y][x], X = ox + x * T, Y = oy + y * T;
+      if (cell.wall) continue;
+      g.fillStyle = FLOOR_CZ[cell.room]; g.fillRect(X - .5, Y - .5, T + 1, T + 1);
+      if (cell.room === 'hall' && (x + y) % 2) { g.fillStyle = 'rgba(120,100,70,.05)'; g.fillRect(X, Y, T, T); }
+      if (cell.room === 'brk') { g.strokeStyle = 'rgba(150,120,80,.12)'; g.lineWidth = 1; g.strokeRect(X + .5, Y + .5, T - 1, T - 1); }
+      if (cell.room === 'mgr') { g.fillStyle = 'rgba(110,70,35,.16)'; g.fillRect(X, Y + T * .48, T, 1); g.fillRect(X + ((x * 7 + y * 3) % 10) / 10 * T, Y, 1, T * .48); }
+    }
+    for (const r of Object.values(ROOMS)) if (r.name !== 'Break room' && r.name !== 'Coordinator') {
+      g.strokeStyle = 'rgba(255,255,255,.55)'; g.lineWidth = 1.5; g.setLineDash([]);
+      rr(g, ox + (r.x0 + .5) * T, oy + (r.y0 + .5) * T, (r.x1 - r.x0) * T, (r.y1 - r.y0) * T, T * .6); g.stroke();
+    }
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+      if (grid[y][x].wall) continue;
+      const X = ox + x * T, Y = oy + y * T;
+      if (isWall(x, y - 1)) { const gr = g.createLinearGradient(0, Y, 0, Y + T * .45); gr.addColorStop(0, 'rgba(70,55,40,.22)'); gr.addColorStop(1, 'rgba(70,55,40,0)'); g.fillStyle = gr; g.fillRect(X, Y, T, T * .45); }
+      if (isWall(x - 1, y)) { const gr = g.createLinearGradient(X, 0, X + T * .3, 0); gr.addColorStop(0, 'rgba(70,55,40,.14)'); gr.addColorStop(1, 'rgba(70,55,40,0)'); g.fillStyle = gr; g.fillRect(X, Y, T * .3, T); }
+    }
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+      if (!grid[y][x].wall || !nearFloor(x, y)) continue;
+      const X = ox + x * T, Y = oy + y * T;
+      g.fillStyle = '#efe7da'; g.fillRect(X - .5, Y - .5, T + 1, T + 1);
+      if (!isWall(x, y + 1)) { g.fillStyle = '#d4c6b0'; g.fillRect(X - .5, Y + T * .72, T + 1, T * .28 + .5); }
+    }
+    for (const f of FURN) this.furn(g, f, T, ox, oy);
+    const EX = ox + ELEVATOR.x * T, EY = oy + ELEVATOR.y * T;
+    g.fillStyle = '#8e97a6'; rr(g, EX - 2, EY + 1, 2 * T + 4, T * .8, 3); g.fill();
+    return c;
+  },
+  furn(g, f, T, ox, oy) {
+    const X = ox + f.x * T, Y = oy + f.y * T, W = f.w * T, H = f.h * T;
+    const shadow = (x, y, w, h, r) => { g.fillStyle = 'rgba(60,45,30,.16)'; rr(g, x + T * .08, y + T * .14, w, h, r); g.fill(); };
+    switch (f.type) {
+      case 'desk': case 'bigdesk': {
+        const s = seatOf(f);
+        g.fillStyle = '#8e98aa'; g.beginPath(); g.arc(ox + s.x * T, oy + s.y * T + T * .05, T * .36, 0, 7); g.fill();
+        g.fillStyle = '#7a8496'; g.beginPath(); g.arc(ox + s.x * T, oy + s.y * T + T * .05, T * .36, 0.15 * Math.PI, 0.85 * Math.PI); g.lineWidth = T * .12; g.strokeStyle = '#6d7789'; g.stroke();
+        shadow(X + T * .05, Y + T * .1, W - T * .1, H - T * .1, T * .18);
+        g.fillStyle = f.type === 'bigdesk' ? '#b98a5e' : '#fbf8f2'; rr(g, X + T * .05, Y + T * .1, W - T * .1, H - T * .1, T * .18); g.fill();
+        g.strokeStyle = f.type === 'bigdesk' ? '#9c6f47' : '#e1d7c5'; g.lineWidth = 1; g.stroke();
+        if (f.type === 'bigdesk') { g.fillStyle = '#fbf8f2'; g.fillRect(X + T * .4, Y + T * .3, T * .5, T * .4); g.fillStyle = '#5fa36b'; g.beginPath(); g.arc(X + W - T * .5, Y + T * .5, T * .2, 0, 7); g.fill(); }
+        break;
+      }
+      case 'table': {
+        g.fillStyle = '#8e98aa';
+        for (let i = 0; i < 6; i++) for (const yy of [7.6, 10.4]) { g.beginPath(); g.arc(ox + (21.5 + i) * T, oy + yy * T, T * .28, 0, 7); g.fill(); }
+        shadow(X, Y + T * .1, W, H - T * .2, T * .4);
+        g.fillStyle = '#c79a6a'; rr(g, X, Y + T * .1, W, H - T * .2, T * .4); g.fill();
+        g.fillStyle = 'rgba(255,255,255,.18)'; rr(g, X + T * .2, Y + T * .25, W - T * .4, T * .2, T * .1); g.fill();
+        break;
+      }
+      case 'roundtable':
+        g.fillStyle = 'rgba(60,45,30,.16)'; g.beginPath(); g.arc(X + W / 2 + T * .08, Y + H / 2 + T * .14, W * .42, 0, 7); g.fill();
+        g.fillStyle = '#c79a6a'; g.beginPath(); g.arc(X + W / 2, Y + H / 2, W * .42, 0, 7); g.fill();
+        g.fillStyle = '#fbf8f2'; g.beginPath(); g.arc(X + W * .4, Y + H * .45, T * .15, 0, 7); g.arc(X + W * .62, Y + H * .58, T * .15, 0, 7); g.fill();
+        break;
+      case 'plant':
+        g.fillStyle = 'rgba(60,45,30,.16)'; g.beginPath(); g.arc(X + T * .58, Y + T * .64, T * .45, 0, 7); g.fill();
+        g.fillStyle = '#c98b63'; g.beginPath(); g.arc(X + T / 2, Y + T / 2, T * .32, 0, 7); g.fill();
+        for (const [dx, dy, r, c] of [[-.18, -.1, .26, '#4f9660'], [.16, -.14, .24, '#5fa36b'], [0, .14, .25, '#4f9660'], [.02, -.02, .2, '#7cc086']]) { g.fillStyle = c; g.beginPath(); g.arc(X + T * (.5 + dx), Y + T * (.5 + dy), T * r, 0, 7); g.fill(); }
+        break;
+      case 'couch':
+        shadow(X, Y + T * .05, W, H, T * .3);
+        g.fillStyle = '#5d7fa5'; rr(g, X, Y + T * .05, W, H, T * .3); g.fill();
+        g.fillStyle = '#7898bd'; rr(g, X + T * .2, Y + T * .38, W / 2 - T * .3, H * .5, T * .15); g.fill(); rr(g, X + W / 2 + T * .1, Y + T * .38, W / 2 - T * .3, H * .5, T * .15); g.fill();
+        break;
+      case 'coffee': shadow(X + T * .1, Y + T * .1, W - T * .2, H - T * .2, 4); g.fillStyle = '#3e4350'; rr(g, X + T * .1, Y + T * .1, W - T * .2, H - T * .2, 4); g.fill(); g.fillStyle = '#ef6b6b'; g.beginPath(); g.arc(X + T * .7, Y + T * .3, T * .06, 0, 7); g.fill(); break;
+      case 'fridge': shadow(X + T * .05, Y + T * .05, W - T * .1, H - T * .1, 4); g.fillStyle = '#f4f6f8'; rr(g, X + T * .05, Y + T * .05, W - T * .1, H - T * .1, 4); g.fill(); g.strokeStyle = '#c3cad6'; g.lineWidth = 1; g.stroke(); break;
+      case 'arcade': shadow(X + T * .05, Y + T * .05, W - T * .1, H - T * .1, 4); g.fillStyle = '#4b3f8f'; rr(g, X + T * .05, Y + T * .05, W - T * .1, H - T * .1, 4); g.fill(); g.fillStyle = '#59e0c9'; g.fillRect(X + T * .2, Y + T * .15, W - T * .4, T * .3); break;
+      case 'shelf': shadow(X, Y, W, H * .8, 3); g.fillStyle = '#9b7451'; rr(g, X, Y, W, H * .8, 3); g.fill(); for (let i = 0; i < 9; i++) { g.fillStyle = ['#c0504d', '#4f81bd', '#9bbb59', '#f2b84b', '#8064a2'][i % 5]; g.fillRect(X + T * .1 + i * W / 9.5, Y + T * .12, W / 14, H * .5); } break;
+      case 'board': g.fillStyle = '#ffffff'; rr(g, X + T * .1, Y + T * .15, W - T * .2, T * .5, 3); g.fill(); g.fillStyle = '#4f81bd'; g.fillRect(X + T * .4, Y + T * .35, T * .9, 1.5); g.fillStyle = '#c0504d'; g.fillRect(X + T * 1.6, Y + T * .35, T * 1.2, 1.5); break;
+    }
+  },
+  agent(ctx, a) {
+    const T = this.T, X = this.ox + a.x * T, Y = this.oy + a.y * T, sub = a.kind === 'subagent';
+    const s = sub ? 0.78 : 1, R = T * 0.4 * s, bob = a.status === 'walking' ? Math.sin(a.walkPhase * Math.PI) * T * .03 : 0;
+    const col = sub ? ROLE.subagent.color : ROLE[a.role].color, side = a.dir === 'left' || a.dir === 'right';
+    ctx.fillStyle = 'rgba(40,30,20,.2)'; ctx.beginPath(); ctx.ellipse(X + T * .06, Y + T * .12, R * 1.1, R * .8, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = col; ctx.strokeStyle = shade(col, -0.25); ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.ellipse(X, Y + bob, side ? R * .62 : R * 1.05, side ? R * 1.05 : R * .62, 0, 0, 7); ctx.fill(); ctx.stroke();
+    if (sub) { ctx.strokeStyle = ROLE[a.parent.role].color; ctx.lineWidth = 2; ctx.stroke(); }
+    const v = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }[a.dir];
+    ctx.fillStyle = a.hair; ctx.beginPath(); ctx.arc(X, Y + bob, R * .6, 0, 7); ctx.fill();
+    ctx.fillStyle = a.skin; ctx.beginPath(); ctx.arc(X + v[0] * R * .22, Y + bob + v[1] * R * .22, R * .4, 0, 7); ctx.fill();
+    if (a.role === 'manager') { ctx.fillStyle = '#fff3d6'; ctx.beginPath(); ctx.arc(X - v[1] * R * .8, Y + v[0] * R * .8, R * .16, 0, 7); ctx.fill(); }
+  },
+  frame(ctx, w, h, dpr) {
+    const key = `${w}x${h}x${dpr}`;
+    if (this.key !== key) { this.layout(w, h); this.stat = this.build(w, h, dpr); this.key = key; }
+    ctx.drawImage(this.stat, 0, 0, w, h);
+    const T = this.T, ox = this.ox, oy = this.oy;
+    for (const d of FURN) if (d.type === 'desk' || d.type === 'bigdesk') {
+      const col = deskScreen(d) || '#5d6576', cx = ox + (d.x + d.w / 2) * T, Y = oy + d.y * T;
+      ctx.fillStyle = '#3b404c'; rr(ctx, cx - T * .45, Y + T * .22, T * .9, T * .5, 3); ctx.fill();
+      ctx.fillStyle = col; ctx.fillRect(cx - T * .38, Y + T * .27, T * .76, T * .1);
+    }
+    const EX = ox + ELEVATOR.x * T, EY = oy + ELEVATOR.y * T, gap = elevatorOpen > now ? T * .5 : 0;
+    ctx.fillStyle = '#3a3f4b'; ctx.fillRect(EX, EY + 2, 2 * T, T * .7);
+    ctx.fillStyle = '#c3cad6'; ctx.fillRect(EX, EY + 2, T - gap, T * .7); ctx.fillRect(EX + T + gap, EY + 2, T - gap, T * .7);
+    for (const a of [...agents].sort((p, q) => p.y - q.y)) this.agent(ctx, a);
+  },
+  pt(x, y) { return { x: this.ox + x * this.T, y: this.oy + y * this.T }; },
+  feet(a) { return this.pt(a.x, a.y); },
+  top(a) { const f = this.feet(a); return { x: f.x, y: f.y - this.T * 0.45 }; },
+  center(a) { return this.feet(a); },
+  unit() { return this.T; },
+};
+
+const STYLES = {
+  pixel: { label: 'Pixel', r: Pixel, note: '<b>Pixel top-down.</b> A 16-bit interior seen from above, like a classic RPG. Chunky and readable, and the cheapest to animate with sprite sheets later.' },
+  iso: { label: 'Isometric', r: Iso, note: '<b>Isometric pixel.</b> A cutaway dollhouse with depth. More charm, but harder to build: depth sorting, taller art, and four facing directions per sprite.' },
+  blueprint: { label: 'Blueprint', r: Blueprint, note: '<b>Blueprint.</b> An architect’s plan. Walking routes, conversations, and who is waiting on you are the easiest to read here. The least playful option.' },
+  cozy: { label: 'Cozy flat', r: Cozy, note: '<b>Cozy flat.</b> A smooth illustrated top-down view. Stays sharp at any screen size and is the easiest to restyle or add art to.' },
+};
+
+// ---------- overlays ----------
+let style = 'pixel', selected = null, hovered = null;
+function overlays(ctx) {
+  const R = STYLES[style].r, u = R.unit(), pix = style === 'pixel' || style === 'iso';
+  const font = style === 'blueprint' ? '500 11px "IBM Plex Mono", monospace' : style === 'cozy' ? '600 11.5px "IBM Plex Sans", sans-serif' : '500 13px "Pixelify Sans", monospace';
+  // door signs
+  ctx.font = pix ? '600 12px "Pixelify Sans", monospace' : style === 'blueprint' ? '500 10.5px "IBM Plex Mono", monospace' : '600 11px "IBM Plex Sans", sans-serif';
+  ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  for (const [id, r] of Object.entries(ROOMS)) {
+    const [dx, dy] = r.doors[0], topRoom = dy < 13;
+    const p = R.pt(dx + 1, topRoom ? dy + 1.15 : dy - 0.15);
+    const n = agents.filter(a => a.room === id && id !== 'brk' && id !== 'mgr').length;
+    const label = style === 'blueprint' ? r.name.toUpperCase() : r.name;
+    const extra = n ? ` · ${n}` : '';
+    const tw = ctx.measureText(label + extra).width, autoW = r.auto ? ctx.measureText('AUTO').width + 10 : 0;
+    const w = tw + 14 + autoW, h = 18, x = Math.round(p.x - w / 2), y = Math.round(topRoom ? p.y : p.y - h);
+    if (pix) { ctx.fillStyle = '#1d1b26'; ctx.fillRect(x, y, w, h); ctx.fillStyle = '#f3e9c6'; ctx.fillRect(x, y, w, 2); }
+    else if (style === 'blueprint') { ctx.fillStyle = Blueprint.bg; ctx.fillRect(x, y, w, h); ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.strokeRect(x + .5, y + .5, w - 1, h - 1); }
+    else { ctx.fillStyle = '#ffffff'; rr(ctx, x, y, w, h, 9); ctx.fill(); }
+    ctx.fillStyle = pix ? '#f3e9c6' : style === 'blueprint' ? INK : '#2b2f3a';
+    ctx.fillText(label, x + 7, y + h / 2 + 1);
+    ctx.fillStyle = pix ? '#a9a39a' : style === 'blueprint' ? 'rgba(233,242,255,.6)' : '#7a7f8c';
+    ctx.fillText(extra, x + 7 + ctx.measureText(label).width, y + h / 2 + 1);
+    if (r.auto) { const bx = x + 7 + tw + 6; ctx.fillStyle = '#f2b84b'; ctx.fillRect(bx, y + 4, autoW - 4, h - 8); ctx.fillStyle = '#1b1608'; ctx.font = '600 9px "IBM Plex Mono", monospace'; ctx.fillText('AUTO', bx + 3, y + h / 2 + .5); ctx.font = pix ? '600 12px "Pixelify Sans", monospace' : style === 'blueprint' ? '500 10.5px "IBM Plex Mono", monospace' : '600 11px "IBM Plex Sans", sans-serif'; }
+  }
+  ctx.font = font;
+  for (const a of agents) {
+    const f = R.feet(a), t = R.top(a);
+    if (a === selected) {
+      ctx.strokeStyle = '#f2b84b'; ctx.lineWidth = 2; ctx.setLineDash([5, 4]); ctx.lineDashOffset = -now * 14;
+      const cy = style === 'blueprint' || style === 'cozy' ? f.y : f.y - 1;
+      ctx.beginPath(); ctx.ellipse(f.x, cy, Math.max(11, u * 0.7), Math.max(7, u * (pix ? 0.38 : 0.7)), 0, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+    }
+    let y = t.y - 5;
+    if (a.status === 'waiting') {
+      const b = Math.round(Math.sin(now * 5) * 2), s = 16;
+      ctx.fillStyle = '#f2b84b';
+      if (style === 'cozy') { ctx.beginPath(); ctx.arc(t.x, y - s / 2 + b, s / 2, 0, 7); ctx.fill(); } else ctx.fillRect(Math.round(t.x - s / 2), Math.round(y - s + b), s, s);
+      ctx.fillStyle = '#1b1608'; ctx.textAlign = 'center'; ctx.fillText('!', t.x, y - s / 2 + b + 1); ctx.textAlign = 'left';
+      y -= s + 4;
+    }
+    if (a.bubble && a.bubble.until > now) bubble(ctx, t.x, y, a.bubble.text);
+    else if (a === selected || a === hovered) tag(ctx, t.x, y, a);
+  }
+}
+function wrap(ctx, text, max) {
+  const words = text.split(' '), lines = []; let cur = '';
+  for (const w of words) { const n = cur ? cur + ' ' + w : w; if (ctx.measureText(n).width > max && cur) { lines.push(cur); cur = w; } else cur = n; }
+  if (cur) lines.push(cur);
+  return lines.slice(0, 3);
+}
+function bubble(ctx, x, y, text) {
+  const lines = wrap(ctx, text, 150), lh = 14, pad = 6;
+  const w = Math.max(...lines.map(l => ctx.measureText(l).width)) + pad * 2, h = lines.length * lh + pad * 2 - 2;
+  let bx = Math.round(x - w / 2), by = Math.round(y - h - 6);
+  bx = Math.max(4, Math.min(bx, cw - w - 4)); by = Math.max(4, by);
+  if (style === 'pixel' || style === 'iso') {
+    ctx.fillStyle = '#1d1b26'; ctx.fillRect(bx - 2, by - 2, w + 4, h + 4); ctx.fillRect(Math.round(x) - 3, by + h, 6, 4);
+    ctx.fillStyle = '#fffdf6'; ctx.fillRect(bx, by, w, h); ctx.fillRect(Math.round(x) - 1, by + h, 2, 2);
+    ctx.fillStyle = '#1d1b26';
+  } else if (style === 'blueprint') {
+    ctx.fillStyle = Blueprint.bg; ctx.fillRect(bx, by, w, h); ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.strokeRect(bx + .5, by + .5, w - 1, h - 1);
+    ctx.beginPath(); ctx.moveTo(x, by + h); ctx.lineTo(x, by + h + 6); ctx.stroke();
+    ctx.fillStyle = INK;
+  } else {
+    ctx.save(); ctx.shadowColor = 'rgba(0,0,0,.25)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 2;
+    ctx.fillStyle = '#ffffff'; rr(ctx, bx, by, w, h, 8); ctx.fill(); ctx.restore();
+    ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.moveTo(x - 5, by + h - 1); ctx.lineTo(x, by + h + 5); ctx.lineTo(x + 5, by + h - 1); ctx.fill();
+    ctx.fillStyle = '#2b2f3a';
+  }
+  lines.forEach((l, i) => ctx.fillText(l, bx + pad, by + pad + i * lh + lh / 2 - 1));
+}
+function tag(ctx, x, y, a) {
+  const label = a.name, w = ctx.measureText(label).width + 22, h = 18;
+  const bx = Math.max(4, Math.min(Math.round(x - w / 2), cw - w - 4)), by = Math.round(y - h - 2);
+  const col = a.kind === 'subagent' ? ROLE.subagent.color : ROLE[a.role].color;
+  if (style === 'pixel' || style === 'iso') { ctx.fillStyle = '#1d1b26'; ctx.fillRect(bx, by, w, h); ctx.fillStyle = '#f3e9c6'; }
+  else if (style === 'blueprint') { ctx.fillStyle = Blueprint.bg; ctx.fillRect(bx, by, w, h); ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.strokeRect(bx + .5, by + .5, w - 1, h - 1); ctx.fillStyle = INK; }
+  else { ctx.fillStyle = '#2b2f3a'; rr(ctx, bx, by, w, h, 9); ctx.fill(); ctx.fillStyle = '#ffffff'; }
+  ctx.fillText(label, bx + 16, by + h / 2 + 1);
+  ctx.fillStyle = col; ctx.fillRect(bx + 6, by + h / 2 - 3, 6, 6);
+}
+
+// ---------- canvas & loop ----------
+const canvas = document.getElementById('map'), ctx = canvas.getContext('2d'), wrapEl = document.getElementById('mapWrap');
+let cw = 800, ch = 500, dpr = 1;
+function resize() {
+  dpr = Math.min(2, window.devicePixelRatio || 1);
+  cw = wrapEl.clientWidth; ch = Math.round(cw / 1.6);
+  canvas.style.height = ch + 'px';
+  canvas.width = Math.round(cw * dpr); canvas.height = Math.round(ch * dpr);
+}
+new ResizeObserver(resize).observe(wrapEl);
+resize();
+
+function render() {
+  const R = STYLES[style].r;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = R.bg; ctx.fillRect(0, 0, cw, ch);
+  R.frame(ctx, cw, ch, dpr);
+  overlays(ctx);
+}
+function hit(mx, my) {
+  const R = STYLES[style].r, rad = Math.max(14, R.unit() * 0.75);
+  let best = null, bd = rad;
+  for (const a of agents) { const c = R.center(a), d = Math.hypot(c.x - mx, c.y - my); if (d < bd) { bd = d; best = a; } }
+  return best;
+}
+const rel = e => { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+canvas.addEventListener('mousemove', e => { hovered = hit(...rel(e)); canvas.style.cursor = hovered ? 'pointer' : 'default'; });
+canvas.addEventListener('mouseleave', () => { hovered = null; });
+canvas.addEventListener('click', e => { const a = hit(...rel(e)); if (a) select(a); });
+
+let last = performance.now(), panelClock = 0;
+function loop(ts) {
+  const dt = Math.min(0.05, (ts - last) / 1000); last = ts;
+  now += dt;
+  update(dt);
+  render();
+  panelClock += dt;
+  if (panelClock > 0.25) { panelClock = 0; renderPanel(false); renderCounts(); }
+  requestAnimationFrame(loop);
+}
+
+// ---------- UI ----------
+const $ = id => document.getElementById(id);
+const tabsEl = $('styleTabs');
+for (const [k, s] of Object.entries(STYLES)) {
+  const b = document.createElement('button');
+  b.type = 'button'; b.setAttribute('role', 'tab'); b.textContent = s.label; b.dataset.style = k;
+  b.addEventListener('click', () => setStyle(k));
+  tabsEl.append(b);
+}
+function setStyle(k) {
+  style = k;
+  for (const b of tabsEl.children) b.setAttribute('aria-selected', String(b.dataset.style === k));
+  $('styleNote').innerHTML = STYLES[k].note;
+  try { localStorage.setItem('agent-office-style', k); } catch (e) {}
+}
+$('legend').innerHTML = Object.entries(ROLE).map(([, r]) => `<span><i style="background:${r.color}"></i>${r.label}</span>`).join('');
+
+function renderCounts() {
+  const s = agents.filter(a => a.kind === 'session').length, sub = agents.filter(a => a.kind === 'subagent').length, w = waitingCount();
+  $('counts').innerHTML = `<span class="chip"><b>${s}</b> sessions</span><span class="chip"><b>${sub}</b> subagents</span><span class="chip${w ? ' warn' : ''}"><b>${w}</b> need you</span>`;
+}
+const STATUS_TEXT = { working: 'Working', walking: 'Walking', talking: 'Talking', waiting: 'Needs you', break: 'On break' };
+let tab = 'ask';
+function select(a) { selected = a; renderPanel(true); }
+function renderPanel(full) {
+  const a = selected; if (!a) return;
+  $('iName').textContent = a.name;
+  $('iRole').textContent = `${a.kind === 'subagent' ? 'Subagent of ' + a.parent.name : ROLE[a.role].label} · ${a.room === 'mgr' ? 'all projects' : ROOMS[a.room].name}`;
+  $('iStatus').textContent = STATUS_TEXT[a.status] || a.status; $('iStatus').dataset.s = a.status;
+  $('iTask').textContent = a.task;
+  $('iDoing').textContent = a.status === 'walking' ? a.goal : a.status === 'break' ? 'Coffee' : a.status === 'talking' && a.partner ? `Talking with ${a.partner.name}` : a.activity;
+  $('iModel').textContent = a.model;
+  $('iConn').innerHTML = a.conn === 'terminal'
+    ? 'Started in a terminal <div class="conn">You can watch it. Messages wait for its next turn.</div>'
+    : 'Launched from the office <div class="conn">Two-way: it answers right away.</div>';
+  $('iPending').hidden = a.status !== 'waiting';
+  if (a.status === 'waiting') $('iPendingCmd').textContent = a.pending;
+  $('iLog').innerHTML = ''; for (const l of a.log.slice(0, 6)) { const li = document.createElement('li'); li.textContent = l; $('iLog').append(li); }
+  const av = $('avatar').getContext('2d'); av.clearRect(0, 0, 12, 14);
+  const keep = { status: a.status, dir: a.dir }; a.dir = 'down';
+  sprite(av, 6, 13, a); a.dir = keep.dir;
+  if (full) { renderThread(); renderQueue(); }
+}
+function renderThread() {
+  const a = selected, el = $('chat'); el.innerHTML = '';
+  if (!a.chat.length) { el.innerHTML = `<li class="empty">Ask ${a.name} something. It keeps working while it answers.</li>`; return; }
+  for (const m of a.chat) { const li = document.createElement('li'); li.className = m.who; li.textContent = m.text; if (m.note) { const s = document.createElement('small'); s.textContent = m.note; li.append(s); } el.append(li); }
+  el.scrollTop = el.scrollHeight;
+}
+function renderQueue() {
+  const a = selected, el = $('queue'); el.innerHTML = '';
+  if (!a.queue.length) { el.innerHTML = `<li class="empty">Nothing queued for ${a.name}.</li>`; return; }
+  a.queue.forEach((q, i) => { const li = document.createElement('li'); li.className = 'you'; li.textContent = `${i + 1}. ${q}`; el.append(li); });
+}
+function reply(a, q) {
+  if (a === MANAGER) return `I'll route that. Right now wing load is ${['light', 'moderate', 'heavy'][agents.length % 3]}; ${waitingCount()} agent${waitingCount() === 1 ? ' is' : 's are'} waiting on you.`;
+  const block = a.status === 'waiting' ? ` I'm blocked until you approve ${a.pending}.` : ' Nothing is blocking me.';
+  if (/eta|when|long|done/i.test(q)) return `Roughly ${Math.ceil(rand(5, 25))} minutes left on “${a.task}”.${block}`;
+  return `I'm on “${a.task}”. Last step: ${a.activity}.${block}`;
+}
+$('askForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const a = selected, q = $('askInput').value.trim(); if (!a || !q) return;
+  $('askInput').value = '';
+  a.chat.push({ who: 'you', text: q }); renderThread();
+  event('UserPromptSubmit', a, `btw: ${q}`);
+  const delay = a.conn === 'terminal' ? 3.2 : 1.1;
+  later(delay, () => { a.chat.push({ who: 'agent', text: reply(a, q), note: a.conn === 'terminal' ? 'Answered at its next turn · simulated' : 'Simulated reply' }); if (selected === a) renderThread(); say(a, 'Answered you.'); });
+});
+$('assignForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const a = selected, q = $('assignInput').value.trim(); if (!a || !q) return;
+  $('assignInput').value = '';
+  a.queue.push(q); renderQueue();
+  event('UserPromptSubmit', a, `assigned: ${q}`);
+  logAct(a, `Queued: ${q}`);
+  say(a, a === MANAGER ? "I'll route it." : 'On it after this.');
+});
+function setTab(t) {
+  tab = t;
+  $('tabAsk').setAttribute('aria-selected', String(t === 'ask')); $('tabAssign').setAttribute('aria-selected', String(t === 'assign'));
+  $('paneAsk').hidden = t !== 'ask'; $('paneAssign').hidden = t !== 'assign';
+}
+$('tabAsk').addEventListener('click', () => setTab('ask'));
+$('tabAssign').addEventListener('click', () => setTab('assign'));
+$('approve').addEventListener('click', () => selected && resolve(selected, true));
+$('deny').addEventListener('click', () => selected && resolve(selected, false));
+
+// ---------- boot ----------
+for (const a of agents) { event('SessionStart', a, `${a.conn === 'terminal' ? 'terminal session' : 'launched by office'} · ${a.room === 'mgr' ? 'all projects' : ROOMS[a.room].name}`); logAct(a, a.activity); }
+askPermission(byName('Sentry'));
+byName('Juniper').chat.push({ who: 'you', text: 'btw, is the panel using the shared tokens?' }, { who: 'agent', text: 'Yes. Colors and spacing come from tokens.css. I’m wiring the status pill next.', note: 'Answered at its next turn · simulated' });
+let saved = 'pixel';
+try { saved = localStorage.getItem('agent-office-style') || 'pixel'; } catch (e) {}
+setStyle(STYLES[saved] ? saved : 'pixel');
+select(byName('Juniper'));
+renderCounts();
+requestAnimationFrame(t => { last = t; loop(t); });
+})();
+</script>
