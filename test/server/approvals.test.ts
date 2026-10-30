@@ -23,7 +23,7 @@ function setup(opts: { mode?: 'off' | 'office'; ui?: boolean } = {}) {
   const perm = ev('PermissionRequest', { toolName: 'Bash', activity: 'Run: ls' });
   reg.apply(ev('SessionStart', { cwd: '/tmp' }));
   reg.apply(perm); // server pipeline: apply before request
-  return { reg, ap, perm, changes, setUi: (v: boolean) => { ui = v; } };
+  return { store, reg, ap, perm, changes, setUi: (v: boolean) => { ui = v; } };
 }
 
 test('mode off resolves null immediately and leaves pending unanswerable', async () => {
@@ -68,6 +68,7 @@ test('timeout resolves null, pending unanswerable; late answer expired; double a
   assert.equal(await p, null);
   assert.equal(reg.get('s1')?.pending?.answerable, false);
   assert.ok(changes.length > n);
+  assert.equal(changes.at(-1)?.pending?.answerable, false);
   assert.equal(ap.answer(id, 'allow'), 'expired');
   assert.equal(ap.answer(id, 'allow'), 'expired');
 });
@@ -137,4 +138,35 @@ test('hookResponse strings', () => {
     hookResponse('deny'),
     '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from Agent Office"}}}',
   );
+});
+
+test('releaseAll releases every wait but keeps unanswerable pending', async () => {
+  const { store, reg, ap, perm, changes } = setup({ mode: 'office' });
+  store.setSessionApprovals('s2', 'office');
+  reg.apply(ev('SessionStart', { sessionId: 's2', cwd: '/tmp' }));
+  const perm2 = ev('PermissionRequest', { sessionId: 's2', toolName: 'Edit', activity: 'Edit: a' });
+  reg.apply(perm2);
+  const p1 = ap.request(perm);
+  const p2 = ap.request(perm2);
+  const id1 = reg.get('s1')!.pending!.id;
+  const n = changes.length;
+  ap.releaseAll();
+  assert.equal(await p1, null);
+  assert.equal(await p2, null);
+  for (const id of ['s1', 's2']) {
+    assert.equal(reg.get(id)?.status, 'waiting');
+    assert.equal(reg.get(id)?.pending?.answerable, false);
+    assert.ok(changes.slice(n).some((a) => a.id === id && a.pending?.answerable === false));
+  }
+  assert.equal(ap.answer(id1, 'allow'), 'expired');
+});
+
+test('cancelFor with a different tool keeps the wait; same tool cancels', async () => {
+  const { reg, ap, perm } = setup({ mode: 'office' });
+  const p = ap.request(perm);
+  ap.cancelFor('s1', 'Read');
+  assert.equal(reg.get('s1')?.pending?.answerable, true);
+  ap.cancelFor('s1', 'Bash');
+  assert.equal(await p, null);
+  assert.equal(reg.get('s1')?.pending, undefined);
 });

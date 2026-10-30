@@ -7,9 +7,12 @@ export type Decision = 'allow' | 'deny';
 
 const RESOLVED_MAX = 500;
 
+interface PendingBase { id: string; toolName: string; activity: string; since: number }
+
 interface Waiter {
   id: string;
   agentId: string;
+  base: PendingBase;
   timer: ReturnType<typeof setTimeout>;
   resolve: (d: Decision | null) => void;
 }
@@ -55,6 +58,17 @@ export class Approvals {
     return true;
   }
 
+  // Hand the prompt to the terminal: resolve null, keep pending but unanswerable.
+  #release(w: Waiter): void {
+    if (!this.#settle(w, null)) return;
+    const v = this.#registry.setPending(w.agentId, { ...w.base, answerable: false });
+    if (v) this.#onChange(v);
+  }
+
+  releaseAll(): void {
+    for (const w of [...this.#waiting.values()]) this.#release(w);
+  }
+
   request(e: AgentEvent): Promise<Decision | null> {
     const agentId = e.agentId ? `${e.sessionId}:${e.agentId}` : e.sessionId;
     const agent = this.#registry.get(agentId);
@@ -74,12 +88,9 @@ export class Approvals {
       const w: Waiter = {
         id,
         agentId,
+        base,
         resolve,
-        timer: setTimeout(() => {
-          if (!this.#settle(w, null)) return;
-          const v = this.#registry.setPending(agentId, { ...base, answerable: false });
-          if (v) this.#onChange(v);
-        }, this.#cfg.approvalWaitMs),
+        timer: setTimeout(() => this.#release(w), this.#cfg.approvalWaitMs),
       };
       this.#waiting.set(id, w);
       this.#byAgent.set(agentId, w);
@@ -97,9 +108,10 @@ export class Approvals {
     return 'ok';
   }
 
-  cancelFor(agentId: string): void {
+  cancelFor(agentId: string, toolName?: string): void {
     const w = this.#byAgent.get(agentId);
     if (!w) return;
+    if (toolName !== undefined && toolName !== w.base.toolName) return;
     this.#settle(w, null);
     const v = this.#registry.setPending(agentId, undefined);
     if (v) this.#onChange(v);
