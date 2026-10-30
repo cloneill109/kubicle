@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../../src/server/store.ts';
@@ -26,12 +26,45 @@ test('deep cwd maps to the dir containing .git', () => {
   } finally { rmSync(t, { recursive: true, force: true }); }
 });
 
-test('.git file (worktree) counts', () => {
+test('linked worktree maps to main repo (absolute and relative gitdir)', () => {
   const t = tmp();
   try {
+    const main = mk(t, 'main');
+    mk(main, '.git', 'worktrees', 'x');
     const wt = mk(t, 'wt');
-    writeFileSync(join(wt, '.git'), 'gitdir: /elsewhere\n');
-    assert.equal(projectRoot(mk(wt, 'a', 'b')), wt);
+    writeFileSync(join(wt, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'x')}\n`);
+    assert.equal(projectRoot(mk(wt, 'a', 'b')), main);
+    const wt2 = mk(t, 'wt2');
+    writeFileSync(join(wt2, '.git'), 'gitdir: ../main/.git/worktrees/x\n');
+    assert.equal(projectRoot(wt2), main);
+  } finally { rmSync(t, { recursive: true, force: true }); }
+});
+
+test('submodule and garbage .git files map to their own dir', () => {
+  const t = tmp();
+  try {
+    const main = mk(t, 'main');
+    mk(main, '.git', 'modules', 'sub');
+    const sub = mk(main, 'sub');
+    writeFileSync(join(sub, '.git'), 'gitdir: ../.git/modules/sub\n');
+    assert.equal(projectRoot(mk(sub, 'src')), sub);
+    const g = mk(t, 'garbage');
+    writeFileSync(join(g, '.git'), 'not a gitdir line');
+    assert.equal(projectRoot(g), g);
+  } finally { rmSync(t, { recursive: true, force: true }); }
+});
+
+test('symlinked path resolves to same project id as real path', () => {
+  const t = tmp();
+  try {
+    const repo = mk(t, 'repo'); mk(repo, '.git');
+    const sub = mk(repo, 'src');
+    const link = join(t, 'link');
+    symlinkSync(sub, link);
+    assert.equal(projectRoot(link), repo);
+    const p = new Projects(openStore(':memory:'));
+    assert.equal(p.resolve(link, 1).id, p.resolve(sub, 2).id);
+    assert.equal(p.list().length, 1);
   } finally { rmSync(t, { recursive: true, force: true }); }
 });
 

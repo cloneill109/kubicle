@@ -1,18 +1,39 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, resolve as resolvePath } from 'node:path';
 import type { Store, ProjectRow } from './store.ts';
 
 const rootCache = new Map<string, string>();
 
+function real(p: string): string {
+  try { return realpathSync(p); } catch { return resolvePath(p); }
+}
+
+/** For a `.git` file, return the main repo dir if it is a linked worktree, else null. */
+function worktreeMain(gitFile: string, dir: string): string | null {
+  try {
+    const m = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(gitFile, 'utf8'));
+    if (!m) return null;
+    const gitdir = real(resolvePath(dir, m[1]));
+    const parent = dirname(dirname(gitdir)); // <main>/.git
+    if (basename(dirname(gitdir)) === 'worktrees' && basename(parent) === '.git') return dirname(parent);
+  } catch { /* fall through */ }
+  return null;
+}
+
 /** Walk up from cwd to the nearest dir containing `.git` (dir or file). Falls back to cwd. */
 export function projectRoot(cwd: string): string {
-  const start = resolvePath(cwd);
+  const start = real(cwd);
   const hit = rootCache.get(start);
   if (hit !== undefined) return hit;
   let dir = start;
   let root = start;
   for (;;) {
-    if (existsSync(resolvePath(dir, '.git'))) { root = dir; break; }
+    const g = resolvePath(dir, '.git');
+    if (existsSync(g)) {
+      root = dir;
+      try { if (statSync(g).isFile()) root = worktreeMain(g, dir) ?? dir; } catch { /* keep dir */ }
+      break;
+    }
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
