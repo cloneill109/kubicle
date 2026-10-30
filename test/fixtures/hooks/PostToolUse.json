@@ -1,0 +1,25 @@
+{
+  "session_id": "72eea129-ef30-4ddd-a60e-90b3027a23cc",
+  "transcript_path": "/Users/example/.claude/projects/-tmp-x-hook-spike/72eea129-ef30-4ddd-a60e-90b3027a23cc.jsonl",
+  "cwd": "/tmp/x/hook-spike",
+  "prompt_id": "1d018244-9d42-4794-bdcf-875f4600e3f1",
+  "permission_mode": "auto",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "ls",
+    "description": "List files in current directory"
+  },
+  "tool_response": {
+    "stdout": "log.jsonl",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false
+  },
+  "tool_use_id": "toolu_0132dTWPdQ8ZLsNSnrgHMSn1",
+  "duration_ms": 81
+}

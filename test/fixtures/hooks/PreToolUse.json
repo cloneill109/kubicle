@@ -1,0 +1,19 @@
+{
+  "session_id": "72eea129-ef30-4ddd-a60e-90b3027a23cc",
+  "transcript_path": "/Users/example/.claude/projects/-tmp-x-hook-spike/72eea129-ef30-4ddd-a60e-90b3027a23cc.jsonl",
+  "cwd": "/tmp/x/hook-spike",
+  "prompt_id": "1d018244-9d42-4794-bdcf-875f4600e3f1",
+  "permission_mode": "auto",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Agent",
+  "tool_input": {
+    "description": "List files in working directory",
+    "prompt": "List the files in the primary working directory /tmp/x/hook-spike (include hidden files, one level deep unless a subdirectory clearly matters). Report the file and directory names only. Search breadth: medium. Do not modify anything.",
+    "subagent_type": "Explore",
+    "run_in_background": false
+  },
+  "tool_use_id": "toolu_0191C9NZDv6AvJWbnsQ8Pkxh"
+}

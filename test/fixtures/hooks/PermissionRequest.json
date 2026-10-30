@@ -1,0 +1,30 @@
+{
+  "session_id": "e15d88a5-9fd4-4728-8226-ba112543a894",
+  "transcript_path": "/Users/example/.claude/projects/-tmp-x-hook-spike/e15d88a5-9fd4-4728-8226-ba112543a894.jsonl",
+  "cwd": "/tmp/x/hook-spike",
+  "prompt_id": "2d45b4ca-c239-4628-82d7-8d296d84d2a8",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "touch marker1 && echo done",
+    "description": "Create marker1 file and echo done"
+  },
+  "permission_suggestions": [
+    {
+      "type": "addDirectories",
+      "directories": [
+        "/tmp/x/hook-spike"
+      ],
+      "destination": "session"
+    },
+    {
+      "type": "setMode",
+      "mode": "acceptEdits",
+      "destination": "session"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "session_id": "72eea129-ef30-4ddd-a60e-90b3027a23cc",
+  "transcript_path": "/Users/example/.claude/projects/-tmp-x-hook-spike/72eea129-ef30-4ddd-a60e-90b3027a23cc.jsonl",
+  "cwd": "/tmp/x/hook-spike",
+  "prompt_id": "1d018244-9d42-4794-bdcf-875f4600e3f1",
+  "permission_mode": "auto",
+  "agent_id": "a2ba7b618ba462523",
+  "agent_type": "Explore",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "agent_transcript_path": "/Users/example/.claude/projects/-tmp-x-hook-spike/72eea129-ef30-4ddd-a60e-90b3027a23cc/subagents/agent-a2ba7b618ba462523.jsonl",
+  "background_tasks": [],
+  "session_crons": []
+}

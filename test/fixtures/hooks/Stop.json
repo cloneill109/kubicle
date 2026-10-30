@@ -1,0 +1,15 @@
+{
+  "session_id": "72eea129-ef30-4ddd-a60e-90b3027a23cc",
+  "transcript_path": "/Users/example/.claude/projects/-tmp-x-hook-spike/72eea129-ef30-4ddd-a60e-90b3027a23cc.jsonl",
+  "cwd": "/tmp/x/hook-spike",
+  "prompt_id": "1d018244-9d42-4794-bdcf-875f4600e3f1",
+  "permission_mode": "auto",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "Here's what the two listings show.\n\n**Explore subagent** (includes hidden files, one level deep):\n- `.claude/`, which contains `settings.local.json`\n- `.git/`\n- `log.jsonl`\n\n**`ls`** shows only `log.jsonl`. Plain `ls` hides dotfiles, which explains why `.claude/` and `.git/` don't appear.",
+  "background_tasks": [],
+  "session_crons": []
+}

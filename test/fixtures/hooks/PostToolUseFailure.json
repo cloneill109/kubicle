@@ -1,0 +1,20 @@
+{
+  "session_id": "c8a6d358-b165-4e54-ad57-24dd2c53b91b",
+  "transcript_path": "/Users/example/.claude/projects/-tmp-x-hook-spike/c8a6d358-b165-4e54-ad57-24dd2c53b91b.jsonl",
+  "cwd": "/tmp/x/hook-spike",
+  "prompt_id": "0a0de7c3-c1ab-462d-ac77-4c959ffb8cf6",
+  "permission_mode": "bypassPermissions",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUseFailure",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "ls /nonexistent_dir_xyz",
+    "description": "List a nonexistent directory to check error output"
+  },
+  "tool_use_id": "toolu_01KDA36hwvNtvsB4nvYuEM3o",
+  "error": "Exit code 1\nls: /nonexistent_dir_xyz: No such file or directory",
+  "is_interrupt": false,
+  "duration_ms": 49
+}

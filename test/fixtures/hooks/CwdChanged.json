@@ -1,0 +1,9 @@
+{
+  "session_id": "6c1b8f43-3c8d-403c-b84f-2f5590989583",
+  "transcript_path": "/Users/example/.claude/projects/-tmp-x-hook-spike/6c1b8f43-3c8d-403c-b84f-2f5590989583.jsonl",
+  "cwd": "/tmp/x/hook-spike/sub",
+  "prompt_id": "c1fe822d-91d8-42a8-ad59-19231780ecc5",
+  "hook_event_name": "CwdChanged",
+  "old_cwd": "/tmp/x/hook-spike",
+  "new_cwd": "/tmp/x/hook-spike/sub"
+}
