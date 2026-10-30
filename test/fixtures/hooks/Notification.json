@@ -1,0 +1,9 @@
+{
+  "session_id": "72eea129-ef30-4ddd-a60e-90b3027a23cc",
+  "transcript_path": "/Users/example/.claude/projects/-tmp-x-hook-spike/72eea129-ef30-4ddd-a60e-90b3027a23cc.jsonl",
+  "cwd": "/tmp/x/hook-spike",
+  "hook_event_name": "Notification",
+  "message": "Claude needs your permission to use Bash",
+  "title": "Permission needed",
+  "notification_type": "permission_prompt"
+}

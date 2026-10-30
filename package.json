@@ -1,0 +1,27 @@
+{
+  "name": "agent-office",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test 'test/**/*.test.ts'",
+    "typecheck": "tsc --noEmit",
+    "build:ui": "esbuild src/ui/main.ts --bundle --format=esm --outfile=dist/ui/main.js",
+    "start": "npm run build:ui && node src/server/main.ts",
+    "install-hooks": "node src/cli/install.ts install",
+    "uninstall-hooks": "node src/cli/install.ts uninstall"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
+    "playwright-core": "1.64.1"
+  }
+}
