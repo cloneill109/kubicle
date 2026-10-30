@@ -93,3 +93,38 @@ test('notification fields', () => {
   assert.equal(e.notificationType, 'permission_prompt');
   assert.equal(e.message, 'Claude needs your permission to use Bash');
 });
+
+test('deep nesting does not throw', () => {
+  const base = fx('PreToolUse');
+  for (const depth of [10_000, 200_000]) {
+    let deep: unknown = 'leaf';
+    for (let i = 0; i < depth; i++) deep = { a: deep };
+    const e = normalizeHook({ ...base, tool_input: deep }, 1)!;
+    assert.ok(e);
+    assert.ok(Buffer.byteLength(e.payload) <= 4096);
+    const p = JSON.parse(e.payload);
+    assert.equal(p.session_id, base.session_id);
+    assert.equal(p.hook_event_name, 'PreToolUse');
+    assert.equal(p.tool_name, 'Agent');
+  }
+});
+
+test('many strings is fast', () => {
+  const strs = Array.from({ length: 20_000 }, (_, i) => String(i % 10).repeat(300));
+  const t0 = performance.now();
+  const e = normalizeHook({ ...fx('PreToolUse'), tool_input: { strs } }, 1)!;
+  const ms = performance.now() - t0;
+  assert.ok(ms < 200, `took ${ms}ms`);
+  assert.ok(Buffer.byteLength(e.payload) <= 4096);
+  assert.equal(JSON.parse(e.payload).session_id, fx('PreToolUse').session_id);
+});
+
+test('moderately many strings truncate in place keeping short fields', () => {
+  const strs = Array.from({ length: 50 }, () => 'z'.repeat(500));
+  const e = normalizeHook({ ...fx('PreToolUse'), tool_input: { strs } }, 1)!;
+  assert.ok(Buffer.byteLength(e.payload) <= 4096);
+  const p = JSON.parse(e.payload);
+  assert.equal(p.tool_input.strs.length, 50);
+  assert.equal(p.tool_name, 'Agent');
+  assert.equal(p.cwd, '/tmp/x/hook-spike');
+});

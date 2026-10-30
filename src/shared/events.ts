@@ -68,40 +68,88 @@ export function summarizeTool(toolName: string, input: unknown, cwd?: string): s
 
 const byteLen = (s: string): number => new TextEncoder().encode(s).length;
 
-function collectStrings(v: unknown, out: { o: any; k: string | number; len: number }[]): void {
-  if (Array.isArray(v)) {
-    v.forEach((x, k) => (typeof x === 'string' ? out.push({ o: v, k, len: x.length }) : collectStrings(x, out)));
-  } else if (isObj(v)) {
-    for (const k of Object.keys(v)) {
-      const x = v[k];
-      if (typeof x === 'string') out.push({ o: v, k, len: x.length });
-      else collectStrings(x, out);
+type StrRef = { o: any; k: string | number };
+
+// Iterative (no recursion) so deeply nested input cannot overflow the stack.
+function collectStrings(root: unknown): StrRef[] {
+  const out: StrRef[] = [];
+  const stack: unknown[] = [root];
+  while (stack.length) {
+    const v = stack.pop();
+    if (Array.isArray(v)) {
+      for (let k = 0; k < v.length; k++) {
+        if (typeof v[k] === 'string') out.push({ o: v, k });
+        else if (typeof v[k] === 'object' && v[k] !== null) stack.push(v[k]);
+      }
+    } else if (isObj(v)) {
+      for (const k of Object.keys(v)) {
+        const x = v[k];
+        if (typeof x === 'string') out.push({ o: v, k });
+        else if (typeof x === 'object' && x !== null) stack.push(x);
+      }
     }
   }
+  return out;
 }
 
-// Cut long string values (longest first) inside the parsed JSON so the
-// serialized result is always valid JSON and <= cap bytes.
-function truncatePayload(raw: unknown, cap: number): string {
-  let json = JSON.stringify(raw) ?? '{}';
-  if (byteLen(json) <= cap) return json;
-  const copy = JSON.parse(json);
-  const refs: { o: any; k: string | number; len: number }[] = [];
-  collectStrings(copy, refs);
-  for (let guard = 0; guard < 10000; guard++) {
-    json = JSON.stringify(copy);
-    const excess = byteLen(json) - cap;
-    if (excess <= 0) return json;
-    let best = refs[0];
-    for (const r of refs) if (!best || r.len > best.len) best = r;
-    if (!best || best.len <= 1) break;
-    const keep = Math.max(0, best.len - excess - 3);
-    const cur = String(best.o[best.k]).slice(0, keep) + '…';
-    best.o[best.k] = cur;
-    best.len = cur.length;
+function fallbackPayload(raw: unknown, cap: number): string {
+  const r = isObj(raw) ? raw : {};
+  const small: Record<string, unknown> = { truncated: true };
+  for (const k of ['hook_event_name', 'session_id', 'tool_name']) {
+    const v = r[k];
+    if (typeof v === 'string') small[k] = Array.from(v).slice(0, 64).join('');
   }
-  // Unreachable in practice (only if non-string structure alone exceeds cap).
-  return JSON.stringify({ truncated: true, hook_event_name: (raw as any)?.hook_event_name });
+  let json = JSON.stringify(small);
+  if (byteLen(json) > cap) json = JSON.stringify({ truncated: true });
+  return json;
+}
+
+// Cut long string values inside the parsed JSON (waterfill: longest first, in
+// a few bounded passes) so the result is valid JSON and <= cap bytes.
+// Never throws; falls back to a minimal object.
+function truncatePayload(raw: unknown, cap: number): string {
+  try {
+    let json = JSON.stringify(raw) ?? '{}';
+    if (byteLen(json) <= cap) return json;
+    const copy = JSON.parse(json);
+    const refs = collectStrings(copy);
+    let totalChars = 0;
+    let strBytes = 0;
+    for (const r of refs) {
+      const t = r.o[r.k] as string;
+      totalChars += t.length;
+      strBytes += byteLen(t);
+    }
+    const overhead = byteLen(json) - strBytes;
+    if (overhead + refs.length * 4 > cap) return fallbackPayload(raw, cap);
+    for (let pass = 0; pass < 6; pass++) {
+      const excess = byteLen(json) - cap;
+      if (excess <= 0) return json;
+      // Smallest-loss threshold T: sum(min(len, T)) <= totalChars - excess - slack
+      const lens = refs.map((r) => (r.o[r.k] as string).length).sort((x, y) => x - y);
+      const target = Math.max(0, totalChars - excess - refs.length * (pass + 1));
+      let acc = 0;
+      let T = 0;
+      for (let i = 0; i < lens.length; i++) {
+        const remaining = lens.length - i;
+        if (acc + lens[i] * remaining > target) { T = Math.floor((target - acc) / remaining); break; }
+        acc += lens[i];
+        T = lens[i];
+      }
+      T = Math.max(1, T);
+      totalChars = 0;
+      for (const r of refs) {
+        const t = r.o[r.k] as string;
+        if (t.length > T) r.o[r.k] = t.slice(0, Math.max(0, T - 1)) + '…';
+        totalChars += (r.o[r.k] as string).length;
+      }
+      json = JSON.stringify(copy);
+    }
+    if (byteLen(json) <= cap) return json;
+  } catch {
+    // fall through
+  }
+  return fallbackPayload(raw, cap);
 }
 
 export function normalizeHook(raw: unknown, now: number, cap: number = DEFAULT_CAP): AgentEvent | null {
