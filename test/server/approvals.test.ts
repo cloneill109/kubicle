@@ -1,0 +1,140 @@
+import { test, mock } from 'node:test';
+import assert from 'node:assert/strict';
+import { openStore } from '../../src/server/store.ts';
+import { Projects } from '../../src/server/projects.ts';
+import { loadConfig } from '../../src/server/config.ts';
+import { Registry } from '../../src/server/registry.ts';
+import { Approvals, hookResponse } from '../../src/server/approvals.ts';
+import type { AgentEvent } from '../../src/shared/events.ts';
+import type { AgentView } from '../../src/shared/protocol.ts';
+
+let seq = 0;
+function ev(event: string, o: Partial<AgentEvent> = {}): AgentEvent {
+  return { id: `e${++seq}`, ts: 1000, event: event as AgentEvent['event'], sessionId: 's1', payload: '{}', ...o };
+}
+
+function setup(opts: { mode?: 'off' | 'office'; ui?: boolean } = {}) {
+  const store = openStore(':memory:');
+  const reg = new Registry(new Projects(store), store, loadConfig({}));
+  if (opts.mode) store.setSessionApprovals('s1', opts.mode);
+  let ui = opts.ui ?? true;
+  const changes: AgentView[] = [];
+  const ap = new Approvals(reg, loadConfig({}), () => ui, (a) => changes.push(a));
+  const perm = ev('PermissionRequest', { toolName: 'Bash', activity: 'Run: ls' });
+  reg.apply(ev('SessionStart', { cwd: '/tmp' }));
+  reg.apply(perm); // server pipeline: apply before request
+  return { reg, ap, perm, changes, setUi: (v: boolean) => { ui = v; } };
+}
+
+test('mode off resolves null immediately and leaves pending unanswerable', async () => {
+  const { reg, ap, perm } = setup({ mode: 'off' });
+  assert.equal(await ap.request(perm), null);
+  assert.equal(reg.get('s1')?.pending?.answerable, false);
+});
+
+test('no UI connected resolves null immediately', async () => {
+  const { reg, ap, perm } = setup({ mode: 'office', ui: false });
+  assert.equal(await ap.request(perm), null);
+  assert.equal(reg.get('s1')?.pending?.answerable, false);
+});
+
+test('allow answer resolves and clears pending', async () => {
+  const { reg, ap, perm, changes } = setup({ mode: 'office' });
+  const p = ap.request(perm);
+  const pend = reg.get('s1')?.pending;
+  assert.equal(pend?.answerable, true);
+  assert.equal(pend?.toolName, 'Bash');
+  assert.equal(ap.answer(pend!.id, 'allow'), 'ok');
+  assert.equal(await p, 'allow');
+  assert.equal(reg.get('s1')?.pending, undefined);
+  assert.ok(changes.length >= 2);
+  assert.equal(changes.at(-1)?.pending, undefined);
+});
+
+test('deny answer resolves deny', async () => {
+  const { reg, ap, perm } = setup({ mode: 'office' });
+  const p = ap.request(perm);
+  assert.equal(ap.answer(reg.get('s1')!.pending!.id, 'deny'), 'ok');
+  assert.equal(await p, 'deny');
+});
+
+test('timeout resolves null, pending unanswerable; late answer expired; double answer expired', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { reg, ap, perm, changes } = setup({ mode: 'office' });
+  const p = ap.request(perm);
+  const id = reg.get('s1')!.pending!.id;
+  const n = changes.length;
+  t.mock.timers.tick(120_000);
+  assert.equal(await p, null);
+  assert.equal(reg.get('s1')?.pending?.answerable, false);
+  assert.ok(changes.length > n);
+  assert.equal(ap.answer(id, 'allow'), 'expired');
+  assert.equal(ap.answer(id, 'allow'), 'expired');
+});
+
+test('double answer: second is expired; unknown id not-found', async () => {
+  const { reg, ap, perm } = setup({ mode: 'office' });
+  const p = ap.request(perm);
+  const id = reg.get('s1')!.pending!.id;
+  assert.equal(ap.answer(id, 'allow'), 'ok');
+  assert.equal(ap.answer(id, 'deny'), 'expired');
+  assert.equal(await p, 'allow');
+  assert.equal(ap.answer('nope', 'allow'), 'not-found');
+});
+
+test('cancelFor mid-wait resolves null and clears pending; stale timer is harmless', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { reg, ap, perm, changes } = setup({ mode: 'office' });
+  const p = ap.request(perm);
+  const id = reg.get('s1')!.pending!.id;
+  ap.cancelFor('s1');
+  assert.equal(await p, null);
+  assert.equal(reg.get('s1')?.pending, undefined);
+  assert.equal(changes.at(-1)?.pending, undefined);
+  assert.equal(ap.answer(id, 'allow'), 'expired');
+  t.mock.timers.tick(200_000); // must not throw or resurrect pending
+  assert.equal(reg.get('s1')?.pending, undefined);
+  ap.cancelFor('s1'); // idempotent
+  ap.cancelFor('unknown');
+});
+
+test('a second request for the same agent supersedes the first', async () => {
+  const { reg, ap, perm } = setup({ mode: 'office' });
+  const p1 = ap.request(perm);
+  const p2 = ap.request(ev('PermissionRequest', { toolName: 'Edit', activity: 'Edit: a.ts' }));
+  assert.equal(await p1, null);
+  const pend = reg.get('s1')!.pending!;
+  assert.equal(pend.toolName, 'Edit');
+  ap.answer(pend.id, 'allow');
+  assert.equal(await p2, 'allow');
+});
+
+test('unknown agent resolves null', async () => {
+  const { ap } = setup({ mode: 'office' });
+  assert.equal(await ap.request(ev('PermissionRequest', { sessionId: 'zzz' })), null);
+});
+
+test('resolved id history is bounded', async () => {
+  const { reg, ap, perm } = setup({ mode: 'office' });
+  const first: string[] = [];
+  for (let i = 0; i < 600; i++) {
+    const p = ap.request(perm);
+    const id = reg.get('s1')!.pending!.id;
+    if (i === 0) first.push(id);
+    ap.answer(id, 'allow');
+    await p;
+  }
+  assert.equal(ap.answer(first[0]!, 'allow'), 'not-found');
+});
+
+test('hookResponse strings', () => {
+  assert.equal(hookResponse(null), '');
+  assert.equal(
+    hookResponse('allow'),
+    '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}',
+  );
+  assert.equal(
+    hookResponse('deny'),
+    '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from Agent Office"}}}',
+  );
+});
