@@ -118,6 +118,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
   const uiDir = resolve(d.rootDir, 'src', 'ui');
   const distDir = resolve(d.rootDir, 'dist', 'ui');
   const pageCsp = csp(d.port);
+  const debug = process.env.AGENT_OFFICE_DEBUG === '1'; // smoke-test aid; off by default
   // A new project appears during ingest (inside registry.apply): broadcast the list before the
   // agent update that references it, so clients already have its wing.
   d.projects.onCreate = () => broadcast({ t: 'projects', projects: d.projects.list() });
@@ -268,6 +269,10 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     }
     // GET only: a HEAD (e.g. a link preview) must not burn the one-time code.
     if (m === 'GET' && p === '/login') return login(req, res, url);
+    if (debug && m === 'GET' && p === '/api/debug/agents') {
+      if (!d.auth.isOwner(req)) return send(res, 403, LOGIN_HINT);
+      return send(res, 200, JSON.stringify(d.registry.list()), { 'content-type': 'application/json' });
+    }
     if (m === 'GET' || m === 'HEAD') {
       if (p === '/' || p.startsWith('/ui/')) {
         if (!d.auth.isOwner(req)) return send(res, 403, LOGIN_HINT);

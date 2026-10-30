@@ -470,3 +470,26 @@ test('a hook from a new project broadcasts the project list before the agent', a
   await c.waitFor(isAgent((a) => a.id === 'sNew' && a.activity !== ''));
   assert.equal(c.msgs.filter((m) => m.t === 'projects').length, n);
 });
+
+test('GET /api/debug/agents: 404 unless AGENT_OFFICE_DEBUG=1; owner-only; returns registry.list()', async () => {
+  const prev = process.env.AGENT_OFFICE_DEBUG;
+  try {
+    delete process.env.AGENT_OFFICE_DEBUG;
+    const off = await start();
+    const offCookie = await login(off);
+    assert.equal((await fetch(`${off.url}/api/debug/agents`, { headers: { cookie: offCookie } })).status, 404);
+
+    process.env.AGENT_OFFICE_DEBUG = '1';
+    const s = await start();
+    assert.equal((await fetch(`${s.url}/api/debug/agents`)).status, 403, 'no cookie');
+    const cookie = await login(s);
+    await postHook(s, { ...fixture('SessionStart'), session_id: 'sDbg' });
+    const r = await fetch(`${s.url}/api/debug/agents`, { headers: { cookie } });
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get('content-type') ?? '', /application\/json/);
+    const list = await r.json() as AgentView[];
+    assert.ok(list.some((a) => a.id === 'sDbg' && a.kind === 'session'));
+  } finally {
+    if (prev === undefined) delete process.env.AGENT_OFFICE_DEBUG; else process.env.AGENT_OFFICE_DEBUG = prev;
+  }
+});

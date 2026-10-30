@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "build:ui": "esbuild src/ui/main.ts --bundle --format=esm --outfile=dist/ui/main.js",
     "start": "npm run build:ui && node --disable-warning=ExperimentalWarning src/server/main.ts",
+    "smoke": "bash scripts/smoke-real.sh",
     "install-hooks": "node src/cli/install.ts install",
     "uninstall-hooks": "node src/cli/install.ts uninstall"
   },
