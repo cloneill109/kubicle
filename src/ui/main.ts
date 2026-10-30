@@ -352,25 +352,42 @@ function onMessage(m: ServerMsg): void {
 
 // ---------------------------------------------------------------- WebSocket with backoff
 let attempt = 0;
-function setConn(s: 'connecting' | 'open' | 'closed'): void {
+const OFFLINE_TEXT = 'Disconnected from the office server. Reconnecting…';
+const RELOGIN_TEXT = 'The office server restarted. Open the login link it printed to sign in again.';
+function setConn(s: 'connecting' | 'open' | 'closed' | 'signed-out'): void {
   document.body.dataset.conn = s;
-  const off = s === 'closed';
+  const off = s === 'closed' || s === 'signed-out';
   $('disconnected').hidden = !off;
+  $('disconnected').querySelector('p')!.textContent = s === 'signed-out' ? RELOGIN_TEXT : OFFLINE_TEXT;
   $('mapWrap').classList.toggle('is-offline', off);
 }
+/**
+ * A socket that closes without ever opening is either the server being down (keep retrying) or
+ * our session cookie being refused, e.g. after a server restart, since sessions live in memory.
+ * The page itself answers 403 in the second case; retrying would never succeed, so stop and say so.
+ */
+async function signedOut(): Promise<boolean> {
+  try {
+    const r = await fetch('/', { credentials: 'same-origin', cache: 'no-store' });
+    return r.status === 403 || r.status === 401;
+  } catch { return false; } // network error: server down, keep retrying
+}
 function connect(): void {
+  let opened = false;
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
-  ws.addEventListener('open', () => { attempt = 0; setConn('open'); });
+  ws.addEventListener('open', () => { opened = true; attempt = 0; setConn('open'); });
   ws.addEventListener('message', (e) => {
     let m: ServerMsg;
     try { m = JSON.parse(String(e.data)) as ServerMsg; } catch { return; }
     try { onMessage(m); } catch (err) { console.warn('office: bad message', err); }
   });
   ws.addEventListener('close', () => {
-    setConn('closed');
+    if (document.body.dataset.conn !== 'signed-out') setConn('closed');
     const delay = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)];
     attempt++;
-    setTimeout(connect, delay);
+    const retry = () => setTimeout(connect, delay);
+    if (opened) return void retry();
+    void signedOut().then((out) => { if (out) setConn('signed-out'); else retry(); });
   });
 }
 renderCounts();

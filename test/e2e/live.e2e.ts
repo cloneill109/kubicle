@@ -213,10 +213,17 @@ test('live office: state, approvals, wings, styles, narrow view, disconnect', as
   assert.deepEqual(errors, [], 'no page errors');
 
   // ---- server stops: the map dims with the disconnected overlay ----
+  const port = Number(new URL(srv.url).port);
   await srv.close();
   srv = undefined;
   await page.locator('#disconnected').waitFor({ state: 'visible', timeout: 5000 });
   assert.match(await page.locator('#disconnected').innerText(), /Disconnected from the office server\. Reconnecting…/);
   await page.screenshot({ path: join(outDir, 'live-disconnected.png') });
+
+  // ---- server restarts (same port and home): the old cookie is gone, so ask to sign in again ----
+  srv = await startServer({ ...loadConfig({ AGENT_OFFICE_HOME: home }), port }, { openBrowser: false });
+  await page.waitForFunction(() => /The office server restarted\. Open the login link it printed to sign in again\./.test(document.getElementById('disconnected')!.innerText), null, { timeout: 10000 });
+  assert.ok(await page.locator('#disconnected').isVisible());
+  await page.screenshot({ path: join(outDir, 'live-relogin.png') });
   await page.close();
 });
