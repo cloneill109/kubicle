@@ -90,6 +90,7 @@ export class OwnerAuth {
     return id;
   }
 
+  /** Cookie only, no Origin check. Use ONLY for serving GET pages/assets; never for state changes or the WebSocket upgrade. */
   isOwner(req: IncomingMessage): boolean {
     const id = parseCookies(header(req, 'cookie')).get(COOKIE);
     if (!id || !HEX64.test(id)) return false;
@@ -98,6 +99,14 @@ export class OwnerAuth {
     return ok;
   }
 
+  /** For the WebSocket upgrade: valid cookie + exact allowed Origin (missing = bad-origin). No CSRF header (browsers cannot set one on WS). */
+  checkUpgrade(req: IncomingMessage): 'ok' | 'unauthorized' | 'bad-origin' {
+    if (!this.isOwner(req)) return 'unauthorized';
+    const origin = header(req, 'origin');
+    return origin && this.origins.has(origin) ? 'ok' : 'bad-origin';
+  }
+
+  /** For state-changing POSTs: cookie + Origin + X-Office-CSRF: 1. */
   checkControl(req: IncomingMessage): 'ok' | 'unauthorized' | 'bad-origin' | 'no-csrf' {
     if (!this.isOwner(req)) return 'unauthorized';
     const origin = header(req, 'origin');

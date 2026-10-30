@@ -104,3 +104,14 @@ test('checkIngest', () => {
   assert.equal(checkIngest(req({ 'x-office-token': 'short' }), tok), false);
   assert.equal(checkIngest(req({}), tok), false);
 });
+
+test('checkUpgrade', () => {
+  const a = new OwnerAuth(4317);
+  const id = a.redeem(a.newLoginCode())!;
+  const cookie = `office_session=${id}`;
+  assert.equal(a.checkUpgrade(req({ origin: 'http://127.0.0.1:4317' })), 'unauthorized');
+  assert.equal(a.checkUpgrade(req({ cookie, origin: 'http://localhost:9999' })), 'bad-origin');
+  assert.equal(a.checkUpgrade(req({ cookie })), 'bad-origin');
+  assert.equal(a.checkUpgrade(req({ cookie, origin: 'http://localhost:4317' })), 'ok');
+  assert.equal(a.checkUpgrade(req({ cookie, origin: 'http://127.0.0.1:4317' })), 'ok');
+});
