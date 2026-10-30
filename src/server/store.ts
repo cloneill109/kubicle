@@ -96,6 +96,7 @@ export class EventWriter {
   private buf: AgentEvent[] = [];
   private timer: ReturnType<typeof setInterval> | null;
   private store: Store;
+  dropped = 0;
 
   constructor(store: Store, flushMs = 250) {
     this.store = store;
@@ -111,8 +112,17 @@ export class EventWriter {
     this.buf = [];
     try {
       this.store.appendEvents(batch);
-    } catch (err) {
-      console.error('event write failed:', err);
+      return;
+    } catch {
+      // Batch rolled back: retry one by one so a poison event drops only itself.
+    }
+    for (const e of batch) {
+      try {
+        this.store.appendEvents([e]);
+      } catch (err) {
+        this.dropped++;
+        console.error('event write failed, dropped:', err);
+      }
     }
   }
 

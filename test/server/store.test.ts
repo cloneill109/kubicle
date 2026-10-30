@@ -124,3 +124,22 @@ test('loadConfig defaults and env overrides', () => {
   assert.equal(o.port, 5000);
   assert.equal(o.home, '/x/y');
 });
+
+test('EventWriter isolates a poison event: others persist, dropped counted', () => {
+  const s = openStore(':memory:');
+  const w = new EventWriter(s, 60_000);
+  const bad = ev(2) as AgentEvent & { toJSON?: () => never };
+  bad.toJSON = () => { throw new Error('poison'); };
+  const orig = console.error;
+  const logged: unknown[][] = [];
+  console.error = (...a: unknown[]) => { logged.push(a); };
+  try {
+    w.push(ev(1)); w.push(bad); w.push(ev(3));
+    w.flush();
+  } finally { console.error = orig; }
+  assert.deepEqual(s.eventsSince(0).map((e) => e.id), ['e1', 'e3']);
+  assert.equal(w.dropped, 1);
+  assert.equal(logged.length, 1);
+  w.stop();
+  s.close();
+});
