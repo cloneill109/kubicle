@@ -1,0 +1,30 @@
+#!/bin/bash
+# Agent Office hook shim. Fail-open: always exits 0, prints only a 2xx response body.
+set -u
+max="${1:-2}"
+case "$max" in ''|*[!0-9]*) max=2 ;; esac
+
+[ -n "${AGENT_OFFICE_AGENT:-}" ] && exit 0
+
+home="${AGENT_OFFICE_HOME:-$HOME/.agent-office}"
+token=""
+if [ -r "$home/ingest-token" ]; then
+  token=$(tr -d '[:space:]' < "$home/ingest-token" 2>/dev/null)
+fi
+[ -n "$token" ] || exit 0
+
+out=$(curl -s -m "$max" --connect-timeout 1 -X POST \
+  -H 'Content-Type: application/json' \
+  -H "X-Office-Token: $token" \
+  --data-binary @- \
+  -w $'\n%{http_code}' \
+  "http://127.0.0.1:${AGENT_OFFICE_PORT:-4317}/hooks" 2>/dev/null)
+rc=$?
+[ "$rc" -eq 0 ] || exit 0
+
+code="${out##*$'\n'}"
+body="${out%$'\n'*}"
+case "$code" in
+  2??) [ -n "$body" ] && printf '%s' "$body" ;;
+esac
+exit 0
