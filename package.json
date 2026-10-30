@@ -7,10 +7,10 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test 'test/**/*.test.ts'",
+    "test": "node --disable-warning=ExperimentalWarning --test 'test/**/*.test.ts'",
     "typecheck": "tsc --noEmit",
     "build:ui": "esbuild src/ui/main.ts --bundle --format=esm --outfile=dist/ui/main.js",
-    "start": "npm run build:ui && node src/server/main.ts",
+    "start": "npm run build:ui && node --disable-warning=ExperimentalWarning src/server/main.ts",
     "install-hooks": "node src/cli/install.ts install",
     "uninstall-hooks": "node src/cli/install.ts uninstall"
   },
