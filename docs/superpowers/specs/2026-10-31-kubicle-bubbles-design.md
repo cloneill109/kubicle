@@ -32,7 +32,7 @@ Why: the owner wants agents to keep moving without stopping for every prompt. Th
 
 ## 3. Non-goals (this design)
 
-- Bubbles launching separate full agents itself, and office-launched Agent SDK agents (the original stage 2 Runner and Ask/Assign). These come next. Bubbles's decisions are shaped so that "launch an agent in room X" can be added later.
+- Bubbles launching separate full agents itself, and office-launched agents (the original stage 2 Runner and Ask/Assign). These come next. Bubbles's decisions are shaped so that "launch an agent in room X" can be added later.
 - The fully autonomous project pipelines (e.g. YouTube).
 - Multi-machine.
 
