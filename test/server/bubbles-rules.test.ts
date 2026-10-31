@@ -356,3 +356,91 @@ test('round 3: oversized commands are protected without analysis', () => {
   assert.equal(r?.kind, 'push');
   assert.ok(performance.now() - t0 < 50);
 });
+
+// ---- round 4: brace/find/glob self-protection, HEAD taint, opaque command words, HTTP ----
+// Rows that name the user's real home (`~`, `/Users/<u>`) use a Kubicle home under homedir().
+// Nothing is executed; the rules only read path strings (and realpath of the home).
+const HD = homedir();
+const U = HD.split('/').pop()!;
+const KHOME = join(HD, '.kubicle');
+const bashH = (command: string, current: string | null = 'feature', cwd = '/work/app') =>
+  protectedAction('Bash', { command }, { cwd, branches: br(current), home: KHOME, strictScripts: false });
+
+const R4_SELF = [
+  // R1 brace expansion
+  'echo "grants: all" | tee ~/{.kubicle/bubbles.yaml,/dev/null}', 'cp /tmp/evil.yaml ~/{.kubicle,.kubicle}/bubbles.yaml',
+  'mv ~/{.kubicle,.kubicle-old}', 'rm -rf ~/{.kubicle,x}', 'rm -rf ~/{.k,.x}ubicle', 'cd ~ && rm -rf {.kubicle,x}', `rm -rf ${HD}/{.kubicle,x}`,
+  // P2 find / fd
+  'find -L / -name bubbles.yaml -delete', 'find /. -name bubbles.yaml -delete', `find ${HD}/. -name bubbles.yaml -delete`,
+  `find /System/Volumes/Data${HD} -name bubbles.yaml -delete`, 'find / -name bubbles.yaml | xargs rm',
+  'find / -name bubbles.yaml -print0 | xargs -0 rm', 'fd -H bubbles.yaml / -x rm', 'fd -H bubbles.yaml /Users -X rm',
+  // P3 home ancestors and globs
+  `rm -rf ${HD}`, `rm -rf ${HD}/?kubicle`, `rm -rf ${HD}/[.]kubicle`, `cd ${HD} && rm -rf .??bicle`, `rm -rf ~${U}/?kubicle`,
+  'rm -rf /', 'chmod -R 000 ~', `mv ${HD} /tmp/x`, 'cp -r /tmp/evil/.kubicle ~/', `echo x > ${KHOME}/bubbles.yaml`,
+  'nice -n 5 rm -rf ~/.kubicle', `ls -a ${HD} | xargs rm -rf`, `cp -t ${HD} evil/x`,
+  // P5: writes to Kubicle's own port / hook socket
+  'curl -X POST -d "{}" http://localhost:4317/api/grants', 'http POST :4317/api/grants a=b',
+  'curl --unix-socket /x/run/hook.sock -d "{}" http://x/',
+];
+const R4_PUSH = [
+  // R2 / R3: HEAD after a step we cannot see
+  'gh pr checkout 5 -b main && git push origin HEAD', 'gh repo clone o/r && git push origin HEAD',
+  './scripts/co.sh main && git push origin HEAD', 'npm run prep && git push origin @', 'make switch-main && git push origin HEAD',
+  "echo 'ref: refs/heads/main' > .git/HEAD && git push origin HEAD",
+  // P1 opaque / glob command words
+  '/opt/homebrew/bin/g? m 3', '~/bin/g* m 3', '$(which gh) m 3', '/usr/bin/gi? p origin main',
+  // P4 HTTP
+  "echo '{\"merge_method\":\"squash\"}' | http api.github.com/repos/o/r/pulls/1/merge",
+  'http api.github.com/repos/o/r/pulls/1/merge < body.json', 'xh api.github.com/repos/o/r/pulls/1/merge < body.json',
+  'http api.github.com/repos/o/r/pulls/1/merge @body.json', 'curl -K req.cfg https://api.github.com/repos/o/r/pulls/1/merge',
+  'curl --config req.cfg https://api.github.com/repos/o/r/pulls/1/merge', 'curl -X PUT $GITHUB_API_URL/repos/o/r/pulls/1/merge',
+  'curl -X PUT "$(cat url.txt)"', 'curl -d x https://$GH_HOST/repos/o/r/merges',
+  "gh api repos/o/r/pulls/1/merge -H 'X-HTTP-Method-Override: PUT'",
+  // second pass: whole-command and quoted-command views of an HTTP write
+  'echo "-X PUT" | xargs curl https://api.github.com/repos/o/r/pulls/1/merge',
+  'bash -c "curl -X PUT https://api.github.com/repos/o/r/pulls/1/merge"', "sh -c 'http PUT api.github.com/repos/o/r/pulls/1/merge'",
+  'curl -X PUT http://api.$DOMAIN/repos/o/r/pulls/1/merge',
+];
+const R4_SAFE = [
+  'gh pr edit 12 --add-label bug', 'gh pr ready 12', 'gh pr close 12', 'gh pr reopen 12', 'gh pr comment 3 -b hi',
+  'curl -X POST -d "{}" http://localhost:3000/api/items', 'curl -s http://localhost:4317/api/state',
+  './scripts/co.sh main && git push origin feature', 'npm run prep && git push origin feature',
+  'git push origin feature 2>&1 | tee push.log', 'git push origin feature > push.log 2>&1', 'git push origin feature < /dev/null',
+  'git push origin feature &> push.log', '[ -f package.json ] && git push origin feature', 'export X=1 && git push origin feature',
+  'rm -rf node_modules dist', 'rm -rf ./build', 'find . -name "*.pyc" -delete', 'find src -name "*.orig" -exec rm {} +',
+  'find . -name "*.ts" | xargs wc -l', 'fd -e ts . src -x prettier --write', 'fd -H bubbles.yaml --exec rm',
+  'ls ~/{code,src}', 'cat ~/.zshrc', 'cd ~ && ls', 'cd ~/code/app && npm test', 'curl -X POST -d "$BODY" https://hooks.example.com/x',
+  'curl -s $URL', 'eslint --ext .js,.kt src', 'timeout 60 npm test', 'rsync -avt ~/notes/ backup/',
+  'curl -H "Authorization: Bearer $TOKEN" -X POST https://example.com/api', 'git commit -m "fix put" && curl -s https://api.github.com/x',
+];
+
+test('round 4: self-protection via braces, find/fd/xargs, home ancestors, globs, Kubicle port', () => {
+  for (const c of R4_SELF) assert.equal(bashH(c)?.kind, 'self', c);
+});
+
+test('round 4: unseen HEAD changes, opaque command words and HTTP writes are protected', () => {
+  for (const c of R4_PUSH) for (const cur of ['feature', 'main']) assert.ok(bashH(c, cur), `${c} (${cur})`);
+  assert.equal(bashH('./scripts/co.sh main && git merge dev')?.kind, 'merge');
+  assert.equal(bashH('gh pr merge 3')?.kind, 'merge');
+});
+
+test('round 4: everyday commands stay null', () => {
+  for (const c of R4_SAFE) for (const cur of ['feature', 'main']) assert.equal(bashH(c, cur), null, `${c} (${cur})`);
+  assert.equal(bashH('git push origin HEAD > out.txt', 'feature'), null);
+});
+
+test('round 4: huge globs and brace bombs neither crash nor stall the guard', () => {
+  const K = 16 * 1024 - 40;
+  for (const c of ['rm /' + '*a'.repeat(K / 2), 'rm ~/' + '{a,b}'.repeat(K / 5 - 2), 'rm /' + '[a-z]'.repeat(K / 5), 'cd ..;rm x;'.repeat(K / 11)]) {
+    const t0 = performance.now();
+    assert.doesNotThrow(() => bashH(c));
+    assert.ok(performance.now() - t0 < 50, `slow: ${c.slice(0, 20)}`);
+  }
+  assert.equal(bashH('rm ~/' + '{a,b}'.repeat(3000) + '/.kubicle')?.kind, 'self');
+});
+
+test('round 4: kubiclePort is configurable', () => {
+  const ctx = { cwd: '/work/app', branches: br('feature'), home: KHOME, strictScripts: false, kubiclePort: 5000 };
+  assert.equal(protectedAction('Bash', { command: 'curl -d x http://localhost:5000/api/grants' }, ctx)?.kind, 'self');
+  assert.equal(protectedAction('Bash', { command: 'curl -d x http://localhost:4317/api/grants' }, ctx), null);
+});

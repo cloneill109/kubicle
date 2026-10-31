@@ -1,9 +1,13 @@
 // Protected-action rules for the Bubbles coordinator. FAIL-CLOSED: anything we cannot fully parse
-// and prove safe is reported as protected (the owner is asked). A shell-text classifier cannot be
-// perfect; RESIDUAL GAPS (accepted): scripts written to disk and then executed, programs that shell
-// out to git internally (npm scripts, make, node/python), repo-config remote.*.push / push.default
-// mappings for colon-less refspecs, and anything outside Bash/file/MCP tools. GitHub branch
-// protection on the remote is the real backstop; these rules are the first line, not the last.
+// and prove safe is reported as protected (the owner is asked); an exception during analysis is too.
+// A shell-text classifier cannot be perfect. RESIDUAL GAPS (accepted, not fixed here):
+//   - GitHub Enterprise hosts (`https://github.example.com/api/v3/...`) and non-git VCS (`sl push`);
+//   - inline interpreter code that builds commands at runtime beyond what the text shows;
+//   - scripts written to disk and then executed, and programs that call git internally
+//     (npm scripts, make, node/python) - including direct writes to office.db through them;
+//   - repo-config remote.*.push / push.default mappings for colon-less refspecs.
+// Backstops: GitHub branch protection on the remote, office confirmation for grants, and the
+// bubbles log hash chain. These rules are the first line, not the last.
 
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
@@ -28,7 +32,11 @@ export type Protected =
 
 export interface BranchInfo { protected: Set<string>; current: string | null }
 
-export interface RulesCtx { cwd?: string; branches: BranchInfo; home: string; strictScripts: boolean }
+export interface RulesCtx {
+  cwd?: string; branches: BranchInfo; home: string; strictScripts: boolean;
+  /** Kubicle's TCP port (default 4317): local write requests to it count as self-administration. */
+  kubiclePort?: number;
+}
 
 // ---------- branch info (file reads only; never spawns git) ----------
 
@@ -111,26 +119,36 @@ export function grantMatches(p: Protected, projectId: string, grants: Grant[], n
 
 // ---------- shell tokenizing ----------
 
-interface Segment { words: string[]; raw: string }
+interface Redir { op: string; target: string }
+/** One simple command. Redirections are kept out of `words`; `pipeIn` = stdin comes from a `|`. */
+interface Segment { words: string[]; raw: string; redirs: Redir[]; pipeIn: boolean }
 
 /**
  * Split a shell command into simple-command segments, respecting quotes. Separators are
  * `&&`, `||`, `;`, `|`, `&`, newline and parens outside quotes. `$(...)` and backtick bodies
- * (also inside double quotes) are scanned as their own segments. Conservative by design.
+ * (also inside double quotes) are scanned as their own segments. Unquoted redirections
+ * (`>f`, `2>>f`, `&>f`, `<f`, `<<<w`) go to `redirs`, not `words`. Conservative by design.
  */
 function segmentsOf(cmd: string, depth = 0): Segment[] {
   const out: Segment[] = [];
   if (depth > 8) return out;
   let words: string[] = [];
+  let redirs: Redir[] = [];
+  let pendingOp: string | null = null; // the next word is a redirect target
+  let pipeIn = false;
   let word = '';
   let inWord = false;
   let rawStart = 0;
-  const endWord = () => { if (inWord) words.push(word); word = ''; inWord = false; };
-  const endSeg = (i: number) => {
+  const endWord = () => {
+    if (inWord) { if (pendingOp !== null) { redirs.push({ op: pendingOp, target: word }); pendingOp = null; } else words.push(word); }
+    word = ''; inWord = false;
+  };
+  const endSeg = (i: number, nextPipe: boolean) => {
     endWord();
-    if (words.length) out.push({ words, raw: cmd.slice(rawStart, i) });
-    words = [];
+    if (words.length || redirs.length) out.push({ words, raw: cmd.slice(rawStart, i), redirs, pipeIn });
+    words = []; redirs = []; pendingOp = null;
     rawStart = i + 1;
+    pipeIn = nextPipe;
   };
   const sub = (body: string) => { out.push(...segmentsOf(body, depth + 1)); };
   const closeParen = (from: number): number => {
@@ -172,18 +190,30 @@ function segmentsOf(cmd: string, depth = 0): Segment[] {
       const e = cmd.indexOf('`', i + 1); const end = e < 0 ? cmd.length : e;
       sub(cmd.slice(i + 1, end)); word += cmd.slice(i, end + 1); inWord = true; i = end + 1; continue;
     }
-    if (c === '&' || c === '|' || c === ';' || c === '\n' || c === '(' || c === ')') {
-      endSeg(i); i++; continue;
+    // redirection operator (not process substitution `<(` / `>(`)
+    const redir = /^(&>>?|<<<|<<-?|<>|>>|>\||>&|<&|>|<)/.exec(cmd.slice(i, i + 3));
+    if (redir && cmd[i + redir[1].length] !== '(') {
+      let op = redir[1];
+      if (inWord && /^\d+$/.test(word) && !/['"]/.test(cmd.slice(i - word.length, i))) { op = word + op; word = ''; inWord = false; }
+      endWord();
+      pendingOp = op;
+      i += redir[1].length;
+      continue;
+    }
+    if (c === '|' && cmd[i + 1] === '|') { endSeg(i, false); i += 2; rawStart = i; continue; }
+    if (c === '&' && cmd[i + 1] === '&') { endSeg(i, false); i += 2; rawStart = i; continue; }
+    if (c === '|') { endSeg(i, true); i += cmd[i + 1] === '&' ? 2 : 1; rawStart = i; continue; }
+    if (c === '&' || c === ';' || c === '\n' || c === '(' || c === ')') {
+      endSeg(i, false); i++; continue;
     }
     if (c === ' ' || c === '\t' || c === '\r') { endWord(); i++; continue; }
     word += c; inWord = true; i++;
   }
-  endSeg(cmd.length);
+  endSeg(cmd.length, false);
   return out;
 }
 
-
-const WRAPPERS = new Set(['env', 'sudo', 'command', 'exec', 'nohup', 'time', 'nice', 'builtin']);
+const WRAPPERS = new Set(['env', 'sudo', 'doas', 'command', 'exec', 'nohup', 'time', 'nice', 'ionice', 'timeout', 'builtin']);
 
 /** Drop leading env assignments and wrapper commands (with their flags). Used for script detection only. */
 function stripPrefix(words: string[]): string[] {
@@ -193,7 +223,7 @@ function stripPrefix(words: string[]): string[] {
     if (ENV_ASSIGN.test(w)) { i++; continue; }
     if (WRAPPERS.has(w)) {
       i++;
-      while (i < words.length && words[i].startsWith('-')) i++;
+      while (i < words.length && (words[i].startsWith('-') || /^\d+[smhd]?$/.test(words[i]))) i++;
       continue;
     }
     break;
@@ -294,47 +324,78 @@ function analyzeGit(w: string[], b: BranchInfo, changed: boolean, gitEnv: boolea
 // ----- HTTP clients and gh -----
 
 const HTTP_CLIENTS = new Set(['curl', 'wget', 'http', 'https', 'httpie', 'xh']);
+const HTTPIE = new Set(['http', 'https', 'httpie', 'xh']);
 const isGetLike = (m: string | undefined): boolean => m !== undefined && /^(get|head)$/i.test(m);
+// words of a segment with quoted strings split again, so `bash -c "curl -X PUT ..."` is visible
+const flatWords = (s: Segment): string[] => s.words.flatMap(w => w.split(/\s+/).filter(Boolean));
+const isHttpSeg = (s: Segment): boolean => flatWords(s).some(w => HTTP_CLIENTS.has(lc(basename(w))));
 
 /** True only when every http-client / gh-api word proves a read-only GET/HEAD request. */
 function httpReadOnly(words: string[], gh: boolean): boolean {
   const names = new Set(words.map(w => lc(basename(w))));
   const curl = names.has('curl');
-  const httpie = names.has('http') || names.has('https') || names.has('httpie') || names.has('xh');
+  const httpie = [...HTTPIE].some(n => names.has(n));
   for (let i = 0; i < words.length; i++) {
     const w = words[i];
     const l = lc(w);
     if (/^(put|post|patch|delete)$/.test(l)) return false;
-    if (/^--(data|form|json|upload-file|post|body|raw|multipart|input|field|raw-field)/.test(l)) return false;
+    if (/^--(data|form|json|upload-file|post|body|raw|multipart|input|field|raw-field|config)/.test(l)) return false;
+    if (/method-override/.test(l)) return false;
     const long = /^--(request|method)(?:=(.*))?$/.exec(l);
     if (long) { if (!isGetLike(long[2] ?? words[i + 1])) return false; continue; }
     if (/^-[A-Za-z]/.test(w)) {
       const run = /^-([A-Za-z0-9]*)/.exec(w)![1]; // short-flag cluster; may carry a glued value (-d@f, -XPUT)
       const x = run.indexOf('X');
       const flags = x >= 0 ? run.slice(0, x) : run;
-      if (curl && /[dFT]/.test(flags)) return false;
+      if (curl && /[dFTK]/.test(flags)) return false; // -K: a config file can carry any method/body
       if (gh && /[fF]/.test(flags)) return false;
       if (httpie && /[fj]/.test(flags)) return false;
       if (x >= 0 && (curl || gh) && !isGetLike(run.slice(x + 1) || words[i + 1])) return false;
       continue;
     }
-    if (httpie && /^[^=:@\/\s-][^=:@\/\s]*(=(?!=)|:=|@)/.test(w)) return false;
+    if (httpie && (/^[^=:@\/\s-][^=:@\/\s]*(=(?!=)|:=|@)/.test(w) || w.startsWith('@'))) return false;
     if (gh && l === 'graphql') return false;
   }
   return true;
 }
 
-function ghSafe(w: string[]): boolean {
+/**
+ * An HTTP-client segment that may write: write flags/method, arguments fed in by xargs/parallel,
+ * or (httpie/xh) a request body from stdin.
+ */
+function httpSegWrites(s: Segment): boolean {
+  const ws = flatWords(s);
+  if (!httpReadOnly(ws, false)) return true;
+  if (ws.some(w => /^(xargs|parallel)$/.test(lc(basename(w))))) return true;
+  const httpie = ws.some(w => HTTPIE.has(lc(basename(w))));
+  return httpie && (s.pipeIn || s.redirs.some(r => r.op.includes('<')));
+}
+
+// value-taking curl/httpie flags whose argument is not the URL
+const HTTP_VALUE_FLAGS = /^(-[dHFuoAbecTxEX]|--(data[\w-]*|json|header|form[\w-]*|user|output|user-agent|cookie[\w-]*|referer|upload-file|proxy|oauth2-bearer|cert|key|cacert|request|method))$/;
+/**
+ * The request URL is not a literal: `$VAR/...`, `"$(cat url)"`, `https://api.$DOMAIN/...`. A word
+ * with an expansion counts unless it is a flag, a flag's value, or an httpie `key=value` item.
+ */
+function opaqueUrl(s: Segment): boolean {
+  return s.words.some((w, i) => i > 0 && /[$`]/.test(w) && !w.startsWith('-') && !HTTP_VALUE_FLAGS.test(s.words[i - 1])
+    && !/^[\w.-]+(:=|==|=|@|:(?!\/\/))/.test(w));
+}
+
+/** 'ok' = read-only; 'moves' = safe but may change HEAD (checkout/clone); false = unproven. */
+function ghVerdict(w: string[]): 'ok' | 'moves' | false {
   let i = 1;
   while (i < w.length && w[i].startsWith('-')) i += (w[i] === '-R' || w[i] === '--repo') ? 2 : 1;
   const a = w[i];
   const sub = w[i + 1];
-  if (a === 'api') return httpReadOnly(w.slice(i + 1), true);
-  if (a === 'pr') return ['view', 'list', 'create', 'checks', 'diff', 'status', 'checkout', 'comment', 'review'].includes(sub);
-  if (a === 'issue' || a === 'run') return true;
-  if (a === 'repo') return ['view', 'clone', 'list'].includes(sub);
-  if (a === 'release') return ['view', 'list'].includes(sub);
-  if (a === 'auth') return sub === 'status';
+  if (a === 'api') return httpReadOnly(w.slice(i + 1), true) ? 'ok' : false;
+  if (a === 'pr' && sub === 'checkout') return 'moves';
+  if (a === 'pr') return ['view', 'list', 'create', 'checks', 'diff', 'status', 'comment', 'review', 'edit', 'ready', 'close', 'reopen'].includes(sub) ? 'ok' : false;
+  if (a === 'issue' || a === 'run') return 'ok';
+  if (a === 'repo' && sub === 'clone') return 'moves';
+  if (a === 'repo') return ['view', 'list'].includes(sub) ? 'ok' : false;
+  if (a === 'release') return ['view', 'list'].includes(sub) ? 'ok' : false;
+  if (a === 'auth') return sub === 'status' ? 'ok' : false;
   return false; // unknown subcommand: possibly a gh alias
 }
 
@@ -343,28 +404,48 @@ const INDIRECT = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'ev
 const ENV_SETTERS = new Set(['export', 'declare', 'typeset', 'readonly', 'local']);
 const INTERP = new Set(['python', 'python3', 'ruby', 'perl', 'php', 'node', 'deno', 'bun', 'osascript', 'lua']);
 const INLINE_FLAG = /^(-c|-e|-p|-r|-pe|-E|--eval|--print)$/;
-function inlineInterp(s: Segment): boolean {
+/** First word after leading `X=y` assignments (the command word), or undefined. */
+function cmdWord(s: Segment): string | undefined {
   let i = 0;
   while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) i++;
-  const c = s.words[i];
+  return s.words[i];
+}
+function inlineInterp(s: Segment): boolean {
+  const c = cmdWord(s);
   return c !== undefined && INTERP.has(lc(basename(c)).replace(/[\d.]+$/, '')) && s.words.some(a => INLINE_FLAG.test(a));
 }
+// shell syntax words that look like globs but are not: `[ ... ]`, `[[ ... ]]`, `{ ...; }`
+const GLOB_SYNTAX = new Set(['[', '[[', ']', ']]', '{', '}']);
+const isGlobWord = (w: string): boolean => /[*?\[{]/.test(w) && !GLOB_SYNTAX.has(w);
 const SENS_ENV = /^(GIT_|PATH=|HOME=|XDG_)/i;
 const RISKY_WORDS = /(^|[^\w-])(git|gh|hub)(?!\w)|\b(push|merge|rebase|sync|update-ref)\b|refs\//;
 const GIT_WORD = /(^|[^\w-])(git|hub)(?!\w)/;
+// write files only; they cannot run git (but may rewrite .git/HEAD, so they still taint HEAD)
+const SINKS = new Set(['tee']);
 
 export const MAX_COMMAND_LEN = 16 * 1024;
 
 function pushMergeVerdict(cmd: string, nm: string, segs: Segment[], ctx: RulesCtx): Protected | null {
-  const words = segs.flatMap(s => s.words);
-  if ((nm.includes('api.github.com') || /github\.com\/api\b/.test(nm)) && words.some(w => HTTP_CLIENTS.has(lc(basename(w))))
-    && !httpReadOnly(words, false)) {
-    return { kind: nm.includes('merge') ? 'merge' : 'push', branch: null, reason: 'GitHub API write via HTTP client' };
+  const mergeKind = (): 'push' | 'merge' => (nm.includes('merge') ? 'merge' : 'push');
+  // HTTP: GitHub API writes, and writes whose URL we cannot read (the target may be GitHub)
+  const httpSegs = segs.filter(isHttpSeg);
+  // per segment, and (as before) over all words of the command: `echo "-X PUT" | xargs curl ...`
+  if ((nm.includes('api.github.com') || /github\.com\/api\b/.test(nm)) && httpSegs.length > 0
+    && (httpSegs.some(httpSegWrites) || !httpReadOnly(segs.flatMap(x => x.words), false))) {
+    return { kind: mergeKind(), branch: null, reason: 'GitHub API write via HTTP client' };
+  }
+  if (httpSegs.some(s => httpSegWrites(s) && opaqueUrl(s))) {
+    return { kind: mergeKind(), branch: null, reason: 'HTTP write to a URL that is not a literal' };
+  }
+  // a glob in the command word can expand to any binary (`/usr/bin/gi?`, `~/bin/g*`): never provable
+  const words0 = segs.map(cmdWord);
+  if (words0.some(w => w !== undefined && isGlobWord(w))) {
+    return { kind: 'push', branch: null, reason: `glob in command word: ${cmd.slice(0, 120)}` };
   }
   const gitWord = GIT_WORD.test(nm);
   const ghWord = /(^|[^\w-])gh(?![\w-])/.test(nm);
   const ghApi = ghWord && /(^|[^\w-])api(?![\w-])/.test(nm);
-  const opaque = segs.some(s => { let i = 0; while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) i++; return s.words[i] !== undefined && /[$`*?\[]/.test(s.words[i]); });
+  const opaque = words0.some(w => w !== undefined && /[$`]/.test(w));
   const hasPush = /\bpush\b/.test(nm);
   const trigger = ghApi || /\b(push|merge|rebase|subtree|update-ref|sync)\b|refs\//.test(nm);
   const inlineCode = segs.some(inlineInterp);
@@ -372,9 +453,10 @@ function pushMergeVerdict(cmd: string, nm: string, segs: Segment[], ctx: RulesCt
   const isMerge = !hasPush && !/\bsync\b/.test(nm) && (/\b(merge|rebase)\b/.test(nm) || ghWord);
   const kind: 'push' | 'merge' = isMerge ? 'merge' : 'push';
   const fail = (br: string | null): Protected => ({ kind, branch: br, reason: `${kind} not proven safe: ${cmd.slice(0, 120)}` });
-  if ((opaque || inlineCode) && trigger) return fail(null);
+  // an opaque command word (`$(which gh)`, `$G`) next to git/gh/push/merge text could be any of them
+  if (opaque || (inlineCode && trigger)) return fail(null);
   const b = ctx.branches;
-  let changed = false;
+  let changed = false; // HEAD / repo may differ from what branchInfo read (taints HEAD / @ destinations)
   let stickyEnv = false;
   for (const s of segs) {
     let i = 0;
@@ -384,25 +466,32 @@ function pushMergeVerdict(cmd: string, nm: string, segs: Segment[], ctx: RulesCt
     if (w.length === 0) { if (envOp) stickyEnv = true; continue; }
     const first = w[0];
     const base = lc(basename(first));
+    const writes = s.redirs.some(r => r.op.includes('>'));
     if (base === 'git' || base === 'hub' || /^git-[\w-]+$/.test(base)) {
       const gw = base.startsWith('git-') ? ['git', base.slice(4), ...w.slice(1)] : ['git', ...w.slice(1)];
       const v = analyzeGit(gw, b, changed, envOp);
       if (!v.ok) return fail(v.branch);
-      changed = v.changed;
+      changed = v.changed || writes;
     } else if (base === 'gh') {
-      if (!ghSafe(w)) return fail(null);
+      const g = ghVerdict(w);
+      if (g === false) return fail(null);
+      if (g === 'moves' || writes) changed = true;
     } else if (CD_CMDS.has(base)) {
       changed = true;
     } else if (ENV_SETTERS.has(base)) {
       if (w.slice(1).some(x => SENS_ENV.test(x))) stickyEnv = true;
     } else if (HARMLESS.has(base)) {
-      // data only
-    } else if (!trigger) {
-      // nothing push/merge-like anywhere: unrelated segments are none of our business
-    } else if (INDIRECT.has(base) || inlineInterp(s) || RISKY_WORDS.test(lc(s.raw)) || /[$`]/.test(s.raw)) {
-      // an unrelated program cannot redirect a literal refspec, but an executor/wrapper or anything
-      // mentioning git/push/merge could be running one
-      return fail(null);
+      if (writes) changed = true; // e.g. `echo ref: refs/heads/main > .git/HEAD`
+    } else if (SINKS.has(base)) {
+      changed = true;
+    } else {
+      // an unrelated program cannot redirect a literal refspec, but it may switch branches
+      // (`./co.sh main`, `make switch-main`): HEAD / @ are no longer known after it
+      changed = true;
+      if (trigger && (INDIRECT.has(base) || inlineInterp(s) || RISKY_WORDS.test(lc(s.raw)) || /[$`]/.test(s.raw))) {
+        // an executor/wrapper, or anything mentioning git/push/merge, could be running a push itself
+        return fail(null);
+      }
     }
   }
   return null;
@@ -412,43 +501,265 @@ function pushMergeVerdict(cmd: string, nm: string, segs: Segment[], ctx: RulesCt
 
 const CASE_INSENSITIVE = process.platform === 'darwin' || process.platform === 'win32';
 const norm = (s: string): string => (CASE_INSENSITIVE ? lc(s) : s);
-// `~` / `$HOME` only at the start of a token, bare or followed by a hidden/glob/quoted child
-const BARE_HOME = /(?<![^\s"'=:(;|&])(?:~|\$\{?home\}?)(?:(?![\w\/])|\/(?=[.*?\["'\s]|$))/;
+// `~` / `$HOME` only at the start of a token, bare or followed by a hidden/glob/brace/quoted child
+const BARE_HOME = /(?<![^\s"'=:(;|&])(?:~|\$\{?home\}?)(?:(?![\w\/])|\/(?=[.*?\[{"'\s]|$))/;
 const SELF_SAFE = new Set(['cat', 'ls', 'grep', 'rg', 'head', 'tail', 'stat', 'wc', 'file', 'cd', 'pwd', 'echo']);
 const DESTRUCTIVE_FIND = new Set(['-delete', '-exec', '-execdir', '-ok', '-okdir']);
+// commands that destroy or replace what they name; for TARGET_ONLY ones only the last operand counts
+const DESTRUCTIVE = new Set(['rm', 'rmdir', 'mv', 'cp', 'tee', 'chmod', 'chown', 'chgrp', 'chflags', 'truncate', 'ln', 'shred',
+  'unlink', 'rsync', 'install', 'dd', 'srm', 'trash', 'ditto']);
+const TARGET_ONLY = new Set(['cp', 'ln', 'rsync', 'install', 'ditto']);
 
-function stripSlash(p: string): string { return p.length > 1 ? p.replace(/\/+$/, '') : p; }
+// --- path relation: does a (possibly globbed / braced / ~-prefixed) shell word name Kubicle's home? ---
+
+type Rel = 'none' | 'ancestor' | 'touch'; // touch = the home itself or something inside it
+interface Cand { path: string; open: boolean } // open: anything below `path` (unexpandable braces)
+
+const comps = (p: string): string[] => p.split('/').filter(Boolean);
+const GLOB_CH = /[*?\[{]/;
+
+type GlobTok = { k: 'star' } | { k: 'one' } | { k: 'set'; neg: boolean; body: string } | { k: 'lit'; c: string };
+
+function globToks(pat: string): GlobTok[] {
+  const out: GlobTok[] = [];
+  for (let i = 0; i < pat.length; i++) {
+    const c = pat[i];
+    if (c === '*' || c === '{') { // an unexpanded `{...}` (`{a..z}`, `{}`) may be anything
+      if (c === '{') { const j = pat.indexOf('}', i); i = j < 0 ? pat.length : j; }
+      if (out[out.length - 1]?.k !== 'star') out.push({ k: 'star' });
+    } else if (c === '?') out.push({ k: 'one' });
+    else if (c === '[' && pat.indexOf(']', i + 2) > 0) {
+      const j = pat.indexOf(']', i + 2);
+      const body = pat.slice(i + 1, j);
+      const neg = body[0] === '!' || body[0] === '^';
+      out.push({ k: 'set', neg, body: neg ? body.slice(1) : body });
+      i = j;
+    } else out.push({ k: 'lit', c });
+  }
+  return out;
+}
+
+function tokMatch(t: GlobTok, ch: string): boolean {
+  if (t.k === 'one') return true;
+  if (t.k === 'lit') return norm(t.c) === norm(ch);
+  if (t.k !== 'set') return false;
+  const x = norm(ch);
+  let hit = false;
+  for (let i = 0; i < t.body.length && !hit; i++) {
+    const lo = norm(t.body[i]);
+    if (t.body[i + 1] === '-' && i + 2 < t.body.length) { hit = x >= lo && x <= norm(t.body[i + 2]); i += 2; }
+    else hit = x === lo;
+  }
+  return hit !== t.neg;
+}
+
+/**
+ * Iterative glob match (no regex: a 16 KB pattern must not blow the stack), O(pattern x name).
+ * A glob may match a dotfile too (zsh GLOB_DOTS / bash dotglob): conservative.
+ */
+function compMatch(pat: string, name: string): boolean {
+  if (!GLOB_CH.test(pat)) return norm(pat) === norm(name);
+  const t = globToks(pat);
+  let p = 0; let n = 0; let starP = -1; let starN = 0;
+  while (n < name.length) {
+    if (p < t.length && t[p].k === 'star') { starP = p++; starN = n; continue; }
+    if (p < t.length && tokMatch(t[p], name[n])) { p++; n++; continue; }
+    if (starP < 0) return false;
+    p = starP + 1; n = ++starN;
+  }
+  while (p < t.length && t[p].k === 'star') p++;
+  return p === t.length;
+}
+
+function relation(pattern: string, target: string): Rel {
+  const pc = comps(pattern);
+  const tc = comps(target);
+  for (let k = 0; ; k++) {
+    if (k === pc.length) return k === tc.length ? 'touch' : 'ancestor';
+    if (k === tc.length) return 'touch';
+    if (!compMatch(pc[k], tc[k])) return 'none';
+  }
+}
+
+/** Expand `{a,b}` groups (nested ok); stops after 64 results (the rest stays an open prefix). */
+function expandBraces(w: string, out: Cand[], budget: { n: number }): void {
+  for (let i = 0; i < w.length; i++) {
+    if (w[i] !== '{') continue;
+    let d = 0; let j = i; const commas: number[] = [];
+    for (; j < w.length; j++) {
+      if (w[j] === '{') d++;
+      else if (w[j] === '}') { if (--d === 0) break; }
+      else if (w[j] === ',' && d === 1) commas.push(j);
+    }
+    if (j >= w.length) break; // unbalanced: literal
+    if (commas.length === 0) continue; // `{}` / `{a..b}`: the glob matcher treats it as a wildcard
+    if ((budget.n -= commas.length + 1) < 0) { out.push({ path: w.slice(0, i), open: true }); return; }
+    let start = i + 1;
+    for (const c of [...commas, j]) { expandBraces(w.slice(0, i) + w.slice(start, c) + w.slice(j + 1), out, budget); start = c + 1; }
+    return;
+  }
+  out.push({ path: w, open: false });
+}
+
+const HOME_DIR = homedir();
+const DATA_VOL = /^\/system\/volumes\/data(?=\/|$)/i; // macOS firmlink: same files as `/`
+
+/** Leading `~`, `~user`, `$HOME`, `${HOME}` expanded; null if another expansion remains. */
+function expandHomeWord(w: string): string | null {
+  const t = /^~([A-Za-z0-9._-]*)(?=\/|$)/.exec(w);
+  const v = /^\$(\{HOME\}|HOME)(?!\w)/.exec(w);
+  if (t) w = (t[1] ? join(dirname(HOME_DIR), t[1]) : HOME_DIR) + w.slice(t[0].length);
+  else if (v) w = HOME_DIR + w.slice(v[0].length);
+  return /[$`]/.test(w) ? null : w;
+}
+
+/**
+ * Relation of a shell word (an operand) to the Kubicle home. Relative words resolve against
+ * `cwd`; with an unknown cwd they count when their first component could be one of the home's
+ * path components. Words with other expansions (`$X`) are left to the textual checks.
+ */
+function wordRel(word: string, cwd: string | null, targets: string[]): Rel {
+  if (/^--?[\w-]+=/.test(word) || /^[A-Za-z_]\w*=/.test(word)) word = word.slice(word.indexOf('=') + 1); // --target=~/x, of=/x
+  else if (word.startsWith('-')) return 'none';
+  if (word === '') return 'none';
+  const w = expandHomeWord(word);
+  if (w === null) return 'none';
+  const cands: Cand[] = [];
+  expandBraces(w, cands, { n: 64 });
+  let best: Rel = 'none';
+  for (const c of cands) {
+    let p = c.path;
+    if (!isAbsolute(p)) {
+      if (cwd === null) {
+        const first = comps(p).find(x => x !== '.');
+        if (first !== undefined && first !== '..' && targets.some(t => comps(t).some(tc => compMatch(first, tc)))) return 'touch';
+        continue;
+      }
+      p = join(cwd, p);
+    }
+    p = resolve(p).replace(DATA_VOL, '') || '/';
+    for (const t of targets) {
+      let r = relation(p, t);
+      if (c.open && r === 'ancestor') r = 'touch';
+      if (r === 'touch') return 'touch';
+      if (r === 'ancestor') best = 'ancestor';
+    }
+  }
+  return best;
+}
+
+/** Directory after a `cd`/`pushd` segment; null when it cannot be known. */
+function cdTarget(args: string[], cwd: string | null): string | null {
+  const ops = args.filter(a => !/^-[LPe@]+$/.test(a));
+  if (ops.length === 0) return HOME_DIR;
+  const w = expandHomeWord(ops[0]);
+  if (w === null || w === '-' || GLOB_CH.test(w)) return null;
+  if (isAbsolute(w)) return resolve(w);
+  return cwd === null ? null : resolve(cwd, w);
+}
+
+/** Start directories of a `find` / `fd` invocation (cwd when none given; '.' when cwd unknown). */
+function searchRoots(base: string, args: string[]): string[] {
+  const roots: string[] = [];
+  let i = 0;
+  if (base === 'find') {
+    for (; i < args.length; i++) { // GNU -H -L -P -O<n> -D <x>; BSD -E -X -d -s -x -f <path>
+      const a = args[i];
+      if (/^-([HLPEXdsx]+|O\d*)$/.test(a)) continue;
+      if (a === '-D') { i++; continue; }
+      if (a === '-f') { if (args[i + 1] !== undefined) roots.push(args[i + 1]); i++; continue; }
+      break;
+    }
+    for (; i < args.length && !/^[-(!)]/.test(args[i]); i++) roots.push(args[i]);
+  } else {
+    const valueFlag = /^(-[etEdcjSo]|--(type|extension|exclude|max-depth|min-depth|exact-depth|size|changed-within|changed-before|owner|color|threads|max-results|path-separator|ignore-file|batch-size|format))$/;
+    for (; i < args.length; i++) {
+      const a = args[i];
+      if (/^(-x|-X|--exec|--exec-batch)(=|$)/.test(a)) break; // the rest is the command to run
+      if (/^--(search-path|base-directory)$/.test(a)) { if (args[i + 1] !== undefined) roots.push(args[i + 1]); i++; continue; }
+      if (valueFlag.test(a)) { i++; continue; }
+      if (!a.startsWith('-') || a.includes('=')) roots.push(a); // the pattern too: harmless, conservative
+    }
+    if (roots.length < 2) roots.push('.');
+  }
+  return roots.length ? roots : ['.'];
+}
+
+/** `xargs [opts] cmd ...`: true unless cmd is a read-only command (or absent, i.e. echo). */
+function xargsWrites(w: string[]): boolean {
+  let i = 1;
+  while (i < w.length && w[i].startsWith('-')) i += /^-[IPLnsdEea]$/.test(w[i]) ? 2 : 1;
+  const c = w[i];
+  return c !== undefined && !(SELF_SAFE.has(lc(basename(c))) && c !== 'cd');
+}
+
+/** Port of a URL-ish word (`localhost:4317/x`, `http://[::1]:4317`, httpie `:4317/x`). */
+function urlPort(w: string): number | null {
+  const m = /^(?:[a-z][\w+.-]*:\/\/)?(?:[^@\/\s]*@)?(\[[^\]]*\]|[^:\/\s]*):(\d{1,5})(?:[\/?#]|$)/i.exec(w);
+  return m ? Number(m[2]) : null;
+}
+
+function homeTargets(home: string): string[] {
+  const h = resolve(expandTilde(home));
+  const r = realish(h);
+  return r === h ? [h] : [h, r];
+}
 
 function selfBash(cmd: string, nm: string, segs: Segment[], ctx: RulesCtx): Protected | null {
   if (/(?<![\w.])kubicle(\.ts|\.js|\.mjs|\.cjs)?(?![\w.-])/.test(nm) && /\b(grant|instruct|revoke|bubbles|log)\b/.test(nm)) {
     return { kind: 'self', reason: 'kubicle self-administration command' };
   }
-  const words = segs.flatMap(s => s.words);
-  if (/(localhost|127\.0\.0\.1|\[::1\])/.test(nm) && words.some(w => HTTP_CLIENTS.has(lc(basename(w)))) && !httpReadOnly(words, false)) {
-    return { kind: 'self', reason: 'write request to a local server' };
+  const port = ctx.kubiclePort ?? 4317;
+  if (segs.some(s => isHttpSeg(s) && httpSegWrites(s) && (s.words.some(w => urlPort(w) === port) || /hook\.sock/i.test(s.raw)))) {
+    return { kind: 'self', reason: 'write request to the Kubicle server' };
   }
-  const h = lc(resolve(ctx.home));
-  const hd = lc(homedir());
-  const roots = [hd, '~', '$home', '${home}'];
-  const tilde = h === hd || h.startsWith(hd + sep) ? '~' + h.slice(hd.length) : null;
-  // find with a destructive action starting at / ~ $HOME or any ancestor of the Kubicle home
+  const targets = homeTargets(ctx.home);
+  const xargsW = segs.some(s => { const w = stripPrefix(s.words); return lc(basename(w[0] ?? '')) === 'xargs' && xargsWrites(w); });
+  let cwd: string | null = ctx.cwd ? resolve(ctx.cwd) : null;
+  let touched = false;
+  let related = false; // some operand names the home, something inside it, or an ancestor
   for (const s of segs) {
-    let i = 0;
-    while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) i++;
-    if (lc(basename(s.words[i] ?? '')) !== 'find') continue;
-    const args = s.words.slice(i + 1);
-    if (!args.some(a => DESTRUCTIVE_FIND.has(a))) continue;
-    for (const a of args) {
-      if (a.startsWith('-') || a === '(' || a === '!') break;
-      const p = stripSlash(lc(a));
-      if (p === '/' || p === '~' || p === '$home' || p === '${home}' || p === hd || h === p || h.startsWith(p + '/')) {
-        return { kind: 'self', reason: 'destructive find over a directory containing Kubicle state' };
+    const w = stripPrefix(s.words);
+    const base = lc(basename(w[0] ?? ''));
+    const args = w.slice(1);
+    // find / fd that deletes or runs commands (itself or via `| xargs`) over a tree holding the home
+    if (base === 'find' || base === 'fd' || base === 'fdfind') {
+      const acts = base === 'find' ? args.some(a => DESTRUCTIVE_FIND.has(a) || /^-f(print|ls)/.test(a)) : args.some(a => /^(-x|-X|--exec|--exec-batch)(=|$)/.test(a));
+      if (acts || xargsW) {
+        for (const r of searchRoots(base === 'find' ? 'find' : 'fd', args)) {
+          if ((cwd === null && !isAbsolute(expandHomeWord(r) ?? '/')) || wordRel(r, cwd, targets) !== 'none') {
+            return { kind: 'self', reason: 'destructive find over a directory containing Kubicle state' };
+          }
+        }
       }
     }
+    const ops = args.filter(a => !a.startsWith('-') || /^--?[\w-]+=/.test(a));
+    const destr = DESTRUCTIVE.has(base);
+    const allOps = !TARGET_ONLY.has(base) // cp/ln/install -t DIR: the target comes first (rsync -t = times)
+      || (base !== 'rsync' && args.some(a => /^(-[a-zA-Z]*t|--target-directory)/.test(a)));
+    for (const o of ops) {
+      const r = wordRel(o, cwd, targets);
+      if (r === 'touch') touched = true;
+      if (r !== 'none') related = true;
+      if (r === 'ancestor' && destr && (allOps || o === ops[ops.length - 1])) {
+        return { kind: 'self', reason: `${base} on a directory containing Kubicle state: ${o}` };
+      }
+    }
+    for (const r of s.redirs) {
+      const rel = wordRel(r.target, cwd, targets);
+      if (rel !== 'none' && r.op.includes('>')) return { kind: 'self', reason: `redirect onto Kubicle state: ${r.target}` };
+      if (rel === 'touch') touched = true;
+    }
+    if (CD_CMDS.has(base)) cwd = base === 'popd' ? null : cdTarget(args, cwd);
   }
-  const mentions = nm.includes(h) || (tilde !== null && nm.includes(tilde))
-    || roots.some(r => nm.includes(r + '/.k') || nm.includes(r + '/office.db') || nm.includes(r + '/office*'))
-    || /(^|[\s\/=])\.kub/.test(nm) || /(^|\s)\.k\S*[*?\[]/.test(nm)
+  if (xargsW && related) return { kind: 'self', reason: 'xargs runs a writing command over paths holding Kubicle state' };
+  const h = lc(targets[0]);
+  const hd = lc(HOME_DIR);
+  const roots = [hd, '~', '$home', '${home}'];
+  const tilde = h === hd || h.startsWith(hd + sep) ? '~' + h.slice(hd.length) : null;
+  const mentions = touched || nm.includes(h) || (tilde !== null && nm.includes(tilde))
+    || roots.some(r => nm.includes(r + '/.k') || nm.includes(r + '/{') || nm.includes(r + '/office.db') || nm.includes(r + '/office*'))
+    || /(^|[\s\/=])\.kub/.test(nm) || /(^|\s)\.k\S*[*?\[]/.test(nm) || /\{(?:[^\s{}]*,)?\.k/.test(nm)
     || /(^|[\s\/])office(\.db\S*|[*?\[]\S*)(?=\s|$)/.test(nm)
     || BARE_HOME.test(lc(cmd)) || BARE_HOME.test(nm)
     || segs.some(s => s.words.length === 1 && s.words[0] === 'cd');
@@ -503,8 +814,12 @@ export function protectedAction(toolName: string, input: unknown, ctx: RulesCtx)
     if (cmd.length > MAX_COMMAND_LEN) return { kind: 'push', branch: null, reason: 'command too long to analyze' };
     const nm = lc(cmd.replace(/['"\\]/g, ''));
     // fd duplication and /dev/null redirects are harmless; every other redirect stays visible as a word
-    const segs = segmentsOf(cmd.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' '));
-    return selfBash(cmd, nm, segs, ctx) ?? pushMergeVerdict(cmd, nm, segs, ctx) ?? (ctx.strictScripts ? scriptBash(segs) : null);
+    try {
+      const segs = segmentsOf(cmd.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' '));
+      return selfBash(cmd, nm, segs, ctx) ?? pushMergeVerdict(cmd, nm, segs, ctx) ?? (ctx.strictScripts ? scriptBash(segs) : null);
+    } catch {
+      return { kind: 'push', branch: null, reason: 'command could not be analyzed' }; // fail closed
+    }
   }
   if (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'NotebookEdit') {
     const raw = typeof inp.file_path === 'string' ? inp.file_path : typeof inp.notebook_path === 'string' ? inp.notebook_path : '';
