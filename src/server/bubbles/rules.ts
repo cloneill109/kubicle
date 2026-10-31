@@ -5,7 +5,8 @@
 //   - inline interpreter code that builds commands at runtime beyond what the text shows;
 //   - scripts written to disk and then executed, and programs that call git internally
 //     (npm scripts, make, node/python) - including direct writes to office.db through them;
-//   - repo-config remote.*.push / push.default mappings for colon-less refspecs.
+//   - repo-config remote.*.push / push.default mappings for colon-less refspecs;
+//   - archive extraction into the home or an ancestor (`tar -C ~ -x`, `unzip -d ~`).
 // Backstops: GitHub branch protection on the remote, office confirmation for grants, and the
 // bubbles log hash chain. These rules are the first line, not the last.
 
@@ -139,12 +140,15 @@ function segmentsOf(cmd: string, depth = 0): Segment[] {
   let word = '';
   let inWord = false;
   let rawStart = 0;
+  let caseDepth = 0;     // inside `case ... esac`
+  let casePat = false;   // at an arm pattern (`a*|b)`): never executed, so not a command
   const endWord = () => {
     if (inWord) { if (pendingOp !== null) { redirs.push({ op: pendingOp, target: word }); pendingOp = null; } else words.push(word); }
     word = ''; inWord = false;
   };
   const endSeg = (i: number, nextPipe: boolean) => {
     endWord();
+    if (words[0] === 'esac' && caseDepth > 0) caseDepth--;
     if (words.length || redirs.length) out.push({ words, raw: cmd.slice(rawStart, i), redirs, pipeIn });
     words = []; redirs = []; pendingOp = null;
     rawStart = i + 1;
@@ -159,8 +163,30 @@ function segmentsOf(cmd: string, depth = 0): Segment[] {
     }
     return cmd.length;
   };
+  // `case WORD in` just completed (the keyword itself unquoted)
+  const caseHeader = (): boolean => words.length === 3 && words[0] === 'case' && words[2] === 'in' && /^\s*case\s/.test(cmd.slice(rawStart));
+  // end of the arm pattern starting at `from`, or null to tokenize normally (at `esac`, or when the
+  // pattern holds `$(` / a backtick, which bash does execute)
+  const skipPattern = (from: number): number | null => {
+    let j = from;
+    while (j < cmd.length && /\s/.test(cmd[j])) j++;
+    if (/^esac(?![\w-])/.test(cmd.slice(j, j + 5))) return null;
+    for (; j < cmd.length; j++) {
+      const ch = cmd[j];
+      if (ch === '`' || (ch === '$' && cmd[j + 1] === '(')) return null;
+      if (ch === '\\') { j++; continue; }
+      if (ch === "'" || ch === '"') { const e = cmd.indexOf(ch, j + 1); if (e < 0) return null; j = e; continue; }
+      if (ch === ')') return j + 1;
+    }
+    return null;
+  };
   let i = 0;
   while (i < cmd.length) {
+    if (casePat) {
+      casePat = false;
+      const k = skipPattern(i);
+      if (k !== null) { i = k; rawStart = k; continue; }
+    }
     const c = cmd[i];
     if (c === '\\' && i + 1 < cmd.length) { word += cmd[i + 1]; inWord = true; i += 2; continue; }
     if (c === "'") {
@@ -203,10 +229,20 @@ function segmentsOf(cmd: string, depth = 0): Segment[] {
     if (c === '|' && cmd[i + 1] === '|') { endSeg(i, false); i += 2; rawStart = i; continue; }
     if (c === '&' && cmd[i + 1] === '&') { endSeg(i, false); i += 2; rawStart = i; continue; }
     if (c === '|') { endSeg(i, true); i += cmd[i + 1] === '&' ? 2 : 1; rawStart = i; continue; }
+    if (c === ';' && caseDepth > 0 && (cmd[i + 1] === ';' || cmd[i + 1] === '&')) { // `;;` `;&` `;;&`: next arm
+      endSeg(i, false);
+      i += cmd.startsWith(';;&', i) ? 3 : 2; rawStart = i; casePat = true; continue;
+    }
     if (c === '&' || c === ';' || c === '\n' || c === '(' || c === ')') {
+      endWord();
+      if (caseHeader()) { caseDepth++; casePat = true; }
       endSeg(i, false); i++; continue;
     }
-    if (c === ' ' || c === '\t' || c === '\r') { endWord(); i++; continue; }
+    if (c === ' ' || c === '\t' || c === '\r') {
+      endWord();
+      if (caseHeader()) { caseDepth++; endSeg(i, false); casePat = true; }
+      i++; continue;
+    }
     word += c; inWord = true; i++;
   }
   endSeg(cmd.length, false);
@@ -241,7 +277,8 @@ const LITERAL = /^[A-Za-z0-9._\/-]+$/;
 const stripHeads = (r: string): string => r.replace(/^refs\/heads\//, '');
 const ENV_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const CD_CMDS = new Set(['cd', 'pushd', 'popd', 'chdir']);
-const HARMLESS = new Set(['echo', 'printf', 'cat', 'ls', 'grep', 'rg', 'head', 'tail', 'wc', 'pwd', 'true', 'false', 'sleep', 'date', 'stat', 'file', 'less', 'test', 'which']);
+const HARMLESS = new Set(['echo', 'printf', 'cat', 'ls', 'grep', 'rg', 'head', 'tail', 'wc', 'pwd', 'true', 'false', 'sleep', 'date', 'stat', 'file', 'less', 'test', 'which',
+  '[', '[[', 'case', 'esac']); // shell tests and `case WORD in` headers run nothing
 const SAFE_GIT = new Set(['restore', 'config', 'reset', 'rm', 'mv', 'clean', 'revert', 'cherry-pick', 'reflog', 'ls-remote', 'ls-tree', 'cat-file', 'merge-base', 'rev-list', 'show-ref', 'for-each-ref', 'version', 'help', 'status', 'log', 'diff', 'show', 'add', 'commit', 'fetch', 'pull', 'branch', 'tag', 'stash', 'remote', 'rev-parse', 'ls-files', 'blame', 'clone', 'init', 'describe', 'shortlog', 'grep']);
 const PUSH_FLAGS = new Set(['-u', '--set-upstream', '-n', '--dry-run', '-v', '--verbose', '--no-verify', '--tags', '--follow-tags', '-q', '--quiet', '--progress']);
 
@@ -382,6 +419,15 @@ function opaqueUrl(s: Segment): boolean {
     && !/^[\w.-]+(:=|==|=|@|:(?!\/\/))/.test(w));
 }
 
+/** curl/wget `-K`/`--config FILE` with no literal URL: the method, body and URL all live in the file. */
+function configNoUrl(s: Segment): boolean {
+  const ws = flatWords(s);
+  if (!ws.some(w => /^(curl|wget)$/.test(lc(basename(w))))) return false;
+  const cfg = ws.some(w => /^--config(=|$)/.test(w) || /^-[A-Za-z]*K/.test(w));
+  const url = ws.some(w => /^[a-z][\w+.-]*:\/\/\S/i.test(w) || /^(localhost|[\w-]+(\.[\w-]+)+)(:\d+)?(\/|$)/i.test(w));
+  return cfg && !url;
+}
+
 /** 'ok' = read-only; 'moves' = safe but may change HEAD (checkout/clone); false = unproven. */
 function ghVerdict(w: string[]): 'ok' | 'moves' | false {
   let i = 1;
@@ -416,7 +462,8 @@ function inlineInterp(s: Segment): boolean {
 }
 // shell syntax words that look like globs but are not: `[ ... ]`, `[[ ... ]]`, `{ ...; }`
 const GLOB_SYNTAX = new Set(['[', '[[', ']', ']]', '{', '}']);
-const isGlobWord = (w: string): boolean => /[*?\[{]/.test(w) && !GLOB_SYNTAX.has(w);
+// `{` right after `$` is a parameter expansion (`${PYTHON}`), not a brace glob
+const isGlobWord = (w: string): boolean => /[*?\[]|(?<!\$)\{/.test(w) && !GLOB_SYNTAX.has(w);
 const SENS_ENV = /^(GIT_|PATH=|HOME=|XDG_)/i;
 const RISKY_WORDS = /(^|[^\w-])(git|gh|hub)(?!\w)|\b(push|merge|rebase|sync|update-ref)\b|refs\//;
 const GIT_WORD = /(^|[^\w-])(git|hub)(?!\w)/;
@@ -433,6 +480,9 @@ function pushMergeVerdict(cmd: string, nm: string, segs: Segment[], ctx: RulesCt
   if ((nm.includes('api.github.com') || /github\.com\/api\b/.test(nm)) && httpSegs.length > 0
     && (httpSegs.some(httpSegWrites) || !httpReadOnly(segs.flatMap(x => x.words), false))) {
     return { kind: mergeKind(), branch: null, reason: 'GitHub API write via HTTP client' };
+  }
+  if (httpSegs.some(configNoUrl)) {
+    return { kind: 'push', branch: null, reason: 'HTTP request read from a config file' };
   }
   if (httpSegs.some(s => httpSegWrites(s) && opaqueUrl(s))) {
     return { kind: mergeKind(), branch: null, reason: 'HTTP write to a URL that is not a literal' };
@@ -592,7 +642,9 @@ function expandBraces(w: string, out: Cand[], budget: { n: number }): void {
       else if (w[j] === ',' && d === 1) commas.push(j);
     }
     if (j >= w.length) break; // unbalanced: literal
-    if (commas.length === 0) continue; // `{}` / `{a..b}`: the glob matcher treats it as a wildcard
+    // `{}` / `{a..b}` / `{{a,b}}`: left unexpanded and skipped whole (keeps the scan linear); the glob
+    // matcher treats an unexpanded group as a wildcard, which is the conservative reading
+    if (commas.length === 0) { i = j; continue; }
     if ((budget.n -= commas.length + 1) < 0) { out.push({ path: w.slice(0, i), open: true }); return; }
     let start = i + 1;
     for (const c of [...commas, j]) { expandBraces(w.slice(0, i) + w.slice(start, c) + w.slice(j + 1), out, budget); start = c + 1; }
@@ -808,18 +860,24 @@ const MCP_RE = /merge|push|update_ref|create_or_update_file|commit|update_pull_r
 
 /** Classify a tool call that a coordinator must never approve on its own. Returns null when proven safe. */
 export function protectedAction(toolName: string, input: unknown, ctx: RulesCtx): Protected | null {
+  try {
+    return classify(toolName, input, ctx);
+  } catch {
+    // the guard never throws: odd tool names, throwing getters, analysis bugs all fail closed
+    return { kind: 'push', branch: null, reason: 'tool call could not be analyzed' };
+  }
+}
+
+function classify(toolName: string, input: unknown, ctx: RulesCtx): Protected | null {
+  if (typeof toolName !== 'string') throw new TypeError('tool name is not a string');
   const inp = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
   if (toolName === 'Bash') {
     const cmd = typeof inp.command === 'string' ? inp.command : '';
     if (cmd.length > MAX_COMMAND_LEN) return { kind: 'push', branch: null, reason: 'command too long to analyze' };
     const nm = lc(cmd.replace(/['"\\]/g, ''));
     // fd duplication and /dev/null redirects are harmless; every other redirect stays visible as a word
-    try {
-      const segs = segmentsOf(cmd.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' '));
-      return selfBash(cmd, nm, segs, ctx) ?? pushMergeVerdict(cmd, nm, segs, ctx) ?? (ctx.strictScripts ? scriptBash(segs) : null);
-    } catch {
-      return { kind: 'push', branch: null, reason: 'command could not be analyzed' }; // fail closed
-    }
+    const segs = segmentsOf(cmd.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' '));
+    return selfBash(cmd, nm, segs, ctx) ?? pushMergeVerdict(cmd, nm, segs, ctx) ?? (ctx.strictScripts ? scriptBash(segs) : null);
   }
   if (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'NotebookEdit') {
     const raw = typeof inp.file_path === 'string' ? inp.file_path : typeof inp.notebook_path === 'string' ? inp.notebook_path : '';

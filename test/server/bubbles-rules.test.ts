@@ -444,3 +444,46 @@ test('round 4: kubiclePort is configurable', () => {
   assert.equal(protectedAction('Bash', { command: 'curl -d x http://localhost:5000/api/grants' }, ctx)?.kind, 'self');
   assert.equal(protectedAction('Bash', { command: 'curl -d x http://localhost:4317/api/grants' }, ctx), null);
 });
+
+// ---- round 5: linear brace scan, `${` is not a glob, case arms, curl -K without URL, never throws ----
+test('round 5: deeply nested comma-less braces stay fast', () => {
+  for (const c of ['rm ' + '{'.repeat(8000) + '}'.repeat(8000), 'echo ' + '{'.repeat(8000) + '}'.repeat(8000),
+    'git push origin ' + '{'.repeat(8000) + '}'.repeat(8000), 'rm ~/' + '{'.repeat(7990) + '}'.repeat(7990)]) {
+    bashH(c);
+    const t0 = performance.now();
+    bashH(c);
+    assert.ok(performance.now() - t0 < 50, `slow: ${c.slice(0, 24)}`);
+  }
+  assert.equal(bashH('rm ~/{{.kubicle,x},y}')?.kind, 'self'); // nested groups with commas still expand
+});
+
+test('round 5: parameter expansions and case arms are not glob command words', () => {
+  for (const c of ['"${PYTHON}" -m pytest', '${EDITOR:-vim} notes.md', 'case $x in a*) echo a ;; *) echo b ;; esac',
+    'case $x in a*|b?) echo a ;; *) git push origin feature ;; esac', 'case $x in (a*) echo a ;; esac',
+    '[ -n "$X" ] && git push origin feature']) {
+    assert.equal(bashH(c), null, c);
+  }
+  for (const c of ['${GIT:-git} push origin main', 'case $x in a*) git push origin main ;; esac',
+    'case $x in $(git push origin main)) echo ;; esac', 'case $x in `git push origin main`) echo ;; esac',
+    'case $x in esac) git push origin main ;; esac', 'case $x in a) echo ;; esac; /usr/bin/gi? push origin main',
+    'case x in "a)" ) git push origin main;; esac', 'echo case x in g*) git push origin main']) {
+    assert.ok(bashH(c), c);
+  }
+});
+
+test('round 5: curl/wget config file without a literal URL is protected', () => {
+  for (const c of ['curl -K cfg', 'curl -sK cfg', 'curl --config=cfg', 'wget --config cfg']) assert.equal(bashH(c)?.kind, 'push', c);
+  assert.equal(bashH('curl -K cfg https://example.com/x'), null);
+});
+
+test('round 5: protectedAction never throws', () => {
+  const ctx = { cwd: '/work/app', branches: br('feature'), home, strictScripts: false };
+  const weird: unknown[] = [undefined, null, 1, 'str', [], { command: 5 }, { file_path: 5 }, Object.create(null),
+    { get command() { throw new Error('getter'); } }, { get file_path() { throw new Error('getter'); } }];
+  for (const tool of ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Read', 'mcp__x__y', '', undefined, 5, null, {}]) {
+    for (const w of weird) assert.doesNotThrow(() => protectedAction(tool as string, w, ctx), `${String(tool)}`);
+  }
+  assert.equal(protectedAction(5 as unknown as string, {}, ctx)?.kind, 'push');
+  assert.equal(protectedAction('Bash', { get command() { throw new Error('x'); } }, ctx)?.kind, 'push');
+  assert.equal(protectedAction('Read', {}, ctx), null);
+});
