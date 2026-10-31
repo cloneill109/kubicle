@@ -144,3 +144,38 @@ test('EventWriter isolates a poison event: others persist, dropped counted', () 
   w.stop();
   s.close();
 });
+
+// ---- final review I2: the CLI's read-only store works on an un-migrated stage-1 office.db ----
+import { DatabaseSync } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
+
+function stage1Db(file: string, rows: { id: string; name: string; wing: number; archived?: boolean }[]): void {
+  const db = new DatabaseSync(file);
+  db.exec(`
+    CREATE TABLE events (id TEXT PRIMARY KEY, ts INTEGER NOT NULL, session_id TEXT NOT NULL,
+      agent_id TEXT, event TEXT NOT NULL, json TEXT NOT NULL);
+    CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, wing INTEGER NOT NULL,
+      approvals TEXT NOT NULL, archived INTEGER NOT NULL, first_seen INTEGER NOT NULL);
+    CREATE TABLE session_settings (session_id TEXT PRIMARY KEY, approvals TEXT NOT NULL);
+  `);
+  const ins = db.prepare('INSERT INTO projects VALUES (?,?,?,?,?,?)');
+  rows.forEach((r, i) => ins.run(r.id, r.name, r.wing, 'off', r.archived ? 1 : 0, i + 1));
+  db.close();
+}
+
+test('I2: read-only openStore lists projects on a stage-1 schema (no room column) and writes nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ao-store-'));
+  try {
+    const file = join(dir, 'office.db');
+    stage1Db(file, [{ id: '/p/a', name: 'a', wing: 2 }, { id: '/p/b', name: 'b', wing: 1, archived: true }]);
+    const before = readFileSync(file);
+    const st = openStore(file, { readOnly: true });
+    try {
+      assert.deepEqual(st.listProjects().map((p) => [p.id, p.order, p.archived]), [['/p/a', 2, false], ['/p/b', 1, true]]);
+      assert.equal(st.getSessionApprovals('x'), null);
+    } finally { st.close(); }
+    assert.deepEqual(readFileSync(file), before, 'unchanged');
+    const cols = (new DatabaseSync(file).prepare('PRAGMA table_info(session_settings)').all() as { name: string }[]).map((c) => c.name);
+    assert.ok(!cols.includes('room'), 'not migrated');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

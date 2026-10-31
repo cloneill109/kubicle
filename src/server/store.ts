@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { chmodSync, existsSync } from 'node:fs';
 import type { AgentEvent } from '../shared/events.ts';
 import type { ProjectRow } from '../shared/protocol.ts';
@@ -53,26 +53,29 @@ function initSchema(db: DatabaseSync, file: string): void {
 }
 
 function storeOn(db: DatabaseSync): Store {
-  const insEvent = db.prepare(
+  // Statements are prepared on first use: a read-only open of an un-migrated (stage 1) database
+  // must still list projects, and preparing `SELECT room …` there would throw.
+  const lazy = (sql: string) => { let st: StatementSync | undefined; return () => (st ??= db.prepare(sql)); };
+  const insEvent = lazy(
     'INSERT OR IGNORE INTO events (id, ts, session_id, agent_id, event, json) VALUES (?,?,?,?,?,?)');
-  const selRecent = db.prepare('SELECT json FROM events ORDER BY ts DESC, rowid DESC LIMIT ?');
-  const selSince = db.prepare('SELECT json FROM events WHERE ts >= ? ORDER BY ts ASC, rowid ASC');
-  const upProject = db.prepare(
+  const selRecent = lazy('SELECT json FROM events ORDER BY ts DESC, rowid DESC LIMIT ?');
+  const selSince = lazy('SELECT json FROM events WHERE ts >= ? ORDER BY ts ASC, rowid ASC');
+  const upProject = lazy(
     `INSERT INTO projects (id, name, wing, approvals, archived, first_seen) VALUES (?,?,?,?,?,?)
      ON CONFLICT(id) DO UPDATE SET name=excluded.name, wing=excluded.wing,
        approvals=excluded.approvals, archived=excluded.archived, first_seen=excluded.first_seen`);
-  const selProjects = db.prepare(
+  const selProjects = lazy(
     'SELECT id, name, wing, approvals, archived, first_seen FROM projects ORDER BY first_seen, id');
-  const selSession = db.prepare('SELECT approvals FROM session_settings WHERE session_id = ?');
+  const selSession = lazy('SELECT approvals FROM session_settings WHERE session_id = ?');
   // approvals is NOT NULL in older databases: a row that only carries a room stores '' (= unset).
-  const upSession = db.prepare(
+  const upSession = lazy(
     `INSERT INTO session_settings (session_id, approvals) VALUES (?,?)
      ON CONFLICT(session_id) DO UPDATE SET approvals=excluded.approvals`);
-  const selRoom = db.prepare('SELECT room FROM session_settings WHERE session_id = ?');
-  const upRoom = db.prepare(
+  const selRoom = lazy('SELECT room FROM session_settings WHERE session_id = ?');
+  const upRoom = lazy(
     `INSERT INTO session_settings (session_id, approvals, room) VALUES (?,'',?)
      ON CONFLICT(session_id) DO UPDATE SET room=excluded.room`);
-  const delOld = db.prepare('DELETE FROM events WHERE ts < ?');
+  const delOld = lazy('DELETE FROM events WHERE ts < ?');
 
   const parse = (rows: unknown[]): AgentEvent[] =>
     rows.map((r) => JSON.parse((r as { json: string }).json) as AgentEvent);
@@ -83,7 +86,7 @@ function storeOn(db: DatabaseSync): Store {
       db.exec('BEGIN');
       try {
         for (const e of events) {
-          insEvent.run(e.id, e.ts, e.sessionId, e.agentId ?? null, e.event, JSON.stringify(e));
+          insEvent().run(e.id, e.ts, e.sessionId, e.agentId ?? null, e.event, JSON.stringify(e));
         }
         db.exec('COMMIT');
       } catch (err) {
@@ -91,28 +94,28 @@ function storeOn(db: DatabaseSync): Store {
         throw err;
       }
     },
-    recentEvents: (limit) => parse(selRecent.all(limit)),
-    eventsSince: (ts) => parse(selSince.all(ts)),
+    recentEvents: (limit) => parse(selRecent().all(limit)),
+    eventsSince: (ts) => parse(selSince().all(ts)),
     upsertProject(p) {
-      upProject.run(p.id, p.name, p.order, p.approvals, p.archived ? 1 : 0, p.firstSeen);
+      upProject().run(p.id, p.name, p.order, p.approvals, p.archived ? 1 : 0, p.firstSeen);
     },
     listProjects() {
-      return selProjects.all().map((r: any) => ({
+      return selProjects().all().map((r: any) => ({
         id: r.id, name: r.name, order: r.wing, slug: slugFor(r.id), approvals: r.approvals,
         archived: r.archived !== 0, firstSeen: r.first_seen,
       }));
     },
     getSessionApprovals(sessionId) {
-      const r = selSession.get(sessionId) as { approvals: 'off' | 'office' } | undefined;
+      const r = selSession().get(sessionId) as { approvals: 'off' | 'office' } | undefined;
       return r && (r.approvals === 'off' || r.approvals === 'office') ? r.approvals : null;
     },
-    setSessionApprovals(sessionId, mode) { upSession.run(sessionId, mode); },
+    setSessionApprovals(sessionId, mode) { upSession().run(sessionId, mode); },
     getSessionRoom(sessionId) {
-      const r = selRoom.get(sessionId) as { room: string | null } | undefined;
+      const r = selRoom().get(sessionId) as { room: string | null } | undefined;
       return r?.room ?? null;
     },
-    setSessionRoom(sessionId, roomId) { upRoom.run(sessionId, roomId); },
-    prune(ts) { delOld.run(ts); },
+    setSessionRoom(sessionId, roomId) { upRoom().run(sessionId, roomId); },
+    prune(ts) { delOld().run(ts); },
     close() { db.close(); },
   };
 }
