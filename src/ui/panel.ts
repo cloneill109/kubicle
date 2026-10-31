@@ -6,6 +6,7 @@ import { ROLE, sprite } from './render/sprite.ts';
 import type { OfficeState } from './state.ts';
 
 export const LINK_TEXT = 'Started in a terminal. You can watch it and answer approvals here when routing is on.';
+export const TOO_LONG_TEXT = 'Too long to review here — answer in the terminal.';
 const STATUS_TEXT: Record<AgentView['status'], string> = { idle: 'Idle', working: 'Working', waiting: 'Needs you', quiet: 'Quiet', lost: 'Lost contact' };
 
 export function post(path: string, body: unknown): Promise<Response> {
@@ -82,11 +83,18 @@ export class Inspector {
     if (v.pending || waitingNoPending) {
       const p = v.pending;
       setText($('iPendingCmd'), p ? (p.activity || p.toolName || 'a tool call') : (v.activity || 'a permission prompt'));
+      // The whole input, exactly as the agent sent it (C1). Agent-provided: textContent only.
+      const pre = $('iPendingInput');
+      pre.hidden = !p?.input;
+      setText(pre, p?.input ?? '');
       const answerable = !!p && p.answerable;
+      const tooLong = !!p?.inputTruncated;
       $('iPendingBtns').hidden = !answerable;
       const st = p ? this.#answers.get(p.id) : undefined;
-      for (const b of ['approve', 'deny']) $<HTMLButtonElement>(b).disabled = !!st?.busy;
-      setText($('iPendingNote'), answerable ? (st?.note ?? '') : 'Answer this in the terminal');
+      $<HTMLButtonElement>('approve').disabled = !!st?.busy || tooLong;
+      $<HTMLButtonElement>('deny').disabled = !!st?.busy;
+      setText($('iPendingNote'), !answerable ? 'Answer this in the terminal'
+        : st?.note ?? (tooLong ? TOO_LONG_TEXT : ''));
     }
 
     // ---- facts ----
@@ -132,6 +140,7 @@ export class Inspector {
     const v = this.selectedId ? this.#state.agents.get(this.selectedId) : undefined;
     const p = v?.pending;
     if (!p || !p.answerable) return;
+    if (decision === 'allow' && p.inputTruncated) return;
     const st = { busy: true, note: decision === 'allow' ? 'Approving…' : 'Denying…' };
     this.#answers.set(p.id, st);
     this.render(0);
@@ -141,6 +150,7 @@ export class Inspector {
       note = r.status === 204 ? (decision === 'allow' ? 'Approved. The session continues.' : 'Denied. The session was told no.')
         : r.status === 409 ? 'Too late: this request timed out and went to the terminal.'
         : r.status === 404 ? 'This request is no longer pending.'
+        : r.status === 422 ? TOO_LONG_TEXT
         : `Could not send the answer (HTTP ${r.status}).`;
       st.busy = r.status === 204; // stays disabled until the server clears the prompt
     } catch {

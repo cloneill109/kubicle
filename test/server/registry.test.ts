@@ -323,3 +323,14 @@ test('I3: waiting with advancing transcript mtime stays waiting; idle never ages
   assert.equal(reg.get('s1')!.status, 'lost');
   assert.equal(reg.get('i')!.status, 'idle');
 });
+
+test('C1: PermissionRequest pending carries the full input and truncated flag', () => {
+  const { reg } = mk();
+  reg.apply(ev('PermissionRequest', { toolName: 'Write', activity: 'Write a', toolInput: '{"content":"..."}', toolInputTruncated: true }));
+  const p = reg.get('s1')!.pending!;
+  assert.equal(p.input, '{"content":"..."}');
+  assert.equal(p.inputTruncated, true);
+  reg.apply(ev('PermissionRequest', { toolName: 'Bash', activity: 'Bash(ls)', toolInput: '{"command":"ls"}' }));
+  assert.equal(reg.get('s1')!.pending!.input, '{"command":"ls"}');
+  assert.equal(reg.get('s1')!.pending!.inputTruncated, undefined);
+});

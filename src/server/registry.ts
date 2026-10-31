@@ -204,6 +204,8 @@ export class Registry {
             since: e.ts,
             answerable: false,
           };
+          if (e.toolInput !== undefined) t.pending.input = e.toolInput;
+          if (e.toolInputTruncated) t.pending.inputTruncated = true;
           break;
         case 'Notification':
           if (e.notificationType === 'permission_prompt') {

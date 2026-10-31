@@ -17,6 +17,10 @@ export interface PendingApproval {
   activity: string;
   since: number;
   answerable: boolean;
+  /** Full tool input as pretty JSON (C1), capped at TOOL_INPUT_MAX chars. Agent-provided: textContent only. */
+  input?: string;
+  /** The input was cut at the cap: the owner cannot review it here, so the office never offers Approve. */
+  inputTruncated?: boolean;
 }
 
 export interface AgentView {

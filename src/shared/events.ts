@@ -21,10 +21,14 @@ export interface AgentEvent {
   model?: string;
   notificationType?: string;
   message?: string;
+  /** PermissionRequest only: the full tool_input as 2-space JSON, from the ORIGINAL payload (C1). */
+  toolInput?: string;
+  toolInputTruncated?: boolean;
   payload: string;
 }
 
 const ACTIVITY_MAX = 120;
+export const TOOL_INPUT_MAX = 8192;
 const DEFAULT_CAP = 4096;
 
 const isObj = (v: unknown): v is Record<string, unknown> =>
@@ -181,6 +185,19 @@ export function normalizeHook(raw: unknown, now: number, cap: number = DEFAULT_C
   const msg = str(raw.message);
   set('message', msg === undefined ? undefined : clip(msg, 500));
   if (toolName) e.activity = summarizeTool(toolName, raw.tool_input, cwd);
+  if (name === 'PermissionRequest' && raw.tool_input !== undefined) {
+    // What the owner approves must be exactly what runs: keep the whole input (capped), not the
+    // one-line summary, and take it before truncatePayload cuts long strings.
+    let json: string | undefined;
+    try { json = JSON.stringify(raw.tool_input, null, 2); } catch { json = undefined; }
+    if (json !== undefined) {
+      const chars = Array.from(json);
+      if (chars.length > TOOL_INPUT_MAX) {
+        e.toolInput = chars.slice(0, TOOL_INPUT_MAX).join('');
+        e.toolInputTruncated = true;
+      } else e.toolInput = json;
+    }
+  }
   e.payload = truncatePayload(raw, cap);
   return e;
 }

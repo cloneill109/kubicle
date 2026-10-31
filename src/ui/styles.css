@@ -103,6 +103,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .pending { border: 1px solid var(--accent); border-radius: 6px; padding: 12px; background: color-mix(in srgb, var(--accent) 8%, var(--panel)); display: grid; gap: 8px; }
 .pending p { margin: 0; font-size: 13px; }
 .pending code { font: 12.5px var(--mono); background: var(--bg); padding: 6px 8px; border-radius: 4px; overflow-wrap: anywhere; }
+/* Full tool input (C1): everything that will run, whitespace kept, long lines wrapped, scrolls past ~240px. */
+.pending-input { margin: 0; font: 12px/1.45 var(--mono); background: var(--bg); padding: 8px; border: 1px solid var(--line); border-radius: 4px; max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 2; }
 .btns { display: flex; gap: 8px; }
 .btn { border: 1px solid var(--line); background: var(--panel-2); padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: 500; }
 .btn:hover { border-color: var(--muted); }

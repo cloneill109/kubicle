@@ -7,7 +7,7 @@ export type Decision = 'allow' | 'deny';
 
 const RESOLVED_MAX = 500;
 
-interface PendingBase { id: string; toolName: string; activity: string; since: number }
+interface PendingBase { id: string; toolName: string; activity: string; since: number; input?: string; inputTruncated?: boolean }
 
 interface Waiter {
   id: string;
@@ -84,12 +84,14 @@ export class Approvals {
     if (prev) this.#settle(prev, null); // superseded; new pending replaces below
 
     const id = globalThis.crypto.randomUUID();
-    const base = {
+    const base: PendingBase = {
       id,
       toolName: e.toolName ?? agent.pending?.toolName ?? '',
       activity: e.activity ?? agent.pending?.activity ?? '',
       since: agent.pending?.since ?? e.ts,
     };
+    if (e.toolInput !== undefined) base.input = e.toolInput;
+    if (e.toolInputTruncated) base.inputTruncated = true;
     return new Promise<Decision | null>((resolve) => {
       const w: Waiter = {
         id,
@@ -105,9 +107,11 @@ export class Approvals {
     });
   }
 
-  answer(approvalId: string, d: Decision): 'ok' | 'not-found' | 'expired' {
+  answer(approvalId: string, d: Decision): 'ok' | 'not-found' | 'expired' | 'not-reviewable' {
     const w = this.#waiting.get(approvalId);
     if (!w) return this.#resolved.has(approvalId) ? 'expired' : 'not-found';
+    // The owner could not see all of it here, so the office never approves it (C1). Deny is fine.
+    if (d === 'allow' && w.base.inputTruncated) return 'not-reviewable';
     this.#settle(w, d);
     const v = this.#registry.answered(w.agentId);
     if (v) this.#onChange(v);

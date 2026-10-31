@@ -202,3 +202,21 @@ test('a released wait (to the terminal) stays waiting', async () => {
   assert.equal(await p, null);
   assert.equal(reg.get('s1')?.status, 'waiting');
 });
+
+test('C1: waiting pending keeps the full input; allow is refused for a truncated input, deny works', async () => {
+  const store = openStore(':memory:');
+  const reg = new Registry(new Projects(store), store, loadConfig({}));
+  store.setSessionApprovals('s1', 'office');
+  const ap = new Approvals(reg, loadConfig({}), () => true, () => {});
+  const perm = ev('PermissionRequest', { toolName: 'Write', activity: 'Write a', toolInput: 'x'.repeat(8192), toolInputTruncated: true });
+  reg.apply(perm);
+  const p = ap.request(perm);
+  const pend = reg.get('s1')!.pending!;
+  assert.equal(pend.answerable, true);
+  assert.equal(pend.input, 'x'.repeat(8192));
+  assert.equal(pend.inputTruncated, true);
+  assert.equal(ap.answer(pend.id, 'allow'), 'not-reviewable');
+  assert.equal(reg.get('s1')!.pending!.answerable, true, 'still waiting after a refused allow');
+  assert.equal(ap.answer(pend.id, 'deny'), 'ok');
+  assert.equal(await p, 'deny');
+});

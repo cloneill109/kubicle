@@ -124,7 +124,11 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
   d.projects.onCreate = () => broadcast({ t: 'projects', projects: d.projects.list() });
 
   function ingest(e: AgentEvent): void {
-    d.writer.push(e);
+    // The full tool input is for the live approval card only; storage keeps the capped payload.
+    if (e.toolInput !== undefined) {
+      const { toolInput: _i, toolInputTruncated: _t, ...stored } = e;
+      d.writer.push(stored);
+    } else d.writer.push(e);
     const r = d.registry.apply(e);
     broadcastAgents(r.changed);
     for (const x of r.removed) broadcast({ t: 'agentRemoved', id: x.id, reason: x.reason });
@@ -174,6 +178,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     const b = await readJson(req);
     if (!isObj(b) || (b.decision !== 'allow' && b.decision !== 'deny')) return send(res, 400, 'bad decision');
     const r = d.approvals.answer(id, b.decision);
+    if (r === 'not-reviewable') return send(res, 422, 'too long to review here; answer in the terminal');
     send(res, r === 'ok' ? 204 : r === 'not-found' ? 404 : 409);
   }
 
