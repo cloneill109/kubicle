@@ -1,3 +1,10 @@
+// Protected-action rules for the Bubbles coordinator. FAIL-CLOSED: anything we cannot fully parse
+// and prove safe is reported as protected (the owner is asked). A shell-text classifier cannot be
+// perfect; RESIDUAL GAPS (accepted): scripts written to disk and then executed, programs that shell
+// out to git internally (npm scripts, make, node/python), repo-config remote.*.push / push.default
+// mappings for colon-less refspecs, and anything outside Bash/file/MCP tools. GitHub branch
+// protection on the remote is the real backstop; these rules are the first line, not the last.
+
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
@@ -205,87 +212,121 @@ const ENV_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const CD_CMDS = new Set(['cd', 'pushd', 'popd', 'chdir']);
 const HARMLESS = new Set(['echo', 'printf', 'cat', 'ls', 'grep', 'rg', 'head', 'tail', 'wc', 'pwd', 'true', 'false', 'sleep', 'date', 'stat', 'file', 'less', 'test', 'which']);
 const RUNNERS = new Set(['npm', 'pnpm', 'yarn', 'make', 'just', 'tsc', 'node']);
-const READ_ONLY = new Set(['cat', 'ls', 'grep', 'rg', 'head', 'tail', 'stat', 'wc', 'file', 'less']);
-const SAFE_GIT = new Set(['status', 'log', 'diff', 'show', 'add', 'commit', 'fetch', 'pull', 'branch', 'tag', 'stash', 'remote', 'rev-parse', 'ls-files', 'blame', 'clone', 'init', 'describe', 'shortlog', 'grep']);
+const SAFE_GIT = new Set(['restore', 'config', 'status', 'log', 'diff', 'show', 'add', 'commit', 'fetch', 'pull', 'branch', 'tag', 'stash', 'remote', 'rev-parse', 'ls-files', 'blame', 'clone', 'init', 'describe', 'shortlog', 'grep']);
 const PUSH_FLAGS = new Set(['-u', '--set-upstream', '-n', '--dry-run', '-v', '--verbose', '--no-verify', '--tags', '--follow-tags', '-q', '--quiet', '--progress']);
 
 type Verdict = { ok: true; changed: boolean } | { ok: false; branch: string | null };
 const bad = (branch: string | null = null): Verdict => ({ ok: false, branch });
 
-function analyzeGit(w: string[], b: BranchInfo, changed: boolean): Verdict {
+const REMOTE = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
+
+/** A destination that is certainly a plain branch (or tag) name: no DWIM prefixes, no odd syntax. */
+function plainDst(dst: string): string | null {
+  if (dst.startsWith('refs/tags/') && LITERAL.test(dst)) return dst;
+  if (!LITERAL.test(dst) || dst.includes('..') || dst.startsWith('/') || dst.endsWith('/')) return null;
+  if (/^(refs|heads|remotes|tags)(\/|$)/i.test(dst)) return null;
+  return dst;
+}
+
+function analyzeGit(w: string[], b: BranchInfo, changed: boolean, gitEnv: boolean): Verdict {
   let i = 1;
+  let opaque = gitEnv; // repo/config redirection we cannot see: -c, GIT_* env, --git-dir, ...
+  let dirOpt = false;
   while (i < w.length && w[i].startsWith('-')) {
-    if (w[i] === '-c') { if (!w[i + 1] || /^alias\./i.test(w[i + 1])) return bad(); i += 2; }
-    else if (w[i] === '--no-pager') i++;
-    else return bad(); // -C, --git-dir, --work-tree, ...: directory/repo changes are not provable
+    const o = w[i];
+    if (o === '-c') { opaque = true; i += 2; }
+    else if (o === '-C') { dirOpt = true; i += 2; }
+    else if (/^--(git-dir|work-tree|exec-path|namespace|config-env|super-prefix)(=|$)/.test(o)) { opaque = true; i += o.includes('=') ? 1 : 2; }
+    else if (['--no-pager', '--paginate', '-p', '-P', '--bare', '--no-replace-objects', '--no-optional-locks'].includes(o)) i++;
+    else return bad();
   }
   const sub = w[i];
   const args = w.slice(i + 1);
   const curOk = b.current !== null && !isProt(b, b.current);
+  const curProt = b.current !== null && isProt(b, b.current) ? b.current : null;
+  if (sub === undefined) return { ok: true, changed };
   if (sub === 'push') {
-    if (changed) return bad();
+    if (opaque || dirOpt || changed) return bad();
     const pos: string[] = [];
     for (const a of args) {
       if (a.startsWith('-')) { if (!PUSH_FLAGS.has(a)) return bad(); } else pos.push(a);
     }
-    if (pos.length > 0 && !LITERAL.test(pos[0])) return bad();
-    const specs = pos.slice(1);
-    if (specs.length === 0) return curOk ? { ok: true, changed } : bad(b.current !== null && isProt(b, b.current) ? b.current : null);
+    if (pos.length < 2 || !REMOTE.test(pos[0])) return bad(); // bare push / remote-only: remote.*.push and push.default decide
     let hit: string | null = null;
     let unknown = false;
-    for (const raw of specs) {
+    for (const raw of pos.slice(1)) {
       if (raw.startsWith('+')) return bad();
       const parts = raw.split(':');
       if (parts.length > 2) return bad();
       const src = parts[0];
-      let dst = parts.length === 2 ? parts[1] : parts[0];
-      if (dst === '' || (src !== '' && !LITERAL.test(src)) || !LITERAL.test(dst)) { unknown = true; continue; }
-      dst = stripHeads(dst);
+      let dst: string | null = parts.length === 2 ? parts[1] : parts[0];
+      if (src !== '' && !LITERAL.test(src)) { unknown = true; continue; }
       if (dst === 'HEAD' || dst === '@') {
         if (b.current === null) { unknown = true; continue; }
         dst = b.current;
       }
-      if (dst.startsWith('refs/') && !dst.startsWith('refs/tags/')) { unknown = true; continue; }
+      dst = plainDst(dst);
+      if (dst === null) { unknown = true; continue; }
       if (isProt(b, dst) && hit === null) hit = dst;
     }
     if (hit !== null) return bad(hit);
     return unknown ? bad() : { ok: true, changed };
   }
-  if (sub === 'merge' || sub === 'rebase') {
-    if (!changed && curOk) return { ok: true, changed };
-    return bad(b.current !== null && isProt(b, b.current) ? b.current : null);
+  if (sub === 'merge' || sub === 'rebase' || sub === 'pull') {
+    if (opaque || dirOpt) return bad(curProt);
+    if (sub === 'pull') return { ok: true, changed };
+    return !changed && curOk ? { ok: true, changed } : bad(curProt);
   }
   if (sub === 'checkout' || sub === 'switch' || sub === 'worktree' || sub === 'symbolic-ref') return { ok: true, changed: true };
-  if (sub !== undefined && SAFE_GIT.has(sub)) return { ok: true, changed };
-  return bad(); // unknown subcommand, possibly an alias
+  if (sub === 'branch' && args.some(a => /^(-u|--set-upstream(-to)?(=.*)?|--track|-t|-f|--force|-[mMcC]|--move|--copy)$/.test(a))) return bad();
+  if (sub === 'fetch' && args.some(a => a.includes(':'))) return bad();
+  if (sub === 'config' && !(args[0] === '--list' || args[0] === '-l' || (args[0] ?? '').startsWith('--get'))) return bad();
+  if (sub === 'remote' && args.some(a => !['-v', '--verbose', 'show', 'get-url'].includes(a) && !LITERAL.test(a))) return bad();
+  if (sub === 'remote' && args[0] !== undefined && !['-v', '--verbose', 'show', 'get-url'].includes(args[0])) return bad();
+  if (SAFE_GIT.has(sub)) return { ok: true, changed };
+  return bad(); // unknown subcommand: possibly a gitconfig alias
 }
 
+const HTTP_CLIENT = /(^|[^\w-])(curl|wget|http|https|httpie|xh)(?![\w-])/;
+const WRITE_FLAG = /(^|\s)(-x\s*(?!get\b)\S+|--request\s*=?\s*(?!get\b)\S+|--method\s*=?\s*(?!get\b)\S+|-d|-f|--data\S*|--json|--form\S*|--post\S*|--body\S*)(\s|=|$)/;
+
 function pushMergeVerdict(cmd: string, ctx: RulesCtx): Protected | null {
-  const lower = lc(cmd);
-  const mentionsGit = /(^|[^\w-])(git|gh)(?![\w-])/.test(lower);
-  if (!mentionsGit) return null;
-  const ghApi = /(^|[^\w-])gh(?![\w-])/.test(lower) && /(^|[^\w-])api(?![\w-])/.test(lower);
-  const trigger = ghApi || /\b(push|merge|rebase|subtree|update-ref)\b|refs\/heads/.test(lower);
-  if (!trigger) return null;
-  const kind: 'push' | 'merge' = /\bpush\b/.test(lower) && !ghApi ? 'push' : 'merge';
-  const reason = (extra: string) => `${kind} not proven safe: ${extra}`;
-  let branch: string | null = null;
-  const fail = (br: string | null): Protected => ({ kind, branch: br, reason: reason(cmd.slice(0, 120)) });
+  // Normalise quotes/backslashes so `g''it`, `"gi"t`, `gi\t` read as `git` in text checks.
+  const nm = lc(cmd.replace(/['"\\]/g, ''));
+  if (nm.includes('api.github.com') && HTTP_CLIENT.test(nm) && WRITE_FLAG.test(nm)) {
+    return { kind: /merges?\b/.test(nm) ? 'merge' : 'push', branch: null, reason: 'GitHub API write via HTTP client' };
+  }
+  const gitWord = /(^|[^\w-])git(?![\w-])/.test(nm);
+  const ghWord = /(^|[^\w-])gh(?![\w-])/.test(nm);
+  const ghApi = ghWord && /(^|[^\w-])api(?![\w-])/.test(nm);
+  const segs = segmentsOf(cmd);
+  const cmdWords = segs.map(s => { let i = 0; while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) i++; return { s, i }; });
+  const opaque = cmdWords.some(({ s, i }) => s.words[i] !== undefined && /[$`]/.test(s.words[i]));
+  const hasPush = /\bpush\b/.test(nm);
+  const trigger = ghApi || /\b(push|merge|rebase|subtree|update-ref|sync)\b|refs\//.test(nm);
+  if (!gitWord && !ghWord && !(opaque && trigger)) return null;
+  const isMerge = !hasPush && !/\bsync\b/.test(nm) && (/\b(merge|rebase)\b/.test(nm) || ghWord);
+  const kind: 'push' | 'merge' = isMerge ? 'merge' : 'push';
+  const fail = (br: string | null): Protected => ({ kind, branch: br, reason: `${kind} not proven safe: ${cmd.slice(0, 120)}` });
+  if (ghApi || (opaque && trigger)) return fail(null);
   // fd duplication and /dev/null redirects are harmless; any other redirect / expansion is unknown.
   const cleaned = cmd.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' ');
-  if (/[$`<>{}\\*?]/.test(cleaned)) return fail(null);
+  if (trigger && /[$`<>{}*?]/.test(cleaned)) return fail(null);
   const b = ctx.branches;
   let changed = false;
   for (const s of segmentsOf(cleaned)) {
     let i = 0;
-    while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) i++;
+    let gitEnv = false;
+    while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) { if (/^GIT_/i.test(s.words[i])) gitEnv = true; i++; }
     const w = s.words.slice(i);
     if (w.length === 0) continue;
     const first = w[0];
     if (first === 'git') {
-      const v = analyzeGit(w, b, changed);
-      if (!v.ok) { branch = v.branch; return fail(branch); }
+      const v = analyzeGit(w, b, changed, gitEnv);
+      if (!v.ok) return fail(v.branch);
       changed = v.changed;
+    } else if (!trigger) {
+      // nothing push/merge-like anywhere: unrelated segments are none of our business
     } else if (CD_CMDS.has(first)) {
       changed = true;
     } else if (HARMLESS.has(first)) {
@@ -303,24 +344,31 @@ function pushMergeVerdict(cmd: string, ctx: RulesCtx): Protected | null {
 
 const CASE_INSENSITIVE = process.platform === 'darwin' || process.platform === 'win32';
 const norm = (s: string): string => (CASE_INSENSITIVE ? lc(s) : s);
+const BARE_HOME = /(?:~|\$\{?home\}?)(?:(?![\w\/])|\/(?=[.*?\["'\s]|$))/;
+const SELF_SAFE = new Set(['cat', 'ls', 'grep', 'rg', 'head', 'tail', 'stat', 'wc', 'file', 'cd', 'pwd', 'echo']);
 
 function selfBash(cmd: string, ctx: RulesCtx): Protected | null {
   const lower = lc(cmd);
-  if (/(?<![\w.])kubicle(\.ts|\.js)?(?![\w.-])/.test(lower) && /\b(grant|instruct|revoke|bubbles|log)\b/.test(lower)) {
+  const nm = lc(cmd.replace(/['"\\]/g, ''));
+  if (/(?<![\w.])kubicle(\.ts|\.js|\.mjs|\.cjs)?(?![\w.-])/.test(nm) && /\b(grant|instruct|revoke|bubbles|log)\b/.test(nm)) {
     return { kind: 'self', reason: 'kubicle self-administration command' };
+  }
+  if (/(localhost|127\.0\.0\.1|\[::1\])/.test(nm) && HTTP_CLIENT.test(nm) && WRITE_FLAG.test(nm)) {
+    return { kind: 'self', reason: 'write request to a local server' };
   }
   const h = lc(resolve(ctx.home));
   const hd = lc(homedir());
   const tilde = h === hd || h.startsWith(hd + sep) ? '~' + h.slice(hd.length) : null;
-  const mentions = lower.includes('.kub') || lower.includes('office.db') || lower.includes(h) || (tilde !== null && lower.includes(tilde));
+  const mentions = nm.includes('.k') || nm.includes('office') || nm.includes(h) || (tilde !== null && nm.includes(tilde))
+    || BARE_HOME.test(lower) || BARE_HOME.test(nm);
   if (!mentions) return null;
   if (cmd.includes('>')) return { kind: 'self', reason: 'redirect in a command touching Kubicle state' };
   for (const s of segmentsOf(cmd)) {
-    let i = 0;
-    while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) i++;
-    const c = s.words[i];
-    if (c === undefined) continue;
-    if (!READ_ONLY.has(basename(c))) return { kind: 'self', reason: `non-read-only command touching Kubicle state: ${c}` };
+    if (s.words.length === 0) continue;
+    const c = s.words[0]; // an env prefix or a path in the command word is not read-only
+    if (!SELF_SAFE.has(c) || s.words.some(a => /^--pre/.test(a))) {
+      return { kind: 'self', reason: `non-read-only command touching Kubicle state: ${c}` };
+    }
   }
   return null;
 }
@@ -354,7 +402,7 @@ function expandTilde(p: string): string {
   return p === '~' ? homedir() : p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
 }
 
-const MCP_RE = /merge|push|update_ref|create_or_update_file|commit/i;
+const MCP_RE = /merge|push|update_ref|create_or_update_file|commit|update_pull_request_branch|delete_branch|create_branch|fork|sync/i;
 
 /** Classify a tool call that a coordinator must never approve on its own. Returns null when proven safe. */
 export function protectedAction(toolName: string, input: unknown, ctx: RulesCtx): Protected | null {
@@ -374,7 +422,8 @@ export function protectedAction(toolName: string, input: unknown, ctx: RulesCtx)
     return null;
   }
   if (toolName.startsWith('mcp__') && MCP_RE.test(toolName)) {
-    return { kind: 'merge', branch: null, reason: `MCP tool ${toolName}` };
+    const kind = /update_pull_request_branch|delete_branch|create_branch|fork|sync/i.test(toolName) && !/merge|push/i.test(toolName) ? 'push' : 'merge';
+    return { kind, branch: null, reason: `MCP tool ${toolName}` };
   }
   return null;
 }

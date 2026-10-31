@@ -17,8 +17,8 @@ test('protectedAction table: push', () => {
   assert.equal(a?.kind, 'push'); assert.equal((a as { branch: string | null }).branch, 'main');
   assert.equal(bash('cd app && git push', 'main')?.kind, 'push');
   assert.equal(bash('git push', null)?.kind, 'push');
-  assert.equal(bash('git push', 'feature'), null);
-  assert.equal(bash('git push origin', 'feature'), null);
+  assert.equal(bash('git push', 'feature')?.kind, 'push'); // bare push: config decides the destination
+  assert.equal(bash('git push origin', 'feature')?.kind, 'push');
   assert.equal(bash('git -C ../x push --force origin feature')?.kind, 'push');
   assert.equal(bash('git push -f origin feature')?.kind, 'push');
   assert.equal(bash('git push --force-with-lease origin feature')?.kind, 'push');
@@ -166,6 +166,19 @@ const PROTECTED_BASH = [
   `node -e "require('fs').writeFileSync('${home}/bubbles.yaml','x')"`, `python3 -c "open('${home}/x','w')"`,
   `ln -sf /x ${home}/bubbles.yaml`, `truncate -s 0 ${home}/office.db`, `chmod 777 ${home}`, 'rm /tmp/OFFICE.DB',
   'git push origin feature && git push --force origin feature', 'git push -fu origin feature',
+  // round 2
+  'git push', 'git push origin', 'git -c remote.origin.push=refs/heads/feature:refs/heads/main push origin feature',
+  'git -c push.default=upstream push', 'GIT_DIR=/other/.git git push origin HEAD', 'GIT_DIR=/other/.git git merge dev',
+  'GIT_WORK_TREE=/x GIT_DIR=/o/.git git push origin feature', 'git push origin feature:heads/main', 'git push origin heads/main',
+  'git p origin feature:main', 'git config alias.p push', "g''it push origin main", '"gi"t push origin main', 'gi\\t push origin main',
+  'X=gi; ${X}t push origin main', 'git push . feature:main', 'git -c include.path=/tmp/evil push', 'git branch -u origin/main',
+  'git fetch origin main:main', 'git branch -f main feature', 'git update-ref refs/heads/main HEAD',
+  'curl -X PUT -H "Authorization: token t" https://api.github.com/repos/o/r/pulls/1/merge', 'curl -d x https://api.github.com/repos/o/r/git/refs',
+  'wget --method=POST https://api.github.com/repos/o/r/merges', 'gh repo sync',
+  'rm -rf ~/.ku*', 'rm -rf ~/.k*', 'rm -rf ~/.ku""bicle', 'cd ~ && rm -rf .k*', 'find ~ -name bubbles.yaml -delete',
+  "find ~ -name 'office*' -delete", 'rg --pre rm x ~/.kubicle/bubbles.yaml', 'LESSOPEN="|rm %s" less ~/.kubicle/bubbles.yaml',
+  '/tmp/cat ~/.kubicle/bubbles.yaml', 'kubi""cle grant push', 'node dist/kubicle.mjs grant push', 'node dist/kubicle.cjs grant push',
+  'KUBICLE grant push', 'cat ~/.kubicle/bubbles.yaml | tee /tmp/x', 'mv ~/.kubicle /tmp/k',
 ];
 
 test('fail-closed: reviewer bypasses are protected', () => {
@@ -176,7 +189,8 @@ test('fail-closed: reviewer bypasses are protected', () => {
 test('fail-closed: common safe commands stay null', () => {
   for (const c of ['git push origin feature', 'git push -u origin feature', 'git status', 'git log --merges', 'echo hello', 'npm test',
     'cat ~/.kubicle/bubbles.yaml', 'ls ~/.kubicle', 'git commit -m "merge notes"', 'git push origin feature 2>&1', 'echo "git push origin main"',
-    'git add -A && git commit -m "x" && git push -u origin feature']) {
+    'git add -A && git commit -m "x" && git push -u origin feature', 'git fetch origin', 'git branch -a', 'git config --get user.name',
+    'git checkout -b feat', 'git -C sub status', 'git push origin feature/x', 'GIT_AUTHOR_NAME=a git commit -m x']) {
     assert.equal(bash(c, 'feature'), null, c);
   }
 });
@@ -188,8 +202,8 @@ test('fail-closed: file tools', () => {
   if (process.platform === 'darwin' || process.platform === 'win32') {
     assert.equal(protectedAction('Write', { file_path: `${home.toUpperCase()}/bubbles.yaml` }, ctx)?.kind, 'self');
   }
-  for (const n of ['mcp__github__create_or_update_file', 'mcp__github__update_ref', 'mcp__x__commit', 'mcp__github__push_files', 'mcp__GH__Merge_PR']) {
-    assert.equal(protectedAction(n, {}, ctx)?.kind, 'merge', n);
+  for (const n of ['mcp__github__create_or_update_file', 'mcp__github__update_ref', 'mcp__x__commit', 'mcp__github__push_files', 'mcp__GH__Merge_PR', 'mcp__github__update_pull_request_branch', 'mcp__github__delete_branch']) {
+    assert.ok(protectedAction(n, {}, ctx), n);
   }
 });
 
