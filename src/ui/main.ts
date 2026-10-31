@@ -9,8 +9,8 @@ import { ROLE, roleColor } from './render/sprite.ts';
 import { OfficeState, titleFor, liveWings, moveWing, pickNeedsYou, shouldAutoSelect, type Change } from './state.ts';
 import { Inspector, post, roleLabel } from './panel.ts';
 
-const STYLE_KEY = 'agent-office-style';
-const CHIME_KEY = 'agent-office-chime';
+const STYLE_KEY = 'kubicle-style';
+const CHIME_KEY = 'kubicle-chime';
 const BACKOFF_MS = [1000, 2000, 5000];
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;

@@ -3,7 +3,7 @@
 import type { AgentView, FeedItem, ProjectRow, ServerMsg } from '../shared/protocol.ts';
 
 export const FEED_MAX = 200;
-export const BASE_TITLE = 'Agent Office';
+export const BASE_TITLE = 'Kubicle';
 
 export interface Change {
   /** Agents added or updated (in message order). */

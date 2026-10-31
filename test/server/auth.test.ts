@@ -75,40 +75,40 @@ test('code expires after 15 minutes', (t) => {
 test('sessionCookie format and isOwner', () => {
   const a = new OwnerAuth(4317);
   const id = a.redeem((a.newLoginCode()))!;
-  assert.equal(a.sessionCookie(id), `office_session=${id}; HttpOnly; SameSite=Strict; Path=/`);
-  assert.equal(a.isOwner(req({ cookie: `foo=bar; office_session=${id} ; x=y` })), true);
-  assert.equal(a.isOwner(req({ cookie: `office_session=${'0'.repeat(64)}` })), false);
-  assert.equal(a.isOwner(req({ cookie: `office_session=short` })), false);
+  assert.equal(a.sessionCookie(id), `kubicle_session=${id}; HttpOnly; SameSite=Strict; Path=/`);
+  assert.equal(a.isOwner(req({ cookie: `foo=bar; kubicle_session=${id} ; x=y` })), true);
+  assert.equal(a.isOwner(req({ cookie: `kubicle_session=${'0'.repeat(64)}` })), false);
+  assert.equal(a.isOwner(req({ cookie: `kubicle_session=short` })), false);
   assert.equal(a.isOwner(req({})), false);
 });
 
 test('checkControl', () => {
   const a = new OwnerAuth(4317);
   const id = a.redeem(a.newLoginCode())!;
-  const cookie = `office_session=${id}`;
+  const cookie = `kubicle_session=${id}`;
   const good = 'http://127.0.0.1:4317';
   assert.equal(a.checkControl(req({ origin: good })), 'unauthorized');
   assert.equal(a.checkControl(req({ cookie, origin: 'http://evil.test' })), 'bad-origin');
   assert.equal(a.checkControl(req({ cookie, origin: 'http://127.0.0.1:9999' })), 'bad-origin');
   assert.equal(a.checkControl(req({ cookie })), 'bad-origin');
   assert.equal(a.checkControl(req({ cookie, origin: good })), 'no-csrf');
-  assert.equal(a.checkControl(req({ cookie, origin: good, 'x-office-csrf': '0' })), 'no-csrf');
-  assert.equal(a.checkControl(req({ cookie, origin: good, 'x-office-csrf': '1' })), 'ok');
-  assert.equal(a.checkControl(req({ cookie, origin: 'http://localhost:4317', 'x-office-csrf': '1' })), 'ok');
+  assert.equal(a.checkControl(req({ cookie, origin: good, 'x-kubicle-csrf': '0' })), 'no-csrf');
+  assert.equal(a.checkControl(req({ cookie, origin: good, 'x-kubicle-csrf': '1' })), 'ok');
+  assert.equal(a.checkControl(req({ cookie, origin: 'http://localhost:4317', 'x-kubicle-csrf': '1' })), 'ok');
 });
 
 test('checkIngest', () => {
   const tok = 'a'.repeat(64);
-  assert.equal(checkIngest(req({ 'x-office-token': tok }), tok), true);
-  assert.equal(checkIngest(req({ 'x-office-token': 'b'.repeat(64) }), tok), false);
-  assert.equal(checkIngest(req({ 'x-office-token': 'short' }), tok), false);
+  assert.equal(checkIngest(req({ 'x-kubicle-token': tok }), tok), true);
+  assert.equal(checkIngest(req({ 'x-kubicle-token': 'b'.repeat(64) }), tok), false);
+  assert.equal(checkIngest(req({ 'x-kubicle-token': 'short' }), tok), false);
   assert.equal(checkIngest(req({}), tok), false);
 });
 
 test('checkUpgrade', () => {
   const a = new OwnerAuth(4317);
   const id = a.redeem(a.newLoginCode())!;
-  const cookie = `office_session=${id}`;
+  const cookie = `kubicle_session=${id}`;
   assert.equal(a.checkUpgrade(req({ origin: 'http://127.0.0.1:4317' })), 'unauthorized');
   assert.equal(a.checkUpgrade(req({ cookie, origin: 'http://localhost:9999' })), 'bad-origin');
   assert.equal(a.checkUpgrade(req({ cookie })), 'bad-origin');

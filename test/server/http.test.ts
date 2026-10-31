@@ -24,7 +24,7 @@ function tmpHome(): string {
 }
 
 function cfgFor(home: string): Config {
-  return { ...loadConfig({ AGENT_OFFICE_HOME: home }), port: 0 };
+  return { ...loadConfig({ KUBICLE_HOME: home }), port: 0 };
 }
 
 type Srv = Awaited<ReturnType<typeof startServer>>;
@@ -49,16 +49,16 @@ async function login(s: Srv): Promise<string> {
 
 function postHook(s: Srv, body: unknown, token: string | null = s.ingestToken): Promise<Response> {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
-  if (token !== null) headers['x-office-token'] = token;
-  // What `office-hook 140 perm` sends: only such a caller can receive a decision.
-  if (typeof body === 'object' && body !== null && (body as { hook_event_name?: unknown }).hook_event_name === 'PermissionRequest') headers['x-office-hook-kind'] = 'perm';
+  if (token !== null) headers['x-kubicle-token'] = token;
+  // What `kubicle-hook 140 perm` sends: only such a caller can receive a decision.
+  if (typeof body === 'object' && body !== null && (body as { hook_event_name?: unknown }).hook_event_name === 'PermissionRequest') headers['x-kubicle-hook-kind'] = 'perm';
   return fetch(`${s.url}/hooks`, { method: 'POST', headers, body: typeof body === 'string' ? body : JSON.stringify(body) });
 }
 
 function control(s: Srv, cookie: string, path: string, body: unknown, extra: Record<string, string> = {}): Promise<Response> {
   return fetch(`${s.url}${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', cookie, origin: s.url, 'x-office-csrf': '1', ...extra },
+    headers: { 'content-type': 'application/json', cookie, origin: s.url, 'x-kubicle-csrf': '1', ...extra },
     body: JSON.stringify(body),
   });
 }
@@ -210,12 +210,12 @@ test('control POSTs: CSRF header, Origin and cookie are all required; bodies val
   const s = await start();
   const cookie = await login(s);
   const body = { scope: 'session', id: 'sX', mode: 'office' };
-  assert.equal((await control(s, cookie, '/api/approvals-mode', body, { 'x-office-csrf': '' })).status, 403);
+  assert.equal((await control(s, cookie, '/api/approvals-mode', body, { 'x-kubicle-csrf': '' })).status, 403);
   assert.equal((await control(s, cookie, '/api/approvals-mode', body, { origin: 'http://evil.example' })).status, 403);
-  assert.equal((await control(s, 'office_session=' + 'a'.repeat(64), '/api/approvals-mode', body)).status, 401);
+  assert.equal((await control(s, 'kubicle_session=' + 'a'.repeat(64), '/api/approvals-mode', body)).status, 401);
   // The ingest token is not an owner credential.
   assert.equal((await fetch(`${s.url}/api/approvals-mode`, {
-    method: 'POST', headers: { 'x-office-token': s.ingestToken, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    method: 'POST', headers: { 'x-kubicle-token': s.ingestToken, 'content-type': 'application/json' }, body: JSON.stringify(body),
   })).status, 401);
 
   assert.equal((await control(s, cookie, '/api/approvals-mode', { scope: 'nope', id: 'sX', mode: 'office' })).status, 400);
@@ -420,7 +420,7 @@ test('hook client disconnecting mid-wait makes the prompt unanswerable', async (
   const ac = new AbortController();
   const hook = fetch(`${s.url}/hooks`, {
     method: 'POST', signal: ac.signal,
-    headers: { 'content-type': 'application/json', 'x-office-token': s.ingestToken, 'x-office-hook-kind': 'perm' }, body: JSON.stringify(perm('sX2')),
+    headers: { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken, 'x-kubicle-hook-kind': 'perm' }, body: JSON.stringify(perm('sX2')),
   }).catch(() => 'aborted');
   const m = await c.waitFor(isAgent((a) => a.id === 'sX2' && a.pending?.answerable === true));
   c.msgs.length = 0; // only messages after the abort count
@@ -462,7 +462,7 @@ test('I1/I2: PermissionRequest without the perm kind header never waits, even op
   await control(s, cookie, '/api/approvals-mode', { scope: 'session', id: 'sOld', mode: 'office' });
   const t0 = performance.now();
   const r = await fetch(`${s.url}/hooks`, {
-    method: 'POST', headers: { 'content-type': 'application/json', 'x-office-token': s.ingestToken }, body: JSON.stringify(perm('sOld')),
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken }, body: JSON.stringify(perm('sOld')),
   });
   assert.equal(await r.text(), '');
   assert.ok(performance.now() - t0 < 200);
@@ -480,7 +480,7 @@ test('I2: an opted-in wait streams heartbeat spaces, then the decision', async (
     const body = JSON.stringify(perm('sHB'));
     const req = httpRequest(`${s.url}/hooks`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'x-office-token': s.ingestToken, 'x-office-hook-kind': 'perm' },
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'x-kubicle-token': s.ingestToken, 'x-kubicle-hook-kind': 'perm' },
     }, (res) => {
       res.setEncoding('utf8');
       res.on('data', (d: string) => chunks.push({ t: performance.now() - t0, text: d }));
@@ -568,15 +568,15 @@ test('a hook from a new project broadcasts the project list before the agent', a
   assert.equal(c.msgs.filter((m) => m.t === 'projects').length, n);
 });
 
-test('GET /api/debug/agents: 404 unless AGENT_OFFICE_DEBUG=1; owner-only; returns registry.list()', async () => {
-  const prev = process.env.AGENT_OFFICE_DEBUG;
+test('GET /api/debug/agents: 404 unless KUBICLE_DEBUG=1; owner-only; returns registry.list()', async () => {
+  const prev = process.env.KUBICLE_DEBUG;
   try {
-    delete process.env.AGENT_OFFICE_DEBUG;
+    delete process.env.KUBICLE_DEBUG;
     const off = await start();
     const offCookie = await login(off);
     assert.equal((await fetch(`${off.url}/api/debug/agents`, { headers: { cookie: offCookie } })).status, 404);
 
-    process.env.AGENT_OFFICE_DEBUG = '1';
+    process.env.KUBICLE_DEBUG = '1';
     const s = await start();
     assert.equal((await fetch(`${s.url}/api/debug/agents`)).status, 403, 'no cookie');
     const cookie = await login(s);
@@ -587,6 +587,6 @@ test('GET /api/debug/agents: 404 unless AGENT_OFFICE_DEBUG=1; owner-only; return
     const list = await r.json() as AgentView[];
     assert.ok(list.some((a) => a.id === 'sDbg' && a.kind === 'session'));
   } finally {
-    if (prev === undefined) delete process.env.AGENT_OFFICE_DEBUG; else process.env.AGENT_OFFICE_DEBUG = prev;
+    if (prev === undefined) delete process.env.KUBICLE_DEBUG; else process.env.KUBICLE_DEBUG = prev;
   }
 });

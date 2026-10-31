@@ -139,10 +139,10 @@ export async function startServer(
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const s = await startServer(loadConfig(), {
-    openBrowser: process.env.AGENT_OFFICE_NO_OPEN !== '1',
+    openBrowser: process.env.KUBICLE_NO_OPEN !== '1',
     log: (m) => console.error(m),
   });
-  console.log(`Agent Office: ${s.loginUrl}`);
+  console.log(`Kubicle: ${s.loginUrl}`);
   const stop = () => { s.close().then(() => process.exit(0), () => process.exit(1)); };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);

@@ -55,8 +55,8 @@ function hook(body: Record<string, unknown>): Promise<Response> {
   return fetch(`${srv!.url}/hooks`, {
     method: 'POST',
     headers: {
-      'content-type': 'application/json', 'x-office-token': srv!.ingestToken,
-      ...(body.hook_event_name === 'PermissionRequest' ? { 'x-office-hook-kind': 'perm' } : {}),
+      'content-type': 'application/json', 'x-kubicle-token': srv!.ingestToken,
+      ...(body.hook_event_name === 'PermissionRequest' ? { 'x-kubicle-hook-kind': 'perm' } : {}),
     },
     body: JSON.stringify({ transcript_path: join(tmp, 'none.jsonl'), ...body }),
   });
@@ -84,7 +84,7 @@ async function settle(page: Page): Promise<void> {
 
 test('live office: state, approvals, wings, styles, narrow view, disconnect', async () => {
   const home = join(tmp, 'home');
-  srv = await startServer({ ...loadConfig({ AGENT_OFFICE_HOME: home }), port: 0 }, { openBrowser: false });
+  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, { openBrowser: false });
 
   const alpha = repo('alpha'), beta = repo('beta');
   const S1 = 'aaaaaaaa-0000-4000-8000-000000000001', S2 = 'bbbbbbbb-0000-4000-8000-000000000002', SUB = 'a1b2c3d4e5f6a7b8c';
@@ -141,7 +141,7 @@ test('live office: state, approvals, wings, styles, narrow view, disconnect', as
     tool_name: 'Bash', tool_input: { command: EVIL, description: 'Create marker1' },
   });
   await page.waitForFunction(() => /1 need you/.test(document.getElementById('counts')!.innerText), null, { timeout: 5000 });
-  assert.equal(await page.title(), '(1) Agent Office');
+  assert.equal(await page.title(), '(1) Kubicle');
   // Select someone else first, then click the waiting agent on the map.
   await clickAgent(page, S1);
   assert.ok(await page.locator('#approve').isHidden());
@@ -163,7 +163,7 @@ test('live office: state, approvals, wings, styles, narrow view, disconnect', as
   const body = JSON.parse((await res.text()).trim()) as { hookSpecificOutput: { decision: { behavior: string } } };
   assert.equal(body.hookSpecificOutput.decision.behavior, 'allow');
   await page.waitForFunction(() => /0 need you/.test(document.getElementById('counts')!.innerText), null, { timeout: 5000 });
-  await page.waitForFunction(() => document.title === 'Agent Office', null, { timeout: 3000 });
+  await page.waitForFunction(() => document.title === 'Kubicle', null, { timeout: 3000 });
 
   // C1: an input too long to review here: the hook returns at once (terminal prompt), the card shows it unanswerable.
   const long = await hook({
@@ -258,7 +258,7 @@ test('live office: state, approvals, wings, styles, narrow view, disconnect', as
     await page.waitForTimeout(400);
     await page.screenshot({ path: join(outDir, `live-${style}.png`), fullPage: true });
   }
-  assert.equal(await page.evaluate(() => localStorage.getItem('agent-office-style')), 'cozy', 'style remembered');
+  assert.equal(await page.evaluate(() => localStorage.getItem('kubicle-style')), 'cozy', 'style remembered');
 
   // ---- narrow viewport: no horizontal page scroll; the map scrolls inside its own box ----
   await page.locator('#styleTabs button[data-style="pixel"]').click();
@@ -293,7 +293,7 @@ test('live office: state, approvals, wings, styles, narrow view, disconnect', as
   await page.screenshot({ path: join(outDir, 'live-disconnected.png') });
 
   // ---- server restarts (same port and home): the old cookie is gone, so ask to sign in again ----
-  srv = await startServer({ ...loadConfig({ AGENT_OFFICE_HOME: home }), port }, { openBrowser: false });
+  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port }, { openBrowser: false });
   await page.waitForFunction(() => /The office server restarted\. Open the login link it printed to sign in again\./.test(document.getElementById('disconnected')!.innerText), null, { timeout: 10000 });
   assert.ok(await page.locator('#disconnected').isVisible());
   await page.screenshot({ path: join(outDir, 'live-relogin.png') });

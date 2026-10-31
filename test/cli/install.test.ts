@@ -9,10 +9,10 @@ import { HOOK_EVENTS, planInstall, planUninstall, quote } from '../../src/cli/in
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CLI = join(root, 'src', 'cli', 'install.ts');
-const SHIM = '/opt/agent office/bin/office-hook';
+const SHIM = '/opt/my kubicle/bin/kubicle-hook';
 // I4: the install-time port and home are baked into every command.
-const ENV = { port: 4317, home: '/Users/me/.agent-office' };
-const PRE = 'AGENT_OFFICE_PORT=4317 AGENT_OFFICE_HOME=/Users/me/.agent-office';
+const ENV = { port: 4317, home: '/Users/me/.kubicle' };
+const PRE = 'KUBICLE_PORT=4317 KUBICLE_HOME=/Users/me/.kubicle';
 
 const userSettings = () => ({
   theme: 'dark',
@@ -25,7 +25,7 @@ const userSettings = () => ({
 
 function cli(args: string[], home: string) {
   return spawnSync('node', ['--disable-warning=ExperimentalWarning', CLI, ...args], {
-    env: { ...process.env, AGENT_OFFICE_HOME: home }, encoding: 'utf8',
+    env: { ...process.env, KUBICLE_HOME: home }, encoding: 'utf8',
   });
 }
 
@@ -48,8 +48,8 @@ test('planInstall keeps user hooks and adds ours', () => {
 });
 
 test('unquoted when path has no spaces', () => {
-  const out = planInstall({}, '/x/bin/office-hook', ENV);
-  assert.equal(out.hooks.Stop[0].hooks[0].command, `${PRE} /x/bin/office-hook 1`);
+  const out = planInstall({}, '/x/bin/kubicle-hook', ENV);
+  assert.equal(out.hooks.Stop[0].hooks[0].command, `${PRE} /x/bin/kubicle-hook 1`);
 });
 
 test('install twice deep-equals install once; does not mutate input', () => {
@@ -86,14 +86,14 @@ test('CLI install/uninstall roundtrip with backup, mode, token', () => {
   const r = cli(['install', '--settings', file], home);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /npm start/);
-  assert.equal(readFileSync(file + '.agent-office.bak', 'utf8'), orig);
+  assert.equal(readFileSync(file + '.kubicle.bak', 'utf8'), orig);
   const text = readFileSync(file, 'utf8');
   assert.ok(text.endsWith('}\n'));
   assert.equal(statSync(file).mode & 0o777, 0o640);
   const parsed = JSON.parse(text);
   assert.equal(parsed.hooks.PreToolUse.length, 2);
-  assert.ok(parsed.hooks.Stop[1].hooks[0].command.includes('/bin/office-hook'));
-  assert.ok(parsed.hooks.Stop[1].hooks[0].command.startsWith(`AGENT_OFFICE_PORT=4317 AGENT_OFFICE_HOME=${home} `), 'I4: env from loadConfig baked in');
+  assert.ok(parsed.hooks.Stop[1].hooks[0].command.includes('/bin/kubicle-hook'));
+  assert.ok(parsed.hooks.Stop[1].hooks[0].command.startsWith(`KUBICLE_PORT=4317 KUBICLE_HOME=${home} `), 'I4: env from loadConfig baked in');
   assert.ok(existsSync(join(home, 'ingest-token')));
 
   const again = cli(['install', '--settings', file], home);
@@ -125,7 +125,7 @@ test('malformed file: exit 1, bytes unchanged, no backup', () => {
     assert.ok(r.stderr.length > 0);
     assert.equal(readFileSync(file, 'utf8'), bad);
   }
-  assert.ok(!existsSync(file + '.agent-office.bak'));
+  assert.ok(!existsSync(file + '.kubicle.bak'));
 });
 
 test('structurally bad hooks: exit 1, unchanged', () => {
@@ -158,7 +158,7 @@ test('symlinked settings.json stays a symlink; target gets hooks', () => {
   assert.equal(r.status, 0, r.stderr);
   assert.ok(lstatSync(link).isSymbolicLink());
   assert.equal(JSON.parse(readFileSync(target, 'utf8')).hooks.SessionStart.length, 1);
-  assert.equal(readFileSync(target + '.agent-office.bak', 'utf8'), orig);
+  assert.equal(readFileSync(target + '.kubicle.bak', 'utf8'), orig);
   const u = cli(['uninstall', '--settings', link], join(dir, 'home'));
   assert.equal(u.status, 0, u.stderr);
   assert.ok(lstatSync(link).isSymbolicLink());
@@ -177,7 +177,7 @@ test('bad arguments exit 2 and never touch HOME/.claude', () => {
   ];
   for (const args of forms) {
     const r = spawnSync('node', ['--disable-warning=ExperimentalWarning', CLI, ...args], {
-      env: { ...process.env, HOME: dir, AGENT_OFFICE_HOME: join(dir, 'home') }, encoding: 'utf8',
+      env: { ...process.env, HOME: dir, KUBICLE_HOME: join(dir, 'home') }, encoding: 'utf8',
     });
     assert.equal(r.status, 2, args.join(' '));
     assert.match(r.stderr, /usage/);
@@ -194,9 +194,9 @@ test('--settings=<path> form works', () => {
 });
 
 test('quote: plain unquoted, specials single-quoted, embedded quote escaped', () => {
-  assert.equal(quote('/tmp/x/bin/office-hook'), '/tmp/x/bin/office-hook');
-  assert.equal(quote('/tmp/R&D/bin/office-hook'), "'/tmp/R&D/bin/office-hook'");
-  assert.equal(quote("/tmp/it's/bin/office-hook"), "'/tmp/it'\\''s/bin/office-hook'");
+  assert.equal(quote('/tmp/x/bin/kubicle-hook'), '/tmp/x/bin/kubicle-hook');
+  assert.equal(quote('/tmp/R&D/bin/kubicle-hook'), "'/tmp/R&D/bin/kubicle-hook'");
+  assert.equal(quote("/tmp/it's/bin/kubicle-hook"), "'/tmp/it'\\''s/bin/kubicle-hook'");
 });
 
 test('produced command actually executes for awkward paths', () => {
@@ -204,8 +204,8 @@ test('produced command actually executes for awkward paths', () => {
   for (const name of ['R&D (x) $y', "it's `here`"]) {
     const d = join(base, name, 'bin');
     mkdirSync(d, { recursive: true });
-    const stub = join(d, 'office-hook');
-    writeFileSync(stub, '#!/bin/bash\necho "ran:$1:$AGENT_OFFICE_PORT:$AGENT_OFFICE_HOME"\n', { mode: 0o755 });
+    const stub = join(d, 'kubicle-hook');
+    writeFileSync(stub, '#!/bin/bash\necho "ran:$1:$KUBICLE_PORT:$KUBICLE_HOME"\n', { mode: 0o755 });
     const cmd = planInstall({}, stub, { port: 4999, home: join(base, 'my home') }).hooks.Stop[0].hooks[0].command;
     const r = spawnSync('bash', ['-c', cmd], { encoding: 'utf8' });
     assert.equal(r.stdout.trim(), `ran:1:4999:${join(base, 'my home')}`, cmd);
@@ -226,7 +226,7 @@ test('backup keeps the ORIGINAL across repeated installs; no-op rewrites nothing
   const edited = JSON.parse(after); edited.theme = 'light';
   writeFileSync(file, JSON.stringify(edited, null, 2) + '\n');
   assert.equal(cli(['install', '--settings', file], join(dir, 'home')).status, 0);
-  assert.equal(readFileSync(file + '.agent-office.bak', 'utf8'), orig);
+  assert.equal(readFileSync(file + '.kubicle.bak', 'utf8'), orig);
   // no-op reinstall: bytes and mtime unchanged
   const bytes = readFileSync(file, 'utf8');
   utimesSync(file, old, old);
@@ -235,7 +235,7 @@ test('backup keeps the ORIGINAL across repeated installs; no-op rewrites nothing
   assert.equal(r.status, 0);
   assert.equal(readFileSync(file, 'utf8'), bytes);
   assert.equal(statSync(file).mtimeMs, m2);
-  assert.equal(readFileSync(file + '.agent-office.bak', 'utf8'), orig);
+  assert.equal(readFileSync(file + '.kubicle.bak', 'utf8'), orig);
   void mtime;
 });
 
@@ -256,6 +256,18 @@ test('I4: reinstall with a different port/home replaces our entries (no duplicat
   const a = planInstall(userSettings(), SHIM, ENV);
   const b = planInstall(a, SHIM, { port: 5000, home: '/tmp/other home' });
   assert.equal(b.hooks.Stop.length, 2);
-  assert.equal(b.hooks.Stop[1].hooks[0].command, `AGENT_OFFICE_PORT=5000 AGENT_OFFICE_HOME='/tmp/other home' '${SHIM}' 1`);
+  assert.equal(b.hooks.Stop[1].hooks[0].command, `KUBICLE_PORT=5000 KUBICLE_HOME='/tmp/other home' '${SHIM}' 1`);
   assert.deepEqual(planUninstall(b), userSettings());
+});
+
+test('legacy /bin/office-hook entries are still recognised: uninstall removes them, install replaces them', () => {
+  const old = { hooks: { Stop: [
+    { hooks: [{ type: 'command', command: '/usr/local/bin/mine' }] },
+    { hooks: [{ type: 'command', command: 'AGENT_OFFICE_PORT=4317 /old/agent-office/bin/office-hook 1', timeout: 5 }] },
+  ] } };
+  const un = planUninstall(old);
+  assert.deepEqual(un.hooks.Stop, [{ hooks: [{ type: 'command', command: '/usr/local/bin/mine' }] }]);
+  const re = planInstall(old, SHIM, ENV);
+  assert.equal(re.hooks.Stop.length, 2);
+  assert.ok(re.hooks.Stop.every((g: any) => g.hooks.every((h: any) => !h.command.includes('/bin/office-hook'))));
 });

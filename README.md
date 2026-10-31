@@ -1,4 +1,4 @@
-# Agent Office
+# Kubicle
 
 A localhost page that shows every Claude Code session on this Mac (via hooks), one wing per project, and lets you answer permission prompts from the browser. Stage 1: watch and approve only.
 
@@ -10,24 +10,24 @@ npm run install-hooks    # adds 14 hook entries to ~/.claude/settings.json (back
 npm start                # builds the UI, starts the server, opens the login link
 ```
 
-The server listens on `127.0.0.1:4317` (override with `AGENT_OFFICE_PORT`). It prints `Agent Office: <login link>` and opens it. The link works once; restart the server for a new one. Set `AGENT_OFFICE_NO_OPEN=1` to skip opening the browser.
+The server listens on `127.0.0.1:4317` (override with `KUBICLE_PORT`). It prints `Kubicle: <login link>` and opens it. The link works once; restart the server for a new one. Set `KUBICLE_NO_OPEN=1` to skip opening the browser.
 
 Existing sessions pick up new hooks only after they restart.
 
-The installer writes the current `AGENT_OFFICE_PORT` and `AGENT_OFFICE_HOME` into each hook command, so sessions reach the same office however their shell is set up. Re-run `npm run install-hooks` after changing either, and after updating Agent Office (older hook command lines still report events but never get office approvals). If hooks arrive with the wrong token, the office shows "Hooks are sending the wrong token. Re-run npm run install-hooks."
+The installer writes the current `KUBICLE_PORT` and `KUBICLE_HOME` into each hook command, so sessions reach the same office however their shell is set up. Re-run `npm run install-hooks` after changing either, and after updating Kubicle (older hook command lines still report events but never get office approvals). If hooks arrive with the wrong token, the office shows "Hooks are sending the wrong token. Re-run npm run install-hooks."
 
 ## Uninstall
 
 ```
-npm run uninstall-hooks  # removes only the entries pointing at bin/office-hook
-rm -rf ~/.agent-office   # optional: deletes the token and history
+npm run uninstall-hooks  # removes only the entries pointing at bin/kubicle-hook
+rm -rf ~/.kubicle   # optional: deletes the token and history
 ```
 
 If the server is not running, the hooks do nothing and sessions are unaffected. If something else is listening on the port, or the server hangs, the hooks print nothing: a hook gives up after 1 s, and a permission prompt after about 9 s (the terminal prompt then appears as usual).
 
 ## What is stored where
 
-`~/.agent-office/` (mode 0700; override with `AGENT_OFFICE_HOME`):
+`~/.kubicle/` (mode 0700; override with `KUBICLE_HOME`):
 
 - `ingest-token`: the shared secret the hook shim sends.
 - `office.db`: SQLite. Hook events (payload fields truncated to 4096 characters), project names, per-session/project approval settings. Events older than 7 days are pruned (checked hourly and at start).
@@ -38,7 +38,7 @@ If the server is not running, the hooks do nothing and sessions are unaffected. 
 - Control (approve, deny, rename, archive, approval mode) needs the owner browser session: a cookie from the one-time login link, plus an exact Origin check and a CSRF header.
 - An agent cannot approve its own actions: it only holds the ingest token, and approval answers need the owner cookie.
 - Known limit: an agent that drives your real, logged-in browser could use your session. That is out of scope for stage 1.
-- Debug route `GET /api/debug/agents` exists only when the server is started with `AGENT_OFFICE_DEBUG=1`, and is owner-only.
+- Debug route `GET /api/debug/agents` exists only when the server is started with `KUBICLE_DEBUG=1`, and is owner-only.
 
 ## Approval routing
 
@@ -59,7 +59,7 @@ npm run typecheck
 npm run smoke       # real `claude -p` session against a throwaway server/repo/settings; prints SMOKE OK
 ```
 
-The smoke test uses a temp home, a temp git repo with hooks in its `.claude/settings.local.json`, and port 4399. It does not touch `~/.claude` or `~/.agent-office`. It costs one short haiku run.
+The smoke test uses a temp home, a temp git repo with hooks in its `.claude/settings.local.json`, and port 4399. It does not touch `~/.claude` or `~/.kubicle`. It costs one short haiku run.
 
 ## Owner check (manual, with real terminals)
 

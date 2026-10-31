@@ -14,9 +14,9 @@ export interface Config {
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
-  const port = Number(env.AGENT_OFFICE_PORT);
+  const port = Number(env.KUBICLE_PORT);
   return {
-    home: env.AGENT_OFFICE_HOME || join(homedir(), '.agent-office'),
+    home: env.KUBICLE_HOME || join(homedir(), '.kubicle'),
     port: Number.isInteger(port) && port > 0 && port < 65536 ? port : 4317,
     payloadCap: 4096,
     approvalWaitMs: 120_000,

@@ -14,10 +14,11 @@ export const HOOK_EVENTS: HookEventName[] = [
 ];
 
 const TOOL_EVENTS = new Set<string>(['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'PermissionDenied']);
-const MARKER = '/bin/office-hook';
+const MARKER = '/bin/kubicle-hook';
+const LEGACY_MARKER = '/bin/office-hook'; // pre-rename entries: still recognised so uninstall/install clean them up
 
 const isObj = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v);
-const isOurs = (h: any): boolean => isObj(h) && typeof h.command === 'string' && h.command.includes(MARKER);
+const isOurs = (h: any): boolean => isObj(h) && typeof h.command === 'string' && (h.command.includes(MARKER) || h.command.includes(LEGACY_MARKER));
 
 function checkShape(settings: any): void {
   if (!isObj(settings)) throw new Error('settings must be a JSON object');
@@ -49,14 +50,14 @@ export interface HookEnv { port: number; home: string }
 
 /**
  * Our entries carry the port and home the installer saw (I4), so a session started from a shell
- * without AGENT_OFFICE_* set still reaches the same office and reads the same token.
- * Recognised by MARKER, so older forms (no env prefix, `office-hook 2` / `140`) are replaced too.
+ * without KUBICLE_* set still reaches the same office and reads the same token.
+ * Recognised by MARKER, so older forms (no env prefix, `kubicle-hook 2` / `140`) are replaced too.
  */
 export function planInstall(settings: any, shimPath: string, env: HookEnv): any {
   checkShape(settings);
   const next = structuredClone(settings);
   const hooks: Record<string, any[]> = next.hooks ?? {};
-  const prefix = `AGENT_OFFICE_PORT=${Number(env.port)} AGENT_OFFICE_HOME=${quote(env.home)}`;
+  const prefix = `KUBICLE_PORT=${Number(env.port)} KUBICLE_HOME=${quote(env.home)}`;
   for (const ev of HOOK_EVENTS) {
     const perm = ev === 'PermissionRequest';
     const group: any = {
@@ -150,7 +151,7 @@ function main(argv: string[]): number {
     }
   }
 
-  const shimPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'office-hook');
+  const shimPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'kubicle-hook');
   let next: any;
   try {
     const { port, home } = loadConfig(process.env);
@@ -169,11 +170,11 @@ function main(argv: string[]): number {
   if (raw !== null) {
     if (isDeepStrictEqual(next, current)) {
       console.log(`Settings: ${file}`);
-      console.log(cmd === 'install' ? 'Hooks already installed; nothing changed.' : 'No Agent Office hooks found; nothing changed.');
+      console.log(cmd === 'install' ? 'Hooks already installed; nothing changed.' : 'No Kubicle hooks found; nothing changed.');
       if (cmd === 'install') ensureIngestToken(loadConfig(process.env).home);
       return 0;
     }
-    backup = `${file}.agent-office.bak`;
+    backup = `${file}.kubicle.bak`;
     try { copyFileSync(file, backup, constants.COPYFILE_EXCL); } catch (e: any) {
       if (e?.code !== 'EEXIST') throw e; // keep the first (original) backup
     }
@@ -188,7 +189,7 @@ function main(argv: string[]): number {
     console.log('Run `npm start` to open the office.');
   } else {
     console.log(`Settings: ${file}`);
-    console.log(`Removed ${countOurs(current)} Agent Office hook entries.`);
+    console.log(`Removed ${countOurs(current)} Kubicle hook entries.`);
     console.log(`Backup: ${backup}`);
   }
   return 0;

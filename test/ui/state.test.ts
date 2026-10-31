@@ -18,8 +18,8 @@ test('needs-you fires only on the transition into waiting', () => {
   assert.deepEqual(s.apply({ t: 'agent', agent: v('b', { status: 'waiting' }) }).newlyWaiting.map((x) => x.id), ['b']);
   assert.equal(s.apply({ t: 'agent', agent: v('b', { status: 'waiting', activity: 'x' }) }).newlyWaiting.length, 0, 'staying waiting does not repeat');
   assert.equal(s.counts().needYou, 2);
-  assert.equal(titleFor(s.counts().needYou), '(2) Agent Office');
-  assert.equal(titleFor(0), 'Agent Office');
+  assert.equal(titleFor(s.counts().needYou), '(2) Kubicle');
+  assert.equal(titleFor(0), 'Kubicle');
   // Reconnect snapshot: c newly waiting alerts, a (still waiting) does not; b vanished → expired.
   const re = s.apply({ t: 'snapshot', agents: [v('a', { status: 'waiting' }), v('c', { status: 'waiting' })], projects: [], feed: [], banner: null });
   assert.deepEqual(re.newlyWaiting.map((x) => x.id), ['c']);

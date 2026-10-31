@@ -1,6 +1,6 @@
 #!/bin/bash
-# Agent Office hook shim. Fail-open: always exits 0.
-#   office-hook <max-seconds> [perm]
+# Kubicle hook shim. Fail-open: always exits 0.
+#   kubicle-hook <max-seconds> [perm]
 # Prints NOTHING unless the kind is `perm` (PermissionRequest) and the trimmed 2xx body is exactly
 # one of the two office decisions below. Anything else on the port (an impostor, a stale server)
 # can neither inject context nor approve tool calls.
@@ -11,11 +11,11 @@ case "$max" in ''|*[!0-9]*) max=1 ;; esac
 
 # Must equal hookResponse('allow') / hookResponse('deny') in src/server/approvals.ts (unit-tested).
 ALLOW='{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
-DENY='{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from Agent Office"}}}'
+DENY='{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from Kubicle"}}}'
 
-[ -n "${AGENT_OFFICE_AGENT:-}" ] && exit 0
+[ -n "${KUBICLE_AGENT:-}" ] && exit 0
 
-home="${AGENT_OFFICE_HOME:-$HOME/.agent-office}"
+home="${KUBICLE_HOME:-$HOME/.kubicle}"
 token=""
 if [ -r "$home/ingest-token" ]; then
   token=$(tr -d '[:space:]' < "$home/ingest-token" 2>/dev/null)
@@ -30,11 +30,11 @@ hkind="event"
 # --speed-limit/--speed-time give up after ~3 s instead of holding the session for the full max.
 out=$(curl -s -m "$max" --connect-timeout 1 --speed-limit 1 --speed-time 3 -X POST \
   -H 'Content-Type: application/json' \
-  -H "X-Office-Token: $token" \
-  -H "X-Office-Hook-Kind: $hkind" \
+  -H "X-Kubicle-Token: $token" \
+  -H "X-Kubicle-Hook-Kind: $hkind" \
   --data-binary @- \
   -w $'\n%{http_code}' \
-  "http://127.0.0.1:${AGENT_OFFICE_PORT:-4317}/hooks" 2>/dev/null)
+  "http://127.0.0.1:${KUBICLE_PORT:-4317}/hooks" 2>/dev/null)
 rc=$?
 [ "$rc" -eq 0 ] || exit 0
 [ "$hkind" = "perm" ] || exit 0

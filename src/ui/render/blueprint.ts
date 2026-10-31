@@ -63,7 +63,7 @@ export function makeBlueprint(): Renderer {
       g.fillText(`${r.x1 - r.x0 + 1}.0 × ${r.y1 - r.y0 + 1}.0 m`, ox + (r.x0 + 1.4) * T, oy + (r.y1 + 0.75) * T);
     }
     g.fillStyle = 'rgba(233,242,255,.7)';
-    g.fillText('AGENT OFFICE · LEVEL 1 · 1 SQ = 1 M · DWG A-101', ox + 1.3 * T, oy + (ROWS - 0.3) * T);
+    g.fillText('KUBICLE · LEVEL 1 · 1 SQ = 1 M · DWG A-101', ox + 1.3 * T, oy + (ROWS - 0.3) * T);
     g.fillText('LIFT', EX + 2.3 * T, EY + T * .75);
     return c;
   };

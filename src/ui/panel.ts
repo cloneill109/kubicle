@@ -13,7 +13,7 @@ export function post(path: string, body: unknown): Promise<Response> {
   return fetch(path, {
     method: 'POST',
     credentials: 'same-origin',
-    headers: { 'content-type': 'application/json', 'X-Office-CSRF': '1' },
+    headers: { 'content-type': 'application/json', 'X-Kubicle-CSRF': '1' },
     body: JSON.stringify(body),
   });
 }

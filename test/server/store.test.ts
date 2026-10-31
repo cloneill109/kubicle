@@ -119,8 +119,8 @@ test('loadConfig defaults and env overrides', () => {
   assert.equal(c.lostMs, 1800000);
   assert.equal(c.expireMs, 86400000);
   assert.equal(c.bannerMs, 600000);
-  assert.match(c.home, /\.agent-office$/);
-  const o = loadConfig({ AGENT_OFFICE_PORT: '5000', AGENT_OFFICE_HOME: '/x/y' });
+  assert.match(c.home, /\.kubicle$/);
+  const o = loadConfig({ KUBICLE_PORT: '5000', KUBICLE_HOME: '/x/y' });
   assert.equal(o.port, 5000);
   assert.equal(o.home, '/x/y');
 });

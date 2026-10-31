@@ -122,7 +122,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
   const uiDir = resolve(d.rootDir, 'src', 'ui');
   const distDir = resolve(d.rootDir, 'dist', 'ui');
   const pageCsp = csp(d.port);
-  const debug = process.env.AGENT_OFFICE_DEBUG === '1'; // smoke-test aid; off by default
+  const debug = process.env.KUBICLE_DEBUG === '1'; // smoke-test aid; off by default
   // A new project appears during ingest (inside registry.apply): broadcast the list before the
   // agent update that references it, so clients already have its wing.
   d.projects.onCreate = () => broadcast({ t: 'projects', projects: d.projects.list() });
@@ -159,9 +159,9 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       return;
     }
     let decision: 'allow' | 'deny' | null = null;
-    // Only a shim run as `office-hook <max> perm` can deliver a decision (I1). Anything else (an
+    // Only a shim run as `kubicle-hook <max> perm` can deliver a decision (I1). Anything else (an
     // older install's command line) gets no office wait, so its terminal prompt appears at once.
-    const canDeliver = req.headers['x-office-hook-kind'] === 'perm';
+    const canDeliver = req.headers['x-kubicle-hook-kind'] === 'perm';
     // Hook caller gone (curl killed/timed out): nobody can receive an answer, so hand the
     // prompt to the terminal instead of showing a dead "answer here" button for 120 s.
     res.once('close', () => { if (!res.writableEnded) d.approvals.release(agentKey(e)); });

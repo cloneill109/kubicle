@@ -136,7 +136,7 @@ test('hookResponse strings', () => {
   );
   assert.equal(
     hookResponse('deny'),
-    '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from Agent Office"}}}',
+    '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from Kubicle"}}}',
   );
 });
 

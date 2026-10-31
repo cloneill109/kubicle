@@ -19,7 +19,7 @@ interface Waiter {
 
 export function hookResponse(d: Decision | null): string {
   if (d === null) return '';
-  const decision = d === 'allow' ? { behavior: 'allow' } : { behavior: 'deny', message: 'Denied from Agent Office' };
+  const decision = d === 'allow' ? { behavior: 'allow' } : { behavior: 'deny', message: 'Denied from Kubicle' };
   return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } });
 }
 

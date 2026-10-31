@@ -5,7 +5,7 @@ import type { IncomingMessage } from 'node:http';
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const CODE_TTL_MS = 15 * 60_000;
-const COOKIE = 'office_session';
+const COOKIE = 'kubicle_session';
 
 function safeEqual(a: string, b: string): boolean {
   const x = Buffer.from(a);
@@ -44,7 +44,7 @@ export function ensureIngestToken(home: string): string {
 }
 
 export function checkIngest(req: IncomingMessage, token: string): boolean {
-  const got = header(req, 'x-office-token');
+  const got = header(req, 'x-kubicle-token');
   return typeof got === 'string' && safeEqual(got, token);
 }
 
@@ -106,12 +106,12 @@ export class OwnerAuth {
     return origin && this.origins.has(origin) ? 'ok' : 'bad-origin';
   }
 
-  /** For state-changing POSTs: cookie + Origin + X-Office-CSRF: 1. */
+  /** For state-changing POSTs: cookie + Origin + X-Kubicle-CSRF: 1. */
   checkControl(req: IncomingMessage): 'ok' | 'unauthorized' | 'bad-origin' | 'no-csrf' {
     if (!this.isOwner(req)) return 'unauthorized';
     const origin = header(req, 'origin');
     if (!origin || !this.origins.has(origin)) return 'bad-origin';
-    if (header(req, 'x-office-csrf') !== '1') return 'no-csrf';
+    if (header(req, 'x-kubicle-csrf') !== '1') return 'no-csrf';
     return 'ok';
   }
 

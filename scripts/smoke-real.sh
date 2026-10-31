@@ -1,6 +1,6 @@
 #!/bin/bash
 # Real-session smoke test: runs one `claude -p` session (with a subagent) against a throwaway
-# server, repo, home and settings file. Never touches ~/.claude or ~/.agent-office.
+# server, repo, home and settings file. Never touches ~/.claude or ~/.kubicle.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PORT=4399
@@ -37,15 +37,15 @@ git -C "$REPO" init -q
 echo hello > "$REPO/a.txt"
 echo '{}' > "$REPO/.claude/settings.local.json"
 
-export AGENT_OFFICE_HOME="$HOME_DIR" AGENT_OFFICE_PORT="$PORT"
+export KUBICLE_HOME="$HOME_DIR" KUBICLE_PORT="$PORT"
 
 # Server: debug route on, no browser, stdout captured for the login URL.
-AGENT_OFFICE_DEBUG=1 AGENT_OFFICE_NO_OPEN=1 \
+KUBICLE_DEBUG=1 KUBICLE_NO_OPEN=1 \
   node --disable-warning=ExperimentalWarning "$ROOT/src/server/main.ts" >"$TMP/server.out" 2>"$LOG" &
 SRV_PID=$!
 LOGIN=""
 for _ in $(seq 1 50); do
-  LOGIN="$(sed -n 's/^Agent Office: //p' "$TMP/server.out" | head -n1)"
+  LOGIN="$(sed -n 's/^Kubicle: //p' "$TMP/server.out" | head -n1)"
   [ -n "$LOGIN" ] && break
   sleep 0.2
 done
