@@ -72,3 +72,12 @@ test('resolveRoom', () => {
   assert.equal(resolveRoom(f, { label: '', room: '', division: '' }), BULLPEN);
   assert.equal(resolveRoom(f, { room: '__proto__', label: 'constructor' }), BULLPEN);
 });
+
+test('validateFloor does not throw on malformed shapes', () => {
+  const bad = (rooms: unknown) => ({ revision: 1, source: 'home', rooms }) as unknown as FloorDef;
+  for (const rooms of [undefined, null, {}]) assert.deepEqual(validateFloor(bad(rooms), ids), ['rooms must be a list']);
+  assert.deepEqual(validateFloor(null as never, ids), ['rooms must be a list']);
+  assert.deepEqual(validateFloor(bad([null]), ids), ['room #1 must be a mapping', '"bullpen" is missing']);
+  assert.deepEqual(validateFloor(bad([bp(), 42]), ids), ['room #2 must be a mapping']);
+  assert.deepEqual(validateFloor(bad([bp(), 'x']), ids), ['room #2 must be a mapping']);
+});

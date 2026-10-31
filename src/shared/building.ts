@@ -38,10 +38,12 @@ export function defaultFloor(): FloorDef {
 // Unknown divisions are deliberately not errors: they render as "Unknown division".
 // `divisionIds` is accepted for call-site symmetry with callers that hold the set.
 export function validateFloor(f: FloorDef, _divisionIds: Set<string>): string[] {
+  if (!f || typeof f !== 'object' || !Array.isArray(f.rooms)) return ['rooms must be a list'];
   const errs: string[] = [];
   const seen = new Set<string>();
   let hasBullpen = false;
-  for (const r of f.rooms) {
+  for (const [i, r] of f.rooms.entries()) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) { errs.push(`room #${i + 1} must be a mapping`); continue; }
     if (seen.has(r.id)) errs.push(`duplicate room id "${r.id}"`);
     seen.add(r.id);
     if (typeof r.id !== 'string' || !ID_RE.test(r.id)) errs.push(`room id "${r.id}" is invalid`);
