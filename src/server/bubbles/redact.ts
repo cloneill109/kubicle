@@ -13,7 +13,25 @@ const PATTERNS: RegExp[] = [
   /xox[abp]-[A-Za-z0-9-]+/g,
   /AKIA[0-9A-Z]{16}/g,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+  // A cut-off key: BEGIN with no END runs to the end of the string.
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*$/g,
 ];
+const ORPHAN_END = /-----END [A-Z ]*PRIVATE KEY-----/g;
+const B64 = /[A-Za-z0-9+\/=\s]/;
+
+/** A key whose BEGIN was cut off: redact the base64 body run before each remaining END marker (linear scan, no regex backtracking). */
+function orphanEnds(s: string): string {
+  if (!s.includes('PRIVATE KEY-----')) return s;
+  let out = ''; let last = 0;
+  for (const m of s.matchAll(ORPHAN_END)) {
+    let i = m.index;
+    while (i > last && B64.test(s[i - 1])) i--;
+    while (i < m.index && /\s/.test(s[i])) i++; // keep the separator before the key body
+    out += s.slice(last, i) + REDACTED;
+    last = m.index + m[0].length;
+  }
+  return out + s.slice(last);
+}
 // Only the value part is replaced: keep the name so the log stays readable.
 const ASSIGN = /(\b[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*\s*[=:]\s*)\S+/g;
 
@@ -31,14 +49,21 @@ function loadSecrets(home: string): string[] {
   return [...out].sort((a, b) => b.length - a.length); // longest first
 }
 
+/** Pattern-only redaction (no secrets.yaml): the fallback where no home-aware redactor is at hand. */
+export function redactPatterns(s: string): string {
+  let r = s;
+  for (const p of PATTERNS) r = r.replace(p, REDACTED);
+  r = orphanEnds(r);
+  return r.replace(ASSIGN, (_m, pre: string) => pre + REDACTED);
+}
+
 /** Redacts `<home>/secrets.yaml` values (any depth, strings >= 6 chars) plus well-known secret shapes. */
 export function makeRedactor(home: string): Redactor {
   let secrets = loadSecrets(home);
   const fn = ((s: string): string => {
     let r = s;
     for (const v of secrets) r = r.split(v).join(REDACTED);
-    for (const p of PATTERNS) r = r.replace(p, REDACTED);
-    return r.replace(ASSIGN, (_m, pre: string) => pre + REDACTED);
+    return redactPatterns(r);
   }) as Redactor;
   fn.reload = () => { secrets = loadSecrets(home); };
   return fn;

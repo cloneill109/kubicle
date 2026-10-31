@@ -81,20 +81,27 @@ function balancedEnd(s: string, start: number): number {
   return -1;
 }
 
-/** The FIRST balanced `{…}` in the model's text that JSON.parses and validates as a verdict. */
+/**
+ * The FIRST balanced `{…}` in the model's text that JSON.parses and validates as a verdict.
+ * Malformed (null) when a second valid verdict with different content appears, when the text is longer than
+ * SCAN_MAX, or when there are more candidates than CANDIDATES_MAX: an ambiguous answer is never acted on.
+ */
 export function extractVerdict(text: string): TriageVerdict | null {
-  const s = text.slice(0, SCAN_MAX);
+  if (text.length > SCAN_MAX) return null;
+  let found: TriageVerdict | null = null;
   let tries = 0;
-  for (let i = s.indexOf('{'); i >= 0 && tries < CANDIDATES_MAX; i = s.indexOf('{', i + 1)) {
-    tries++;
-    const end = balancedEnd(s, i);
-    if (end < 0) return null; // no later start can close either
+  for (let i = text.indexOf('{'); i >= 0; i = text.indexOf('{', i + 1)) {
+    if (++tries > CANDIDATES_MAX) return null;
+    const end = balancedEnd(text, i);
+    if (end < 0) continue;
     let j: unknown;
-    try { j = JSON.parse(s.slice(i, end)); } catch { continue; }
+    try { j = JSON.parse(text.slice(i, end)); } catch { continue; }
     const v = validVerdict(j);
-    if (v) return v;
+    if (!v) continue;
+    if (!found) found = v;
+    else if (JSON.stringify(v) !== JSON.stringify(found)) return null;
   }
-  return null;
+  return found;
 }
 
 // ---- helpers -------------------------------------------------------------------------------------
@@ -229,6 +236,10 @@ export class Bubbles {
         v = b.verdict;
       }
       if (v.decision === 'approve' && v.confidence >= APPROVE_MIN && v.uncertain_about_direction === false && !r.inputTruncated) {
+        // The owner may have turned Bubbles off, or a concurrent call hit the usage limit, while we waited.
+        // (A cap reached by this very call does not revoke it: the call was within the cap when made.)
+        if (!this.policy.enabled()) { this.status(); return this.escalate(ctx, 'off', v, 'Bubbles was turned off during triage'); }
+        if (this.usageUntil > this.now()) return this.escalate(ctx, 'usage', v, 'usage limit reached during triage');
         return this.finish(ctx, { approve: true, verdict: v, model: ctx.model! });
       }
       const why: EscalateWhy = v.decision === 'escalate' || v.uncertain_about_direction ? 'escalated' : 'low-confidence';
@@ -253,7 +264,7 @@ export class Bubbles {
       'Input:',
       r.input,
     ].filter((x) => x !== null).join('\n');
-    const turns = r.transcriptPath ? recentTurns(r.transcriptPath) : '';
+    const turns = r.transcriptPath ? recentTurns(r.transcriptPath, undefined, undefined, this.redact) : '';
     const instr = this.policy.instructions(r.projectId).map((i) => `- ${i.text}`).join('\n');
     const now = this.now();
     const grants = this.policy.grants(now).filter((g) => g.projectId === r.projectId).map((g) =>
@@ -297,6 +308,7 @@ export class Bubbles {
 
   private classifyFailure(res: Extract<RunResult, { ok: false }>): EscalateWhy {
     if (res.kind === 'usage-limit') {
+      if (this.usageUntil > this.now()) return 'usage'; // already off duty: one usage entry per stop, not per concurrent call
       this.usageUntil = nextMidnight(this.now());
       this.usageDetail = res.detail.slice(0, 120);
       this.log.append({ ts: this.now(), kind: 'usage', outcome: 'off-duty', detail: `usage limit: ${res.detail}; off duty until ${localTime(this.usageUntil)}` });
@@ -366,7 +378,7 @@ export class Bubbles {
       ...(v ? { decision: v.decision, confidence: v.confidence, reason: v.reason } : {}),
       outcome: o.approve ? 'approved' : `escalated:${o.why}`,
       ...(details ? { detail: details } : {}),
-    });
+    }, { verbatim: ['shown'] }); // `shown` is the exact redacted stdin; a second pass could alter it and break shownHash
     return { ...o, logSeq: e.seq } as TriageOutcome;
   }
 }

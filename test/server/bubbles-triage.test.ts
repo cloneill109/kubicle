@@ -441,6 +441,72 @@ test('instructions and project grants appear as data blocks', async () => {
   s.done();
 });
 
+test('two differing verdicts from the model → escalate error', async () => {
+  const v = (d: string, c: number) => JSON.stringify({ decision: d, confidence: c, reason: 'r', uncertain_about_direction: false });
+  const runner = { run: async (): Promise<RunResult> => ({ ok: true, text: `${v('approve', 0.95)}\nor maybe ${v('escalate', 0.9)}`, durationMs: 1 }) };
+  const s = setup({ runner });
+  const o = await s.b.triage(req(), null);
+  assert.ok(!o.approve && o.why === 'error');
+  s.done();
+});
+
+test('shown is stored byte-for-byte as sent, even when a second redaction pass would change it', async () => {
+  const s = setup();
+  writeFileSync(join(s.home, 'secrets.yaml'), 'a: redacted\n'); // a secret that occurs inside the ‹redacted› marker
+  (s.b as unknown as { redact: { reload(): void } }).redact.reload();
+  await s.b.triage(req({ input: 'curl -H "x: sk-ant-api03-ABCDEF"' }), null);
+  const e = s.triages()[0];
+  const stdin = s.calls()[0].stdin!;
+  assert.ok(stdin.includes('‹redacted›') && !stdin.includes('sk-ant'));
+  assert.equal(e.shown, stdin);
+  assert.equal(e.shownHash, createHash('sha256').update(e.shown!).digest('hex'));
+  s.done();
+});
+
+// ---- toggles and stops that land mid-call -----------------------------------------------------------
+
+const approveHigh = JSON.stringify({ decision: 'approve', confidence: 0.95, reason: 'r', uncertain_about_direction: false });
+
+test('owner turns Bubbles off while the model is thinking → escalate off, not approve', async () => {
+  let s!: ReturnType<typeof setup>;
+  const runner = { run: async (): Promise<RunResult> => {
+    s.policy.setEnabled(false, 'owner (office)');
+    return { ok: true, text: approveHigh, durationMs: 1 };
+  } };
+  s = setup({ runner });
+  const o = await s.b.triage(req(), null);
+  assert.ok(!o.approve && o.why === 'off', JSON.stringify(o));
+  assert.equal(s.triages()[0].outcome, 'escalated:off');
+  assert.equal(s.b.status().state, 'off');
+  s.done();
+});
+
+test('usage limit hit by a concurrent call while another is thinking → the other escalates usage; one usage entry', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const usage: RunResult = { ok: false, kind: 'usage-limit', detail: 'Claude AI usage limit reached', durationMs: 1 };
+  const runner = { run: async (_m: string, _s: string, input: string): Promise<RunResult> => {
+    if (input.includes('slow-one')) { await gate; return { ok: true, text: approveHigh, durationMs: 1 }; }
+    return usage;
+  } };
+  const s = setup({ runner });
+  const slow = s.b.triage(req({ input: 'slow-one' }), null);
+  const fast = await Promise.all([s.b.triage(req({ input: 'a' }), null), s.b.triage(req({ input: 'b' }), null)]);
+  assert.ok(fast.every((o) => !o.approve && o.why === 'usage'));
+  release();
+  const o = await slow;
+  assert.ok(!o.approve && o.why === 'usage', JSON.stringify(o));
+  assert.equal(s.log.query({ kind: 'usage' }).length, 1, 'one usage entry per stop, not per call');
+  s.done();
+});
+
+test('cap reached by this very call does not revoke its approval', async () => {
+  const s = setup({ cap: 1 });
+  assert.equal((await s.b.triage(req(), null)).approve, true);
+  assert.equal(s.b.status().state, 'off-duty');
+  s.done();
+});
+
 // ---- timeouts ------------------------------------------------------------------------------------
 
 test('default timeouts are 8000 / 12000 / 20000 and reach the runner', async () => {
@@ -486,7 +552,9 @@ test('extractVerdict: first valid balanced object; braces inside strings respect
   assert.equal(extractVerdict('{"decision":"approve","confidence":0.9,"reason":"r"}'), null);
   assert.equal(extractVerdict('{'.repeat(100_000)), null);
   const first = { decision: 'escalate', confidence: 0.4, reason: 'first', uncertain_about_direction: true };
-  assert.deepEqual(extractVerdict(JSON.stringify(first) + JSON.stringify(ok)), first);
+  assert.equal(extractVerdict(JSON.stringify(first) + JSON.stringify(ok)), null, 'two differing verdicts: malformed');
+  assert.deepEqual(extractVerdict(`${JSON.stringify(ok)} again: ${JSON.stringify(ok)}`), ok, 'identical repeats are fine');
+  assert.equal(extractVerdict(JSON.stringify(ok) + ' '.repeat(20_001)), null, 'over the scan limit: malformed');
 });
 
 // ---- transcript ----------------------------------------------------------------------------------
@@ -524,6 +592,48 @@ test('recentTurns: tail only, partial first line dropped, turns capped, bad line
   assert.equal(recentTurns(join(dir, 'missing.jsonl')), '');
   assert.equal(recentTurns(dir), '');
   rmSync(dir, { recursive: true, force: true });
+});
+
+const PEM_BODY = 'MIIEpAIBAAKCAQEAsecretkeymaterial'.repeat(40);
+const PEM = `-----BEGIN RSA PRIVATE KEY-----\n${PEM_BODY}\n-----END RSA PRIVATE KEY-----`;
+const GHP = 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+function leakyTranscript(f: string) {
+  const line = (type: string, content: unknown) => JSON.stringify({ type, message: { role: type, content } });
+  writeFileSync(f, [
+    line('user', PEM), // key longer than the 600-char turn cap: capping first would cut off its END line
+    line('user', 'x'.repeat(585) + ' ' + GHP), // token straddles the 600-char cap
+    line('assistant', [{ type: 'tool_use', name: 'Bash', input: { command: 'y'.repeat(170) + ' ' + GHP } }]), // straddles the 200-char tool cap
+    line('user', 'see API_KEY=' + 'z'.repeat(10)),
+  ].join('\n') + '\n');
+}
+
+test('recentTurns redacts each part BEFORE capping: no PEM body or token prefix survives the caps', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tr-'));
+  const f = join(dir, 't.jsonl');
+  leakyTranscript(f);
+  for (const out of [recentTurns(f), recentTurns(f, 20, 262_144, makeRedactor(dir))]) {
+    assert.ok(!out.includes('secretkeymaterial'.repeat(2)), 'no PEM body');
+    assert.doesNotMatch(out, /ghp_[A-Z]/, 'no token prefix');
+    assert.match(out, /user: ‹redacted›/);
+    assert.match(out, /API_KEY=‹redacted›/);
+    for (const t of out.split('\n')) assert.ok(t.length <= 600);
+  }
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('transcript secrets never reach the model or the log', async () => {
+  const s = setup();
+  const f = join(s.home, 't.jsonl');
+  leakyTranscript(f);
+  await s.b.triage(req({ transcriptPath: f }), null);
+  const stdin = s.calls()[0].stdin!;
+  const logged = JSON.stringify(s.triages()[0]);
+  for (const x of [stdin, logged]) {
+    assert.ok(!x.includes('secretkeymaterialMIIE'), 'no PEM body');
+    assert.doesNotMatch(x, /ghp_[A-Z]/);
+  }
+  s.done();
 });
 
 test('transcript turns are fed to the model as TASK_CONTEXT', async () => {

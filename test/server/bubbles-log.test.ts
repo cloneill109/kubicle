@@ -114,6 +114,21 @@ test('redactor: absent secrets.yaml ok; reload picks up changes; private key blo
   rmSync(home, { recursive: true, force: true });
 });
 
+test('redactor: cut-off private keys (no END, or no BEGIN) are still redacted, in linear time', () => {
+  const home = mkdtempSync(join(tmpdir(), 'bl-'));
+  const red = makeRedactor(home);
+  const body = 'MIIEpAIBAAKCAQEAsecretkeymaterial'.repeat(20);
+  assert.equal(red(`x -----BEGIN RSA PRIVATE KEY-----\n${body.slice(0, 300)}`), 'x ‹redacted›');
+  assert.equal(red(`keep me: ${body.slice(40)}\n-----END RSA PRIVATE KEY----- y`), 'keep me: ‹redacted› y');
+  // A whole key, then an unrelated cut one: both go, the text between stays.
+  assert.equal(red(`-----BEGIN EC PRIVATE KEY-----\nabc\n-----END EC PRIVATE KEY----- mid -----BEGIN EC PRIVATE KEY-----\nabc`), '‹redacted› mid ‹redacted›');
+  const t0 = Date.now();
+  red('A'.repeat(500_000) + ' -----END RSA PRIVATE KEY-----' + 'B'.repeat(500_000));
+  red('A'.repeat(1_000_000));
+  assert.ok(Date.now() - t0 < 500, `took ${Date.now() - t0} ms`);
+  rmSync(home, { recursive: true, force: true });
+});
+
 test('query: kind, session, since, grep, newest first, limit', () => {
   const { log, done } = setup();
   log.append(e(1, { sessionId: 's1', request: 'git status' }));

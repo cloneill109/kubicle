@@ -60,9 +60,14 @@ export class BubblesLog {
   /** Banner text while the JSONL mirror is failing; cleared by the next successful mirror write. */
   warning(): string | null { return this.warn; }
 
-  append(e: Omit<LogEntry, 'seq' | 'prevHash' | 'hash'>): LogEntry {
+  /**
+   * `opts.verbatim`: fields the caller has ALREADY redacted with this same redactor and that must be stored
+   * byte-for-byte (e.g. `shown`, whose sha256 is logged alongside it). Every other field is redacted here.
+   */
+  append(e: Omit<LogEntry, 'seq' | 'prevHash' | 'hash'>, opts: { verbatim?: readonly 'shown'[] } = {}): LogEntry {
     const body: Record<string, unknown> = { ...e };
-    for (const f of REDACTED_FIELDS) if (typeof body[f] === 'string') body[f] = this.redact(body[f] as string);
+    const keep = new Set<string>(opts.verbatim ?? []);
+    for (const f of REDACTED_FIELDS) if (!keep.has(f) && typeof body[f] === 'string') body[f] = this.redact(body[f] as string);
     // Object-valued fields (usage, …) may carry strings too: redact every nested string.
     for (const k of Object.keys(body)) if (body[k] && typeof body[k] === 'object') body[k] = this.deep(body[k]);
     for (const k of Object.keys(body)) if (body[k] === undefined) delete body[k];

@@ -113,8 +113,10 @@ export class ClaudeRunner {
         });
       } catch (e) { spawnFail(e); return; }
 
+      let killed = false;
       const killGroup = () => {
         if (child.pid === undefined) return;
+        killed = true;
         try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* already gone */ } }
       };
       const out: Buffer[] = []; let outLen = 0; let err = '';
@@ -138,10 +140,14 @@ export class ClaudeRunner {
         out.push(d);
       });
       child.stderr!.on('data', (d: Buffer) => { if (err.length < 4096) err += d.toString('utf8'); });
+      child.stdout!.on('error', () => { /* pipe torn down by a kill: close/exit report the outcome */ });
+      child.stderr!.on('error', () => { /* same */ });
       child.on('exit', free);
       child.on('close', (code, signal) => {
         free();
-        killGroup(); // reap any stray grandchildren still in the group
+        // Abnormal end only: reap anything left in the group. A clean exit 0 is left alone, so a pgid that was
+        // already released and reused can never be signalled.
+        if (killed || code !== 0 || signal !== null) killGroup();
         finish(parseEnvelope(Buffer.concat(out).toString('utf8'), code, signal, err, ms()));
       });
       child.stdin!.end(input);
