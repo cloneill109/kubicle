@@ -47,22 +47,23 @@ function stripOurs(groups: any[]): any[] {
 
 export const quote = (p: string): string => (/^[A-Za-z0-9_./+-]+$/.test(p) ? p : `'${p.replace(/'/g, `'\\''`)}'`);
 
-export interface HookEnv { port: number; home: string }
+export interface HookEnv { home: string }
 
 /**
- * Our entries carry the port and home the installer saw (I4), so a session started from a shell
- * without KUBICLE_* set still reaches the same office and reads the same token.
+ * Our entries carry the home the installer saw (I4), so a session started from a shell
+ * without KUBICLE_HOME set still reaches the same office socket and reads the same token.
  * Recognised by MARKER, so older forms (no env prefix, `kubicle-hook 2` / `140`) are replaced too.
  */
 export function planInstall(settings: any, shimPath: string, env: HookEnv): any {
   checkShape(settings);
   const next = structuredClone(settings);
   const hooks: Record<string, any[]> = next.hooks ?? {};
-  const prefix = `KUBICLE_PORT=${Number(env.port)} KUBICLE_HOME=${quote(env.home)}`;
+  const prefix = `KUBICLE_HOME=${quote(env.home)}`;
   for (const ev of HOOK_EVENTS) {
     const perm = ev === 'PermissionRequest';
+    const args = perm ? '140 perm' : ev === 'PreToolUse' ? '2 pre' : '1'; // pre: the guard may answer "ask"
     const group: any = {
-      hooks: [{ type: 'command', command: `${prefix} ${quote(shimPath)} ${perm ? '140 perm' : 1}`, timeout: perm ? 150 : 5 }],
+      hooks: [{ type: 'command', command: `${prefix} ${quote(shimPath)} ${args}`, timeout: perm ? 150 : 5 }],
     };
     if (TOOL_EVENTS.has(ev)) group.matcher = '*';
     hooks[ev] = [...stripOurs(hooks[ev] ?? []), group];
@@ -142,8 +143,8 @@ export function main(argv: string[]): number {
   const shimPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'kubicle-hook');
   let next: any;
   try {
-    const { port, home } = loadConfig(process.env);
-    next = cmd === 'install' ? planInstall(current, shimPath, { port, home: resolve(home) }) : planUninstall(current);
+    const { home } = loadConfig(process.env);
+    next = cmd === 'install' ? planInstall(current, shimPath, { home: resolve(home) }) : planUninstall(current);
   } catch (e: any) {
     console.error(`${file} has an unexpected structure (${e.message}); nothing was changed.`);
     return 1;
@@ -174,7 +175,7 @@ export function main(argv: string[]): number {
     console.log(`Settings: ${file}`);
     console.log(`Added ${HOOK_EVENTS.length} hook events -> ${shimPath}`);
     console.log(backup ? `Backup: ${backup}` : 'Backup: none (file did not exist)');
-    console.log('Run `kubicle start` (or `npm start`) to open the office.');
+    console.log('Run `npm start` (or `./bin/kubicle start`) to open the office.');
   } else {
     console.log(`Settings: ${file}`);
     console.log(`Removed ${countOurs(current)} Kubicle hook entries.`);

@@ -1,6 +1,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, existsSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -779,4 +780,77 @@ test('M8: a 409 floor save broadcasts the on-disk floor before answering', async
   const m = await got as Extract<ServerMsg, { t: 'building' }>;
   assert.ok(Date.now() - at < 50, `building message ${Date.now() - at} ms after the 409`);
   assert.equal(m.building.floors[proj]!.rooms[0]!.width, 16);
+});
+
+// ---- the hook socket: <home>/run/hook.sock, POST /hooks only ----
+function viaSocket(sock: string, method: string, path: string, headers: Record<string, string> = {}, body = ''): Promise<{ status: number; body: string }> {
+  return new Promise((ok, fail) => {
+    const r = httpRequest({ socketPath: sock, method, path, agent: false, headers: { host: 'kubicle', ...headers } }, (res) => {
+      let b = '';
+      res.on('data', (c) => (b += c));
+      res.on('end', () => ok({ status: res.statusCode ?? 0, body: b }));
+    });
+    r.on('error', (e) => fail(new Error(`${method} ${path}: ${e.message}`)));
+    r.end(body);
+  });
+}
+
+// Socket paths are capped near 103 bytes on macOS, so these homes live directly under /tmp.
+function shortHome(): string {
+  const d = realpathSync(mkdtempSync('/tmp/khs-'));
+  cleanup.push(() => rmSync(d, { recursive: true, force: true }));
+  return d;
+}
+
+test('socket: POST /hooks over the socket ingests; run dir is 0700, socket 0600; other paths 404', async () => {
+  const s = await start(shortHome());
+  assert.equal(s.hookSocket, join(s.home, 'run', 'hook.sock'));
+  assert.equal(statSync(join(s.home, 'run')).mode & 0o777, 0o700);
+  assert.equal(statSync(s.hookSocket).mode & 0o777, 0o600);
+  const ev = { ...fixture('SessionStart'), session_id: 'sock-1' };
+  const r = await viaSocket(s.hookSocket, 'POST', '/hooks', { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken }, JSON.stringify(ev));
+  assert.equal(r.status, 200);
+  assert.equal(r.body, '');
+  const bad = await viaSocket(s.hookSocket, 'POST', '/hooks', { 'content-type': 'application/json', 'x-kubicle-token': 'nope' }, JSON.stringify(ev));
+  assert.equal(bad.status, 401);
+  for (const [m, p] of [['GET', '/'], ['GET', '/api/debug/agents'], ['GET', '/hooks'], ['POST', '/api/approvals-mode'], ['POST', '/login'], ['POST', '/cli/status']]) {
+    const x = await viaSocket(s.hookSocket, m!, p!, { 'x-kubicle-token': s.ingestToken, 'content-type': 'application/json' }, '{}');
+    assert.equal(x.status, 404, `${m} ${p}`);
+  }
+});
+
+test('socket: a pre-kind request is handled like a normal event (200, empty body)', async () => {
+  const s = await start(shortHome());
+  const r = await viaSocket(s.hookSocket, 'POST', '/hooks', { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken, 'x-kubicle-hook-kind': 'pre' }, JSON.stringify(fixture('PreToolUse')));
+  assert.equal(r.status, 200);
+  assert.equal(r.body, '');
+});
+
+test('socket: a second server on the same home rejects with "Kubicle is already running"; the first keeps working', async () => {
+  const s = await start(shortHome());
+  await assert.rejects(startServer(cfgFor(s.home)), /Kubicle is already running/);
+  const ev = { ...fixture('SessionStart'), session_id: 'sock-2' };
+  const r = await viaSocket(s.hookSocket, 'POST', '/hooks', { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken }, JSON.stringify(ev));
+  assert.equal(r.status, 200);
+});
+
+test('socket: a stale socket file (no listener) is replaced; close() removes the file', async () => {
+  const home = shortHome();
+  mkdirSync(join(home, 'run'), { mode: 0o700 });
+  const sock = join(home, 'run', 'hook.sock');
+  // Leave a real dead socket file behind: a child listens, then exits without unlinking (a crashed server).
+  spawnSync('node', ['-e', `require('net').createServer().listen(process.argv[1], () => process.exit(0))`, sock]);
+  assert.equal(existsSync(sock), true);
+  const s = await start(home);
+  const r = await viaSocket(s.hookSocket, 'POST', '/hooks', { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken }, JSON.stringify(fixture('SessionStart')));
+  assert.equal(r.status, 200);
+  await s.close();
+  assert.equal(existsSync(sock), false);
+});
+
+test('socket: a home whose socket path exceeds 103 bytes rejects, naming the path', async () => {
+  const home = join(shortHome(), 'x'.repeat(90));
+  const sock = join(home, 'run', 'hook.sock');
+  assert.ok(Buffer.byteLength(sock) > 103);
+  await assert.rejects(startServer(cfgFor(home)), (e: Error) => e.message.includes(sock));
 });

@@ -10,9 +10,9 @@ import { HOOK_EVENTS, planInstall, planUninstall, quote } from '../../src/cli/in
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CLI = join(root, 'src', 'cli', 'install.ts');
 const SHIM = '/opt/my kubicle/bin/kubicle-hook';
-// I4: the install-time port and home are baked into every command.
-const ENV = { port: 4317, home: '/Users/me/.kubicle' };
-const PRE = 'KUBICLE_PORT=4317 KUBICLE_HOME=/Users/me/.kubicle';
+// I4: the install-time home is baked into every command.
+const ENV = { home: '/Users/me/.kubicle' };
+const PRE = 'KUBICLE_HOME=/Users/me/.kubicle';
 
 const userSettings = () => ({
   theme: 'dark',
@@ -41,7 +41,7 @@ test('planInstall keeps user hooks and adds ours', () => {
   const pre = out.hooks.PreToolUse;
   assert.equal(pre.length, 2);
   assert.equal(pre[0].hooks[0].command, '/usr/local/bin/mine');
-  assert.deepEqual(pre[1], { matcher: '*', hooks: [{ type: 'command', command: `${PRE} '${SHIM}' 1`, timeout: 5 }] });
+  assert.deepEqual(pre[1], { matcher: '*', hooks: [{ type: 'command', command: `${PRE} '${SHIM}' 2 pre`, timeout: 5 }] });
   assert.deepEqual(out.hooks.SessionStart, [{ hooks: [{ type: 'command', command: `${PRE} '${SHIM}' 1`, timeout: 5 }] }]);
   assert.deepEqual(out.hooks.PermissionRequest, [{ matcher: '*', hooks: [{ type: 'command', command: `${PRE} '${SHIM}' 140 perm`, timeout: 150 }] }]);
   for (const e of HOOK_EVENTS) assert.ok(out.hooks[e], e);
@@ -85,7 +85,7 @@ test('CLI install/uninstall roundtrip with backup, mode, token', () => {
 
   const r = cli(['install', '--settings', file], home);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /npm start/);
+  assert.ok(r.stdout.includes('Run `npm start` (or `./bin/kubicle start`) to open the office.'), r.stdout);
   assert.equal(readFileSync(file + '.kubicle.bak', 'utf8'), orig);
   const text = readFileSync(file, 'utf8');
   assert.ok(text.endsWith('}\n'));
@@ -93,7 +93,7 @@ test('CLI install/uninstall roundtrip with backup, mode, token', () => {
   const parsed = JSON.parse(text);
   assert.equal(parsed.hooks.PreToolUse.length, 2);
   assert.ok(parsed.hooks.Stop[1].hooks[0].command.includes('/bin/kubicle-hook'));
-  assert.ok(parsed.hooks.Stop[1].hooks[0].command.startsWith(`KUBICLE_PORT=4317 KUBICLE_HOME=${home} `), 'I4: env from loadConfig baked in');
+  assert.ok(parsed.hooks.Stop[1].hooks[0].command.startsWith(`KUBICLE_HOME=${home} `), 'I4: env from loadConfig baked in');
   assert.ok(existsSync(join(home, 'ingest-token')));
 
   const again = cli(['install', '--settings', file], home);
@@ -205,10 +205,10 @@ test('produced command actually executes for awkward paths', () => {
     const d = join(base, name, 'bin');
     mkdirSync(d, { recursive: true });
     const stub = join(d, 'kubicle-hook');
-    writeFileSync(stub, '#!/bin/bash\necho "ran:$1:$KUBICLE_PORT:$KUBICLE_HOME"\n', { mode: 0o755 });
-    const cmd = planInstall({}, stub, { port: 4999, home: join(base, 'my home') }).hooks.Stop[0].hooks[0].command;
+    writeFileSync(stub, '#!/bin/bash\necho "ran:$1:$KUBICLE_HOME"\n', { mode: 0o755 });
+    const cmd = planInstall({}, stub, { home: join(base, 'my home') }).hooks.Stop[0].hooks[0].command;
     const r = spawnSync('bash', ['-c', cmd], { encoding: 'utf8' });
-    assert.equal(r.stdout.trim(), `ran:1:4999:${join(base, 'my home')}`, cmd);
+    assert.equal(r.stdout.trim(), `ran:1:${join(base, 'my home')}`, cmd);
   }
 });
 
@@ -252,11 +252,11 @@ test('I4: old command forms (no env, old args) are recognized: reinstall replace
   assert.deepEqual(planUninstall(s), userSettings());
 });
 
-test('I4: reinstall with a different port/home replaces our entries (no duplicates)', () => {
+test('I4: reinstall with a different home replaces our entries (no duplicates)', () => {
   const a = planInstall(userSettings(), SHIM, ENV);
-  const b = planInstall(a, SHIM, { port: 5000, home: '/tmp/other home' });
+  const b = planInstall(a, SHIM, { home: '/tmp/other home' });
   assert.equal(b.hooks.Stop.length, 2);
-  assert.equal(b.hooks.Stop[1].hooks[0].command, `KUBICLE_PORT=5000 KUBICLE_HOME='/tmp/other home' '${SHIM}' 1`);
+  assert.equal(b.hooks.Stop[1].hooks[0].command, `KUBICLE_HOME='/tmp/other home' '${SHIM}' 1`);
   assert.deepEqual(planUninstall(b), userSettings());
 });
 
@@ -270,4 +270,15 @@ test('legacy /bin/office-hook entries are still recognised: uninstall removes th
   const re = planInstall(old, SHIM, ENV);
   assert.equal(re.hooks.Stop.length, 2);
   assert.ok(re.hooks.Stop.every((g: any) => g.hooks.every((h: any) => !h.command.includes('/bin/office-hook'))));
+});
+
+test('new entries: PreToolUse ends with `2 pre`, and no entry mentions KUBICLE_PORT', () => {
+  const out = planInstall({}, SHIM, ENV);
+  assert.match(out.hooks.PreToolUse[0].hooks[0].command, / 2 pre$/);
+  assert.equal(out.hooks.PreToolUse[0].hooks[0].timeout, 5);
+  assert.equal(JSON.stringify(out).includes('KUBICLE_PORT='), false);
+  // an old install (with KUBICLE_PORT) is still recognised and replaced
+  const old = planInstall({ hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: `KUBICLE_PORT=4317 KUBICLE_HOME=/x '${SHIM}' 1`, timeout: 5 }] }] } }, SHIM, ENV);
+  assert.equal(old.hooks.PreToolUse.length, 1);
+  assert.match(old.hooks.PreToolUse[0].hooks[0].command, / 2 pre$/);
 });

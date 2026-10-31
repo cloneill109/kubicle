@@ -1,9 +1,11 @@
 #!/bin/bash
 # Kubicle hook shim. Fail-open: always exits 0.
-#   kubicle-hook <max-seconds> [perm]
+#   kubicle-hook <max-seconds> [perm|pre]
+# Talks to the office over its private Unix socket (<home>/run/hook.sock, dir mode 0700); no TCP.
 # Prints NOTHING unless the kind is `perm` (PermissionRequest) and the trimmed 2xx body is exactly
-# one of the two office decisions below. Anything else on the port (an impostor, a stale server)
-# can neither inject context nor approve tool calls.
+# one of the two office decisions below, or the kind is `pre` (PreToolUse) and it is exactly the
+# guard's "ask". Anything else (an impostor, a stale server) can neither inject context nor
+# approve tool calls.
 set -u
 max="${1:-1}"
 kind="${2:-}"
@@ -12,6 +14,8 @@ case "$max" in ''|*[!0-9]*) max=1 ;; esac
 # Must equal hookResponse('allow') / hookResponse('deny') in src/server/approvals.ts (unit-tested).
 ALLOW='{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
 DENY='{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from Kubicle"}}}'
+# Must equal GUARD_ASK / guardResponse() in src/server/permission-flow.ts (unit-tested).
+GUARD_ASK='{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Kubicle: pushes and merges to protected branches need the owner"}}'
 
 [ -n "${KUBICLE_AGENT:-}" ] && exit 0
 
@@ -21,10 +25,13 @@ if [ -r "$home/ingest-token" ]; then
   token=$(tr -d '[:space:]' < "$home/ingest-token" 2>/dev/null)
 fi
 [ -n "$token" ] || exit 0
+sock="$home/run/hook.sock"
+[ -S "$sock" ] || exit 0 # no office running: nothing to do, and no curl wait
 
-# Only a shim that can deliver a decision asks the office to wait for one.
+# Only a shim that can deliver a decision asks the office to wait for one (`pre` is the guard's answer).
 hkind="event"
 [ "$kind" = "perm" ] && hkind="perm"
+[ "$kind" = "pre" ] && hkind="pre"
 
 # Optional placement hints; sent only when they look like a building id (never raw env text).
 extra=()
@@ -37,17 +44,17 @@ fi
 
 # While the office waits it sends a space every 0.5 s; a frozen server sends nothing, so
 # --speed-limit/--speed-time give up after ~3 s instead of holding the session for the full max.
-out=$(curl -s -m "$max" --connect-timeout 1 --speed-limit 1 --speed-time 3 -X POST \
+out=$(curl -s --unix-socket "$sock" -m "$max" --connect-timeout 1 --speed-limit 1 --speed-time 3 -X POST \
   -H 'Content-Type: application/json' \
   -H "X-Kubicle-Token: $token" \
   -H "X-Kubicle-Hook-Kind: $hkind" \
   ${extra[@]+"${extra[@]}"} \
   --data-binary @- \
   -w $'\n%{http_code}' \
-  "http://127.0.0.1:${KUBICLE_PORT:-4317}/hooks" 2>/dev/null)
+  "http://kubicle/hooks" 2>/dev/null)
 rc=$?
 [ "$rc" -eq 0 ] || exit 0
-[ "$hkind" = "perm" ] || exit 0
+[ "$hkind" != "event" ] || exit 0
 
 code="${out##*$'\n'}"
 body="${out%$'\n'*}"
@@ -56,7 +63,9 @@ case "$code" in 2??) ;; *) exit 0 ;; esac
 # Trim leading/trailing whitespace (heartbeat spaces), bash 3.2-safe.
 body="${body#"${body%%[![:space:]]*}"}"
 body="${body%"${body##*[![:space:]]}"}"
-if [ "$body" = "$ALLOW" ] || [ "$body" = "$DENY" ]; then
+if [ "$hkind" = "perm" ]; then
+  if [ "$body" = "$ALLOW" ] || [ "$body" = "$DENY" ]; then printf '%s' "$body"; fi
+elif [ "$body" = "$GUARD_ASK" ]; then
   printf '%s' "$body"
 fi
 exit 0

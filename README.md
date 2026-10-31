@@ -16,7 +16,7 @@ The server listens on `127.0.0.1:4317` (override with `KUBICLE_PORT`). It prints
 
 Existing sessions pick up new hooks only after they restart.
 
-The installer writes the current `KUBICLE_PORT` and `KUBICLE_HOME` into each hook command, so sessions reach the same office however their shell is set up. Re-run `npm run install-hooks` after changing either, and after updating Kubicle (older hook command lines still report events but never get office approvals). If hooks arrive with the wrong token, the office shows "Hooks are sending the wrong token. Re-run npm run install-hooks."
+The installer writes the current `KUBICLE_HOME` into each hook command, so sessions reach the same office however their shell is set up. Hooks travel over a private Unix socket at `<home>/run/hook.sock` (the path is capped at 103 bytes, so keep the home short), not TCP. Re-run `npm run install-hooks` after changing the home, and after updating Kubicle (older hook command lines still report events but never get office approvals). If hooks arrive with the wrong token, the office shows "Hooks are sending the wrong token. Re-run npm run install-hooks."
 
 ## Uninstall
 

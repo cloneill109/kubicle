@@ -1,10 +1,12 @@
 #!/bin/bash
 # Real-session smoke test: runs one `claude -p` session (with a subagent) against a throwaway
-# server, repo, home and settings file. Never touches ~/.claude or ~/.kubicle.
+# server, repo, home and settings file. Never touches ~/.claude, ~/.kubicle or port 4317; hooks
+# reach the throwaway server over its Unix socket in the temp home (the port is only for the UI).
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PORT=4399
-TMP="$(mktemp -d)"
+# Short path under /tmp: the hook socket (<home>/run/hook.sock) must fit in 103 bytes.
+TMP="$(mktemp -d /tmp/kubicle-smoke.XXXXXX)"
 TMP="$(cd "$TMP" && pwd -P)"
 REPO="$TMP/smoke-repo"
 HOME_DIR="$TMP/office-home"

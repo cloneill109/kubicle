@@ -1,9 +1,11 @@
 import { mkdirSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 export interface Config {
   home: string;
+  /** The private hook channel: <home>/run/hook.sock (shims never use TCP). */
+  hookSocket: string;
   port: number;
   payloadCap: number;
   approvalWaitMs: number;
@@ -15,8 +17,10 @@ export interface Config {
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
   const port = Number(env.KUBICLE_PORT);
+  const home = env.KUBICLE_HOME || join(homedir(), '.kubicle');
   return {
-    home: env.KUBICLE_HOME || join(homedir(), '.kubicle'),
+    home,
+    hookSocket: join(home, 'run', 'hook.sock'),
     port: Number.isInteger(port) && port > 0 && port < 65536 ? port : 4317,
     payloadCap: 4096,
     approvalWaitMs: 120_000,
@@ -30,4 +34,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 export function ensureHome(cfg: Config): void {
   mkdirSync(cfg.home, { recursive: true, mode: 0o700 });
   chmodSync(cfg.home, 0o700);
+  // The hook socket lives in its own 0700 dir; chmod covers one that already exists looser.
+  const run = dirname(cfg.hookSocket);
+  mkdirSync(run, { recursive: true, mode: 0o700 });
+  chmodSync(run, 0o700);
 }

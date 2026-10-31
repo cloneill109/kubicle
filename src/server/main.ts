@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
+import { chmodSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { connect, type AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FeedItem } from '../shared/protocol.ts';
@@ -19,6 +20,9 @@ const PRUNE_MS = 3_600_000;
 const KEEP_EVENTS_MS = 7 * 86_400_000;
 const FEED_MAX = 200;
 export const BAD_TOKEN_BANNER = 'Hooks are sending the wrong token. Re-run npm run install-hooks.';
+// sockaddr_un.sun_path holds 104 bytes on macOS (108 on Linux), terminator included.
+const SOCKET_PATH_MAX = 103;
+const PROBE_MS = 300;
 const ROOT = resolve(import.meta.dirname, '..', '..');
 
 /** The banner text: the hooks banner (if any), then the first building problem, never hidden behind it. */
@@ -31,6 +35,7 @@ export function composeBanner(base: string | null, warnings: readonly string[]):
 
 export interface RunningServer {
   url: string;
+  hookSocket: string;
   loginUrl: string;
   ingestToken: string;
   close(): Promise<void>;
@@ -46,12 +51,41 @@ function listen(server: Server, port: number): Promise<number> {
   });
 }
 
+/** Fail with "already running" if something answers on the socket; unlink a leftover file nobody answers. */
+function claimSocket(path: string): Promise<void> {
+  return new Promise((ok, fail) => {
+    const probe = connect(path);
+    const timer = setTimeout(() => probe.destroy(new Error('probe timeout')), PROBE_MS);
+    probe.once('connect', () => { clearTimeout(timer); probe.destroy(); fail(new Error('Kubicle is already running')); });
+    probe.once('error', (err: NodeJS.ErrnoException) => {
+      clearTimeout(timer);
+      // Refused or absent: stale. A listener too slow to answer is treated as stale too, but it
+      // then keeps the path, so our own listen() fails and reports "already running".
+      if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED' || err.message === 'probe timeout') {
+        rmSync(path, { force: true });
+        ok();
+      } else fail(err);
+    });
+  });
+}
+
+function listenSocket(server: Server, path: string): Promise<void> {
+  return new Promise((ok, fail) => {
+    server.once('error', (err: NodeJS.ErrnoException) => fail(err.code === 'EADDRINUSE' ? new Error('Kubicle is already running') : err));
+    server.listen(path, () => { server.removeAllListeners('error'); ok(); });
+  });
+}
+
 export async function startServer(
   cfg: Config,
   opts: { openBrowser?: boolean; log?: (s: string) => void } = {},
 ): Promise<RunningServer> {
   const log = opts.log ?? (() => {});
+  if (Buffer.byteLength(cfg.hookSocket) > SOCKET_PATH_MAX) {
+    throw new Error(`Hook socket path is too long (${Buffer.byteLength(cfg.hookSocket)} bytes, max ${SOCKET_PATH_MAX}): ${cfg.hookSocket}. Use a shorter KUBICLE_HOME.`);
+  }
   ensureHome(cfg);
+  await claimSocket(cfg.hookSocket); // before opening anything: a second office must not touch the first's state
   const ingestToken = ensureIngestToken(cfg.home);
   const store = openStore(join(cfg.home, 'office.db'));
   const projects = new Projects(store);
@@ -89,6 +123,8 @@ export async function startServer(
   }));
 
   const server = createServer();
+  // The hook socket: the same handler, but ONLY POST /hooks; every other path is 404 (no UI, no API).
+  const sockServer = createServer();
   let port: number;
   try {
     port = await listen(server, cfg.port);
@@ -102,7 +138,7 @@ export async function startServer(
   const auth = new OwnerAuth(port);
   const url = `http://127.0.0.1:${port}`;
   const loginUrl = `${url}/login?code=${auth.newLoginCode()}`;
-  server.on('request', createHandler({
+  const handler = createHandler({
     cfg, ingestToken, auth, store, writer, projects, registry, building, approvals, hub, pushFeed, rootDir: ROOT, port, log,
     onBadToken: () => {
       badTokenCount++;
@@ -110,8 +146,26 @@ export async function startServer(
       badTokenAt = Date.now();
       setBanner(badTokenAt);
     },
-  }));
+  });
+  server.on('request', handler);
+  sockServer.on('request', (req, res) => {
+    if (req.method === 'POST' && (req.url ?? '').split('?')[0] === '/hooks') return handler(req, res);
+    req.resume(); // drop any body
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8', 'content-length': 9 });
+    res.end('not found');
+  });
   hub.attach(server, auth);
+  try {
+    await listenSocket(sockServer, cfg.hookSocket);
+    chmodSync(cfg.hookSocket, 0o600);
+  } catch (err) {
+    hub.close();
+    server.close();
+    building.stop();
+    writer.stop();
+    store.close();
+    throw err;
+  }
 
   const tick = setInterval(() => {
     try {
@@ -148,12 +202,17 @@ export async function startServer(
       server.close(() => r());
       server.closeAllConnections();
     });
+    await new Promise<void>((r) => {
+      sockServer.close(() => r());
+      sockServer.closeAllConnections();
+    });
+    rmSync(cfg.hookSocket, { force: true });
     building.stop();
     writer.stop();
     store.close();
   })();
 
-  return { url, loginUrl, ingestToken, close };
+  return { url, hookSocket: cfg.hookSocket, loginUrl, ingestToken, close };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
