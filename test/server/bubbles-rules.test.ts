@@ -235,3 +235,124 @@ test('grantMatches', () => {
   const second = G({ id: 'h' });
   assert.equal(grantMatches(P(), 'p', [G({ revokedAt: 1 }), second], now), second);
 });
+
+// ---- round 3: glob/http bypasses, false positives, size guard ----
+const R3_PROTECTED = [
+ "/usr/bin/gi? push origin main",
+ "/usr/bin/g[i]t push origin main",
+ "/usr/bin/gi* push origin main",
+ "/Library/Developer/CommandLineTools/usr/libexec/git-core/git-push origin main",
+ "hub push origin main",
+ "curl -T body.json https://api.github.com/repos/o/r/pulls/1/merge",
+ "curl --upload-file b.json https://api.github.com/repos/o/r/pulls/1/merge",
+ "curl -d@body.json https://api.github.com/repos/o/r/pulls/1/merge",
+ "curl -dmerge_method=squash -XPUT https://api.github.com/repos/o/r/pulls/1/merge",
+ "curl -dx https://api.github.com/repos/o/r/merges",
+ "http PUT https://api.github.com/repos/o/r/pulls/1/merge",
+ "xh put api.github.com/repos/o/r/pulls/1/merge",
+ "http POST api.github.com/repos/o/r/merges base=main head=f",
+ "curl -H 'Content-Type: application/json' --data-raw '{}' -X PUT https://api.github.com/repos/o/r/pulls/1/merge",
+ "curl -d '{\"query\":\"mutation{mergePullRequest(input:{pullRequestId:\\\"x\\\"}){clientMutationId}}\"}' https://api.github.com/graphql",
+ "python3 -c \"import subprocess as s;s.run(['gi'+'t','push','origin','main'])\"",
+ "gh m 3",
+ "gh pr merge 3",
+ "git push origin feature:refs/tags/../heads/main",
+ "git push origin @:main",
+ "git push origin feature:MAIN",
+ "git push origin feature:Main",
+ "GIT_CONFIG_PARAMETERS=\"'remote.origin.push=refs/heads/feature:refs/heads/main'\" git push origin feature",
+ "git -cremote.origin.push=x push origin feature",
+ "git --config-env=remote.origin.push=V push origin feature",
+ "git push origin feature --receive-pack=x",
+ "git push --repo=origin",
+ "export GIT_DIR=/o/.git; git push origin feature",
+ "git push origin feature; git push origin main",
+ "git log && git push origin main",
+ "true && git push origin main",
+ "git push origin main#",
+ "git push origin main --",
+ "git push -- origin main",
+ "git push origin -- main",
+ "git push origin feature -- main",
+ "git push origin feature main",
+ "/usr/bin/gi? push -q origin feature:main",
+ "/Library/Developer/CommandLineTools/usr/libexec/git-core/git-push -q origin feature:main",
+ "find / -name bubbles.yaml -delete",
+ "find $HOME -name bubbles.yaml -delete",
+ "cd; rm bubbles.yaml",
+ "cd && cd .kubicle && rm bubbles.yaml",
+ "git push origin feature --force-with-lease",
+ "git push --force-with-lease origin feature"
+];
+const R3_PROTECTED_ON_MAIN = ["/Library/Developer/CommandLineTools/usr/libexec/git-core/git-merge dev", "/Library/Developer/CommandLineTools/usr/libexec/git-core/git-merge -q feature"];
+const R3_SAFE = [
+ "git push origin feature",
+ "git push -u origin feature",
+ "git push origin feature/x",
+ "git checkout -b feat && git push -u origin feat",
+ "git switch -c feat && git push -u origin feat",
+ "cd app && git push origin feature",
+ "git status",
+ "git diff HEAD~",
+ "git show HEAD~",
+ "git reset --soft HEAD~",
+ "git log --oneline main..HEAD",
+ "git add src/Main.kt && git commit -m x",
+ "kotlinc Main.kt",
+ "./gradlew test --tests Foo.kt",
+ "cat app.kt",
+ "npm test",
+ "npx tsc --noEmit && git push origin feature",
+ "npm test && git push origin feature",
+ "pytest && git push origin feature",
+ "go test ./... && git push origin feature",
+ "cargo test && git push origin feature",
+ "bun test && git push origin feature",
+ "npm run build && git push origin feature",
+ "cd ~ && ls",
+ "cd ~/code/app && npm test",
+ "npm install lodash.kebabcase",
+ "cd office-app && npm test",
+ "mkdir -p src/office",
+ "ls",
+ "cat README.md",
+ "git commit -m \"fix push logic\"",
+ "docker push img",
+ "git stash push -m wip",
+ "git log --merges | head",
+ "git grep -n push",
+ "grep -rn \"git push\" src",
+ "rg \"merge\" src | wc -l",
+ "gh pr create --fill",
+ "gh pr view",
+ "gh pr checks",
+ "gh pr list",
+ "gh run list",
+ "gh api repos/o/r/pulls",
+ "curl -s https://api.github.com/repos/o/r",
+ "echo done"
+];
+
+test('round 3: bypasses are protected', () => {
+  for (const c of [...R3_PROTECTED, ...[], ...[]]) assert.notEqual(bash(c, 'feature'), null, c);
+  for (const c of [...R3_PROTECTED, ...R3_PROTECTED_ON_MAIN]) assert.notEqual(bash(c, 'main'), null, c);
+  for (const c of ['gh m 3', 'gh pr merge 3', 'xh put api.github.com/repos/o/r/pulls/1/merge']) assert.notEqual(bash(c, 'feature'), null, c);
+});
+
+test('round 3: common safe commands stay null (low false positives)', () => {
+  for (const c of [...R3_SAFE, ...["cat ~/.kubicle/bubbles.yaml", "ls -la ~/.kubicle"]]) assert.equal(bash(c, 'feature'), null, c);
+  for (const c of R3_SAFE) if (!/rebase|merge/.test(c)) assert.equal(bash(c, 'main'), null, `${c} (main)`);
+});
+
+test('round 3: find over ancestors of the Kubicle home, ~ forms', () => {
+  for (const c of ["find /home -name 'bubbles*' -delete", 'find /home/u -name x -exec rm {} +', 'rm -rf /home/u/.kub*', `find ${home}/.. -delete`]) assert.equal(bash(c)?.kind, 'self', c);
+  assert.equal(bash('find /home -name x'), null);
+});
+
+test('round 3: oversized commands are protected without analysis', () => {
+  const big = 'git push origin feature;'.repeat(4400);
+  const t0 = performance.now();
+  const r = bash(big);
+  assert.equal(r?.kind, 'push');
+  assert.ok(performance.now() - t0 < 50);
+});

@@ -33,8 +33,9 @@ export interface RulesCtx { cwd?: string; branches: BranchInfo; home: string; st
 // ---------- branch info (file reads only; never spawns git) ----------
 
 // `current` is read fresh on every call (a stale branch is a bypass). Only origin/HEAD is cached.
-// Known gaps (accepted): push.default / remote.*.push mappings are not consulted, and the reftable
-// backend has no loose refs/remotes/origin/HEAD file.
+// Known gaps (accepted): bare pushes are always protected, but a colon-less refspec can still be
+// remapped by repo config (remote.*.push); and the reftable backend has no loose
+// refs/remotes/origin/HEAD file.
 const CACHE_MS = 10_000;
 const cache = new Map<string, { at: number; originHead: string | null }>();
 
@@ -211,8 +212,7 @@ const stripHeads = (r: string): string => r.replace(/^refs\/heads\//, '');
 const ENV_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const CD_CMDS = new Set(['cd', 'pushd', 'popd', 'chdir']);
 const HARMLESS = new Set(['echo', 'printf', 'cat', 'ls', 'grep', 'rg', 'head', 'tail', 'wc', 'pwd', 'true', 'false', 'sleep', 'date', 'stat', 'file', 'less', 'test', 'which']);
-const RUNNERS = new Set(['npm', 'pnpm', 'yarn', 'make', 'just', 'tsc', 'node']);
-const SAFE_GIT = new Set(['restore', 'config', 'status', 'log', 'diff', 'show', 'add', 'commit', 'fetch', 'pull', 'branch', 'tag', 'stash', 'remote', 'rev-parse', 'ls-files', 'blame', 'clone', 'init', 'describe', 'shortlog', 'grep']);
+const SAFE_GIT = new Set(['restore', 'config', 'reset', 'rm', 'mv', 'clean', 'revert', 'cherry-pick', 'reflog', 'ls-remote', 'ls-tree', 'cat-file', 'merge-base', 'rev-list', 'show-ref', 'for-each-ref', 'version', 'help', 'status', 'log', 'diff', 'show', 'add', 'commit', 'fetch', 'pull', 'branch', 'tag', 'stash', 'remote', 'rev-parse', 'ls-files', 'blame', 'clone', 'init', 'describe', 'shortlog', 'grep']);
 const PUSH_FLAGS = new Set(['-u', '--set-upstream', '-n', '--dry-run', '-v', '--verbose', '--no-verify', '--tags', '--follow-tags', '-q', '--quiet', '--progress']);
 
 type Verdict = { ok: true; changed: boolean } | { ok: false; branch: string | null };
@@ -222,12 +222,15 @@ const REMOTE = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
 
 /** A destination that is certainly a plain branch (or tag) name: no DWIM prefixes, no odd syntax. */
 function plainDst(dst: string): string | null {
-  if (dst.startsWith('refs/tags/') && LITERAL.test(dst)) return dst;
   if (!LITERAL.test(dst) || dst.includes('..') || dst.startsWith('/') || dst.endsWith('/')) return null;
+  if (dst.startsWith('refs/tags/')) return dst;
   if (/^(refs|heads|remotes|tags)(\/|$)/i.test(dst)) return null;
   return dst;
 }
 
+const isHeadLike = (x: string): boolean => x === 'HEAD' || x === '@';
+
+/** `w` is normalised so w[0] === 'git' (also for `/usr/bin/git`, `git-push`, `hub`). */
 function analyzeGit(w: string[], b: BranchInfo, changed: boolean, gitEnv: boolean): Verdict {
   let i = 1;
   let opaque = gitEnv; // repo/config redirection we cannot see: -c, GIT_* env, --git-dir, ...
@@ -246,7 +249,7 @@ function analyzeGit(w: string[], b: BranchInfo, changed: boolean, gitEnv: boolea
   const curProt = b.current !== null && isProt(b, b.current) ? b.current : null;
   if (sub === undefined) return { ok: true, changed };
   if (sub === 'push') {
-    if (opaque || dirOpt || changed) return bad();
+    if (opaque || dirOpt) return bad();
     const pos: string[] = [];
     for (const a of args) {
       if (a.startsWith('-')) { if (!PUSH_FLAGS.has(a)) return bad(); } else pos.push(a);
@@ -261,8 +264,9 @@ function analyzeGit(w: string[], b: BranchInfo, changed: boolean, gitEnv: boolea
       const src = parts[0];
       let dst: string | null = parts.length === 2 ? parts[1] : parts[0];
       if (src !== '' && !LITERAL.test(src)) { unknown = true; continue; }
-      if (dst === 'HEAD' || dst === '@') {
-        if (b.current === null) { unknown = true; continue; }
+      if (isHeadLike(dst)) {
+        // an earlier checkout/switch/cd may have moved HEAD (or the repo) away from what we know
+        if (b.current === null || changed) { unknown = true; continue; }
         dst = b.current;
       }
       dst = plainDst(dst);
@@ -287,53 +291,117 @@ function analyzeGit(w: string[], b: BranchInfo, changed: boolean, gitEnv: boolea
   return bad(); // unknown subcommand: possibly a gitconfig alias
 }
 
-const HTTP_CLIENT = /(^|[^\w-])(curl|wget|http|https|httpie|xh)(?![\w-])/;
-const WRITE_FLAG = /(^|\s)(-x\s*(?!get\b)\S+|--request\s*=?\s*(?!get\b)\S+|--method\s*=?\s*(?!get\b)\S+|-d|-f|--data\S*|--json|--form\S*|--post\S*|--body\S*)(\s|=|$)/;
+// ----- HTTP clients and gh -----
 
-function pushMergeVerdict(cmd: string, ctx: RulesCtx): Protected | null {
-  // Normalise quotes/backslashes so `g''it`, `"gi"t`, `gi\t` read as `git` in text checks.
-  const nm = lc(cmd.replace(/['"\\]/g, ''));
-  if (nm.includes('api.github.com') && HTTP_CLIENT.test(nm) && WRITE_FLAG.test(nm)) {
-    return { kind: /merges?\b/.test(nm) ? 'merge' : 'push', branch: null, reason: 'GitHub API write via HTTP client' };
+const HTTP_CLIENTS = new Set(['curl', 'wget', 'http', 'https', 'httpie', 'xh']);
+const isGetLike = (m: string | undefined): boolean => m !== undefined && /^(get|head)$/i.test(m);
+
+/** True only when every http-client / gh-api word proves a read-only GET/HEAD request. */
+function httpReadOnly(words: string[], gh: boolean): boolean {
+  const names = new Set(words.map(w => lc(basename(w))));
+  const curl = names.has('curl');
+  const httpie = names.has('http') || names.has('https') || names.has('httpie') || names.has('xh');
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    const l = lc(w);
+    if (/^(put|post|patch|delete)$/.test(l)) return false;
+    if (/^--(data|form|json|upload-file|post|body|raw|multipart|input|field|raw-field)/.test(l)) return false;
+    const long = /^--(request|method)(?:=(.*))?$/.exec(l);
+    if (long) { if (!isGetLike(long[2] ?? words[i + 1])) return false; continue; }
+    if (/^-[A-Za-z]/.test(w)) {
+      const run = /^-([A-Za-z0-9]*)/.exec(w)![1]; // short-flag cluster; may carry a glued value (-d@f, -XPUT)
+      const x = run.indexOf('X');
+      const flags = x >= 0 ? run.slice(0, x) : run;
+      if (curl && /[dFT]/.test(flags)) return false;
+      if (gh && /[fF]/.test(flags)) return false;
+      if (httpie && /[fj]/.test(flags)) return false;
+      if (x >= 0 && (curl || gh) && !isGetLike(run.slice(x + 1) || words[i + 1])) return false;
+      continue;
+    }
+    if (httpie && /^[^=:@\/\s-][^=:@\/\s]*(=(?!=)|:=|@)/.test(w)) return false;
+    if (gh && l === 'graphql') return false;
   }
-  const gitWord = /(^|[^\w-])git(?![\w-])/.test(nm);
+  return true;
+}
+
+function ghSafe(w: string[]): boolean {
+  let i = 1;
+  while (i < w.length && w[i].startsWith('-')) i += (w[i] === '-R' || w[i] === '--repo') ? 2 : 1;
+  const a = w[i];
+  const sub = w[i + 1];
+  if (a === 'api') return httpReadOnly(w.slice(i + 1), true);
+  if (a === 'pr') return ['view', 'list', 'create', 'checks', 'diff', 'status', 'checkout', 'comment', 'review'].includes(sub);
+  if (a === 'issue' || a === 'run') return true;
+  if (a === 'repo') return ['view', 'clone', 'list'].includes(sub);
+  if (a === 'release') return ['view', 'list'].includes(sub);
+  if (a === 'auth') return sub === 'status';
+  return false; // unknown subcommand: possibly a gh alias
+}
+
+const INDIRECT = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'eval', 'exec', 'xargs', 'env', 'sudo', 'doas', 'command', 'nohup',
+  'time', 'timeout', 'nice', 'ionice', 'watch', 'parallel', 'ssh', 'su', 'source', '.', 'alias', 'unalias', 'function', 'builtin', 'find', 'script']);
+const ENV_SETTERS = new Set(['export', 'declare', 'typeset', 'readonly', 'local']);
+const INTERP = new Set(['python', 'python3', 'ruby', 'perl', 'php', 'node', 'deno', 'bun', 'osascript', 'lua']);
+const INLINE_FLAG = /^(-c|-e|-p|-r|-pe|-E|--eval|--print)$/;
+function inlineInterp(s: Segment): boolean {
+  let i = 0;
+  while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) i++;
+  const c = s.words[i];
+  return c !== undefined && INTERP.has(lc(basename(c)).replace(/[\d.]+$/, '')) && s.words.some(a => INLINE_FLAG.test(a));
+}
+const SENS_ENV = /^(GIT_|PATH=|HOME=|XDG_)/i;
+const RISKY_WORDS = /(^|[^\w-])(git|gh|hub)(?!\w)|\b(push|merge|rebase|sync|update-ref)\b|refs\//;
+const GIT_WORD = /(^|[^\w-])(git|hub)(?!\w)/;
+
+export const MAX_COMMAND_LEN = 16 * 1024;
+
+function pushMergeVerdict(cmd: string, nm: string, segs: Segment[], ctx: RulesCtx): Protected | null {
+  const words = segs.flatMap(s => s.words);
+  if ((nm.includes('api.github.com') || /github\.com\/api\b/.test(nm)) && words.some(w => HTTP_CLIENTS.has(lc(basename(w))))
+    && !httpReadOnly(words, false)) {
+    return { kind: nm.includes('merge') ? 'merge' : 'push', branch: null, reason: 'GitHub API write via HTTP client' };
+  }
+  const gitWord = GIT_WORD.test(nm);
   const ghWord = /(^|[^\w-])gh(?![\w-])/.test(nm);
   const ghApi = ghWord && /(^|[^\w-])api(?![\w-])/.test(nm);
-  const segs = segmentsOf(cmd);
-  const cmdWords = segs.map(s => { let i = 0; while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) i++; return { s, i }; });
-  const opaque = cmdWords.some(({ s, i }) => s.words[i] !== undefined && /[$`]/.test(s.words[i]));
+  const opaque = segs.some(s => { let i = 0; while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) i++; return s.words[i] !== undefined && /[$`*?\[]/.test(s.words[i]); });
   const hasPush = /\bpush\b/.test(nm);
   const trigger = ghApi || /\b(push|merge|rebase|subtree|update-ref|sync)\b|refs\//.test(nm);
-  if (!gitWord && !ghWord && !(opaque && trigger)) return null;
+  const inlineCode = segs.some(inlineInterp);
+  if (!gitWord && !ghWord && !((opaque || inlineCode) && trigger)) return null;
   const isMerge = !hasPush && !/\bsync\b/.test(nm) && (/\b(merge|rebase)\b/.test(nm) || ghWord);
   const kind: 'push' | 'merge' = isMerge ? 'merge' : 'push';
   const fail = (br: string | null): Protected => ({ kind, branch: br, reason: `${kind} not proven safe: ${cmd.slice(0, 120)}` });
-  if (ghApi || (opaque && trigger)) return fail(null);
-  // fd duplication and /dev/null redirects are harmless; any other redirect / expansion is unknown.
-  const cleaned = cmd.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' ');
-  if (trigger && /[$`<>{}*?]/.test(cleaned)) return fail(null);
+  if ((opaque || inlineCode) && trigger) return fail(null);
   const b = ctx.branches;
   let changed = false;
-  for (const s of segmentsOf(cleaned)) {
+  let stickyEnv = false;
+  for (const s of segs) {
     let i = 0;
-    let gitEnv = false;
-    while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) { if (/^GIT_/i.test(s.words[i])) gitEnv = true; i++; }
+    let envOp = stickyEnv;
+    while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) { if (SENS_ENV.test(s.words[i])) envOp = true; i++; }
     const w = s.words.slice(i);
-    if (w.length === 0) continue;
+    if (w.length === 0) { if (envOp) stickyEnv = true; continue; }
     const first = w[0];
-    if (first === 'git') {
-      const v = analyzeGit(w, b, changed, gitEnv);
+    const base = lc(basename(first));
+    if (base === 'git' || base === 'hub' || /^git-[\w-]+$/.test(base)) {
+      const gw = base.startsWith('git-') ? ['git', base.slice(4), ...w.slice(1)] : ['git', ...w.slice(1)];
+      const v = analyzeGit(gw, b, changed, envOp);
       if (!v.ok) return fail(v.branch);
       changed = v.changed;
+    } else if (base === 'gh') {
+      if (!ghSafe(w)) return fail(null);
+    } else if (CD_CMDS.has(base)) {
+      changed = true;
+    } else if (ENV_SETTERS.has(base)) {
+      if (w.slice(1).some(x => SENS_ENV.test(x))) stickyEnv = true;
+    } else if (HARMLESS.has(base)) {
+      // data only
     } else if (!trigger) {
       // nothing push/merge-like anywhere: unrelated segments are none of our business
-    } else if (CD_CMDS.has(first)) {
-      changed = true;
-    } else if (HARMLESS.has(first)) {
-      // data only
-    } else if (RUNNERS.has(first) && !/(^|[^\w-])(git|gh)(?![\w-])|\b(push|merge)\b/.test(lc(s.raw))) {
-      // build/test runner not touching git
-    } else {
+    } else if (INDIRECT.has(base) || inlineInterp(s) || RISKY_WORDS.test(lc(s.raw)) || /[$`]/.test(s.raw)) {
+      // an unrelated program cannot redirect a literal refspec, but an executor/wrapper or anything
+      // mentioning git/push/merge could be running one
       return fail(null);
     }
   }
@@ -344,26 +412,49 @@ function pushMergeVerdict(cmd: string, ctx: RulesCtx): Protected | null {
 
 const CASE_INSENSITIVE = process.platform === 'darwin' || process.platform === 'win32';
 const norm = (s: string): string => (CASE_INSENSITIVE ? lc(s) : s);
-const BARE_HOME = /(?:~|\$\{?home\}?)(?:(?![\w\/])|\/(?=[.*?\["'\s]|$))/;
+// `~` / `$HOME` only at the start of a token, bare or followed by a hidden/glob/quoted child
+const BARE_HOME = /(?<![^\s"'=:(;|&])(?:~|\$\{?home\}?)(?:(?![\w\/])|\/(?=[.*?\["'\s]|$))/;
 const SELF_SAFE = new Set(['cat', 'ls', 'grep', 'rg', 'head', 'tail', 'stat', 'wc', 'file', 'cd', 'pwd', 'echo']);
+const DESTRUCTIVE_FIND = new Set(['-delete', '-exec', '-execdir', '-ok', '-okdir']);
 
-function selfBash(cmd: string, ctx: RulesCtx): Protected | null {
-  const lower = lc(cmd);
-  const nm = lc(cmd.replace(/['"\\]/g, ''));
+function stripSlash(p: string): string { return p.length > 1 ? p.replace(/\/+$/, '') : p; }
+
+function selfBash(cmd: string, nm: string, segs: Segment[], ctx: RulesCtx): Protected | null {
   if (/(?<![\w.])kubicle(\.ts|\.js|\.mjs|\.cjs)?(?![\w.-])/.test(nm) && /\b(grant|instruct|revoke|bubbles|log)\b/.test(nm)) {
     return { kind: 'self', reason: 'kubicle self-administration command' };
   }
-  if (/(localhost|127\.0\.0\.1|\[::1\])/.test(nm) && HTTP_CLIENT.test(nm) && WRITE_FLAG.test(nm)) {
+  const words = segs.flatMap(s => s.words);
+  if (/(localhost|127\.0\.0\.1|\[::1\])/.test(nm) && words.some(w => HTTP_CLIENTS.has(lc(basename(w)))) && !httpReadOnly(words, false)) {
     return { kind: 'self', reason: 'write request to a local server' };
   }
   const h = lc(resolve(ctx.home));
   const hd = lc(homedir());
+  const roots = [hd, '~', '$home', '${home}'];
   const tilde = h === hd || h.startsWith(hd + sep) ? '~' + h.slice(hd.length) : null;
-  const mentions = nm.includes('.k') || nm.includes('office') || nm.includes(h) || (tilde !== null && nm.includes(tilde))
-    || BARE_HOME.test(lower) || BARE_HOME.test(nm);
+  // find with a destructive action starting at / ~ $HOME or any ancestor of the Kubicle home
+  for (const s of segs) {
+    let i = 0;
+    while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) i++;
+    if (lc(basename(s.words[i] ?? '')) !== 'find') continue;
+    const args = s.words.slice(i + 1);
+    if (!args.some(a => DESTRUCTIVE_FIND.has(a))) continue;
+    for (const a of args) {
+      if (a.startsWith('-') || a === '(' || a === '!') break;
+      const p = stripSlash(lc(a));
+      if (p === '/' || p === '~' || p === '$home' || p === '${home}' || p === hd || h === p || h.startsWith(p + '/')) {
+        return { kind: 'self', reason: 'destructive find over a directory containing Kubicle state' };
+      }
+    }
+  }
+  const mentions = nm.includes(h) || (tilde !== null && nm.includes(tilde))
+    || roots.some(r => nm.includes(r + '/.k') || nm.includes(r + '/office.db') || nm.includes(r + '/office*'))
+    || /(^|[\s\/=])\.kub/.test(nm) || /(^|\s)\.k\S*[*?\[]/.test(nm)
+    || /(^|[\s\/])office(\.db\S*|[*?\[]\S*)(?=\s|$)/.test(nm)
+    || BARE_HOME.test(lc(cmd)) || BARE_HOME.test(nm)
+    || segs.some(s => s.words.length === 1 && s.words[0] === 'cd');
   if (!mentions) return null;
   if (cmd.includes('>')) return { kind: 'self', reason: 'redirect in a command touching Kubicle state' };
-  for (const s of segmentsOf(cmd)) {
+  for (const s of segs) {
     if (s.words.length === 0) continue;
     const c = s.words[0]; // an env prefix or a path in the command word is not read-only
     if (!SELF_SAFE.has(c) || s.words.some(a => /^--pre/.test(a))) {
@@ -373,8 +464,8 @@ function selfBash(cmd: string, ctx: RulesCtx): Protected | null {
   return null;
 }
 
-function scriptBash(cmd: string): Protected | null {
-  for (const s of segmentsOf(cmd)) {
+function scriptBash(segs: Segment[]): Protected | null {
+  for (const s of segs) {
     const w = stripPrefix(s.words);
     const first = w[0];
     if (first === undefined) continue;
@@ -409,7 +500,11 @@ export function protectedAction(toolName: string, input: unknown, ctx: RulesCtx)
   const inp = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
   if (toolName === 'Bash') {
     const cmd = typeof inp.command === 'string' ? inp.command : '';
-    return selfBash(cmd, ctx) ?? pushMergeVerdict(cmd, ctx) ?? (ctx.strictScripts ? scriptBash(cmd) : null);
+    if (cmd.length > MAX_COMMAND_LEN) return { kind: 'push', branch: null, reason: 'command too long to analyze' };
+    const nm = lc(cmd.replace(/['"\\]/g, ''));
+    // fd duplication and /dev/null redirects are harmless; every other redirect stays visible as a word
+    const segs = segmentsOf(cmd.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' '));
+    return selfBash(cmd, nm, segs, ctx) ?? pushMergeVerdict(cmd, nm, segs, ctx) ?? (ctx.strictScripts ? scriptBash(segs) : null);
   }
   if (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'NotebookEdit') {
     const raw = typeof inp.file_path === 'string' ? inp.file_path : typeof inp.notebook_path === 'string' ? inp.notebook_path : '';
