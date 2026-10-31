@@ -14,6 +14,11 @@ import { parse as parseYaml, stringify as yamlText } from 'yaml';
 import { startServer, type RunningServer } from '../../src/server/main.ts';
 import { loadConfig } from '../../src/server/config.ts';
 
+// Bubbles triage runs on every PermissionRequest now: never the real claude here. The fake escalates by
+// default, so these office-approval tests still reach the owner.
+process.env.KUBICLE_CLAUDE_BIN = join(import.meta.dirname, '..', 'fixtures', 'fake-claude.mjs');
+process.env.FAKE_CLAUDE_MODE ??= 'escalate';
+
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const outDir = join(root, 'test-results');
 const STYLES = ['pixel', 'iso', 'blueprint', 'cozy'] as const;
@@ -150,6 +155,14 @@ test('live office: state, floors, approvals, rooms, lobby, styles, narrow view, 
   await page.waitForFunction(() => /2 sessions/.test(document.getElementById('counts')!.innerText) && /1 subagents/.test(document.getElementById('counts')!.innerText), null, { timeout: 5000 });
   assert.match(await counts(page), /0 need you/);
   const alphaId = await projectId(page, 'alpha'), betaId = await projectId(page, 'beta');
+  // 'office' (guard + Bubbles + office) is the default now; this walkthrough starts both floors opted out and
+  // turns routing on for one session from the inspector.
+  for (const pid of [alphaId, betaId]) {
+    const st = await page.evaluate(async (id) => (await fetch('/api/approvals-mode', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-kubicle-csrf': '1' }, body: JSON.stringify({ scope: 'project', id, mode: 'off' }),
+    })).status, pid);
+    assert.equal(st, 204);
+  }
   // The automatic Lobby left for the first floor that got agents; the header names it.
   await page.waitForFunction((id) => window.__office.floor() === id, alphaId, { timeout: 3000 });
   assert.equal(await page.locator('#floorBtn .name').innerText(), 'alpha');

@@ -11,6 +11,11 @@ import { startServer } from '../../src/server/main.ts';
 import { hookResponse } from '../../src/server/approvals.ts';
 import type { ServerMsg, AgentView } from '../../src/shared/protocol.ts';
 
+// Bubbles triage runs on every PermissionRequest now: never the real claude here. The fake escalates by
+// default, so these office-approval tests still reach the owner.
+process.env.KUBICLE_CLAUDE_BIN = join(import.meta.dirname, '..', 'fixtures', 'fake-claude.mjs');
+process.env.FAKE_CLAUDE_MODE ??= 'escalate';
+
 const FIX = join(import.meta.dirname, '..', 'fixtures', 'hooks');
 const fixture = (name: string): Record<string, unknown> => JSON.parse(readFileSync(join(FIX, `${name}.json`), 'utf8'));
 const HINT = 'This login link was already used. Restart the server for a new one.';
@@ -271,10 +276,12 @@ test('PermissionRequest with no UI connected returns empty immediately', async (
   assert.ok(performance.now() - t0 < 100);
 });
 
-test('PermissionRequest for a session not opted in returns empty immediately even with UI', async () => {
+test('PermissionRequest for a session opted out returns empty immediately even with UI', async () => {
   const s = await start();
   const cookie = await login(s);
   await owner(s, cookie);
+  // 'office' is the default now (Bubbles); 'off' is the explicit opt-out.
+  assert.equal((await control(s, cookie, '/api/approvals-mode', { scope: 'session', id: 'sOff', mode: 'off' })).status, 204);
   const r = await postHook(s, perm('sOff'));
   assert.equal(await r.text(), '');
 });
@@ -340,9 +347,11 @@ test('project approvals mode broadcasts projects and agents', async () => {
   const c = await owner(s, cookie);
   const snap = await c.waitFor((m) => m.t === 'snapshot');
   assert.ok(snap.t === 'snapshot' && snap.projects.some((p) => p.id === cwd));
-  assert.equal((await control(s, cookie, '/api/approvals-mode', { scope: 'project', id: cwd, mode: 'office' })).status, 204);
-  await c.waitFor(isAgent((a) => a.id === 'sJ' && a.approvals === 'office'));
-  await c.waitFor((m) => m.t === 'projects' && m.projects.some((p) => p.id === cwd && p.approvals === 'office'));
+  // New projects default to 'office' (Bubbles): switch this one off.
+  assert.ok(snap.t === 'snapshot' && snap.agents.some((a) => a.id === 'sJ' && a.approvals === 'office'));
+  assert.equal((await control(s, cookie, '/api/approvals-mode', { scope: 'project', id: cwd, mode: 'off' })).status, 204);
+  await c.waitFor(isAgent((a) => a.id === 'sJ' && a.approvals === 'off'));
+  await c.waitFor((m) => m.t === 'projects' && m.projects.some((p) => p.id === cwd && p.approvals === 'off'));
 });
 
 test('projects API: rename, archive, reorder keeps wings unique', async () => {
@@ -738,7 +747,7 @@ test('a new project gets a floor in the next building broadcast; archiving drops
 });
 
 // ---------------------------------------------------------------- final review M6 / M8
-import { composeBanner } from '../../src/server/main.ts';
+import { bubblesBannerItems, composeBanner } from '../../src/server/main.ts';
 
 test('M6: composeBanner appends building problems to any banner, with a (+N more) count', () => {
   assert.equal(composeBanner(null, []), null);
@@ -746,6 +755,29 @@ test('M6: composeBanner appends building problems to any banner, with a (+N more
   assert.equal(composeBanner(null, ['/a.yaml:3: bad']), 'Building file problem: /a.yaml:3: bad');
   assert.equal(composeBanner('Hooks stale.', ['/a.yaml:3: bad', '/b.yaml: x', '/c.yaml: y']),
     'Hooks stale. · Building file problem: /a.yaml:3: bad (+2 more)');
+});
+
+test('Bubbles banner items follow the hooks banner and the building problem', () => {
+  const st = (state: 'on' | 'off' | 'off-duty' | 'failing' | 'unavailable', detail = 'd.') => ({ state, detail, callsToday: 0, cap: 300, thinking: 0 });
+  assert.deepEqual(bubblesBannerItems(st('on'), null, null), []);
+  assert.deepEqual(bubblesBannerItems(st('off'), null, null), [], 'off is the owner\'s choice, not a problem');
+  assert.match(bubblesBannerItems(st('failing'), null, null)[0]!, /^Bubbles is failing: d\./);
+  assert.match(bubblesBannerItems(st('off-duty', 'Usage limit reached.'), null, null)[0]!, /^Bubbles is off duty: Usage limit/);
+  assert.match(bubblesBannerItems(st('unavailable'), null, null)[0]!, /^Bubbles is unavailable/);
+  const items = bubblesBannerItems(st('failing'), '/h/bubbles.yaml: bad', 'Bubbles log mirror failed: EACCES');
+  assert.equal(items.length, 3);
+  assert.equal(composeBanner('Hooks stale.', ['/a.yaml: x'], items),
+    `Hooks stale. · Building file problem: /a.yaml: x · Bubbles config problem: /h/bubbles.yaml: bad · Bubbles log mirror failed: EACCES · ${items[2]}`);
+  assert.equal(composeBanner(null, [], items.slice(0, 1)), 'Bubbles config problem: /h/bubbles.yaml: bad');
+});
+
+test('an invalid bubbles.yaml shows in the banner at start', async () => {
+  const home = tmpHome();
+  writeFileSync(join(home, 'bubbles.yaml'), 'daily_call_cap: lots\n');
+  const s = await start(home);
+  const c = await owner(s, await login(s));
+  const snap = await c.waitFor((m) => m.t === 'snapshot');
+  assert.ok(snap.t === 'snapshot' && /Bubbles config problem: .*daily_call_cap must be a non-negative integer/.test(snap.banner ?? ''), String(snap.t === 'snapshot' && snap.banner));
 });
 
 test('M6: a building problem shows beside the wrong-token banner, with a trimmed YAML reason', async () => {

@@ -56,6 +56,19 @@ function initSchema(db: DatabaseSync, file: string): void {
       id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, json TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS bubbles_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `);
+  // user_version 0 -> 1 (Bubbles): 'office' now means "Kubicle handles it" (guard + Bubbles + office), the
+  // new default. Every existing project moves to it once; a later explicit 'off' is left alone.
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 1) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.exec("UPDATE projects SET approvals = 'office'");
+      db.exec('PRAGMA user_version = 1');
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+  }
   // Older databases lack the room column; add it in place.
   if (!(db.prepare('PRAGMA table_info(session_settings)').all() as { name: string }[]).some((c) => c.name === 'room')) {
     db.exec('ALTER TABLE session_settings ADD COLUMN room TEXT');

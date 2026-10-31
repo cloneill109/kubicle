@@ -115,6 +115,18 @@ export class OwnerAuth {
     return 'ok';
   }
 
+  /**
+   * For owner GET reads (JSON APIs): cookie + X-Kubicle-CSRF: 1, and an Origin, if sent, must be ours. Same-origin
+   * GETs carry no Origin; a cross-site page cannot set the custom header without a CORS preflight we never answer.
+   */
+  checkRead(req: IncomingMessage): 'ok' | 'unauthorized' | 'bad-origin' | 'no-csrf' {
+    if (!this.isOwner(req)) return 'unauthorized';
+    const origin = header(req, 'origin');
+    if (origin !== undefined && !this.origins.has(origin)) return 'bad-origin';
+    if (header(req, 'x-kubicle-csrf') !== '1') return 'no-csrf';
+    return 'ok';
+  }
+
   sessionCookie(id: string): string {
     return `${COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/`;
   }

@@ -39,6 +39,7 @@ async function main() {
       return out(envelope(`Sure! Weighing {"it": "up"} first.\n\`\`\`json\n${verdict('approve', 0.9)}\n\`\`\`\nThanks {not json}`));
     case 'garbage': return out(envelope('I cannot decide {not: json} at all'));
     case 'slow': await sleep(Number(process.env.FAKE_CLAUDE_DELAY ?? 300)); return out(envelope(verdict('approve', 0.95)));
+    case 'slow-escalate': await sleep(Number(process.env.FAKE_CLAUDE_DELAY ?? 300)); return out(envelope(verdict('escalate', 0.9)));
     case 'flood': { const chunk = 'x'.repeat(65536); for (let i = 0; i < 40; i++) process.stdout.write(chunk); return out(''); }
     case 'usage-limit':
       return out(envelope('Claude AI usage limit reached|1793491200', { subtype: 'error_during_execution', is_error: true, api_error_status: 429 }), 1);

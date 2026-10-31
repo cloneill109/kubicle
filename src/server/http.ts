@@ -5,7 +5,10 @@ import { normalizeHook, type AgentEvent } from '../shared/events.ts';
 import { ID_RE, type RoomDef } from '../shared/building.ts';
 import type { BuildingService } from './building/service.ts';
 import { BuildingFileError, RevisionConflict } from './building/files.ts';
-import type { AgentView, FeedItem, ServerMsg } from '../shared/protocol.ts';
+import type { AgentView, BubblesState, FeedItem, ServerMsg } from '../shared/protocol.ts';
+import type { BubblesLog, LogKind, LogQuery } from './bubbles/log.ts';
+import { PolicyError, type PendingChange, type Policy } from './bubbles/policy.ts';
+import { GUARD_ASK, type PermissionFlow } from './permission-flow.ts';
 import { hookResponse, type Approvals } from './approvals.ts';
 import { checkIngest, type OwnerAuth } from './auth.ts';
 import type { Config } from './config.ts';
@@ -51,6 +54,16 @@ export interface HttpDeps {
   building: BuildingService;
   approvals: Approvals;
   hub: Hub;
+  flow: PermissionFlow;
+  bubbles: {
+    policy: Policy;
+    log: BubblesLog;
+    state(): BubblesState;
+    /** Lift a usage-limit stop: call after the owner turns Bubbles on. */
+    ownerToggledOn(): void;
+    /** Policy changed: broadcast the new `bubbles` message. */
+    changed(): void;
+  };
   pushFeed(item: FeedItem): void;
   /** A hook arrived with a missing or wrong ingest token (I4). */
   onBadToken?(): void;
@@ -123,11 +136,45 @@ function hint(req: IncomingMessage, name: string): string | undefined {
   return typeof v === 'string' && ID_RE.test(v) ? v : undefined;
 }
 
+const LOG_KINDS = new Set<LogKind>(['triage', 'escalation', 'owner-answer', 'guard', 'grant', 'instruction', 'toggle', 'error', 'usage']);
+const GREP_MAX = 200;
+
+/** `?project&session&kind&since&grep&limit` for GET /api/log and /cli/log. */
+function logQuery(url: URL): LogQuery {
+  const q: LogQuery = {};
+  const sp = url.searchParams;
+  const project = sp.get('project'), session = sp.get('session'), kind = sp.get('kind'), since = sp.get('since'), grep = sp.get('grep'), limit = sp.get('limit');
+  if (project) q.projectId = project;
+  if (session) q.sessionId = session;
+  if (kind) {
+    if (!LOG_KINDS.has(kind as LogKind)) throw new HttpError(400, `unknown kind: ${kind}`);
+    q.kind = kind as LogKind;
+  }
+  if (since) {
+    const n = Number(since);
+    if (!Number.isFinite(n)) throw new HttpError(400, 'since must be a number (ms since epoch)');
+    q.since = n;
+  }
+  if (grep) {
+    if (grep.length > GREP_MAX) throw new HttpError(400, 'grep too long');
+    q.grep = grep;
+  }
+  if (limit) {
+    const n = Number(limit);
+    if (!Number.isInteger(n) || n < 1) throw new HttpError(400, 'limit must be a positive integer');
+    q.limit = n;
+  }
+  return q;
+}
+
 export function agentKey(e: AgentEvent): string {
   return e.agentId !== undefined ? `${e.sessionId}:${e.agentId}` : e.sessionId;
 }
 
-export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerResponse) => void {
+/** Which listener a request arrived on: `/cli/*` exists only on the private socket. */
+export type Channel = 'tcp' | 'socket';
+
+export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerResponse, channel?: Channel) => void {
   const broadcast = (m: ServerMsg) => d.hub.broadcast(m);
   const broadcastAgents = (as: AgentView[]) => { for (const a of as) broadcast({ t: 'agent', agent: a }); };
   const uiDir = resolve(d.rootDir, 'src', 'ui');
@@ -170,6 +217,15 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     const division = hint(req, 'x-kubicle-division'), room = hint(req, 'x-kubicle-room');
     if (division) e.division = division;
     if (room) e.room = room;
+    const rawInput = isObj(raw) ? raw.tool_input : undefined;
+    if (e.event === 'PreToolUse' && req.headers['x-kubicle-hook-kind'] === 'pre') {
+      // The guard answers first and synchronously (no model, no wait); ingest happens after.
+      let ask = false;
+      try { ask = d.flow.guard(e, rawInput); } catch (err) { d.log(`guard failed: ${String(err)}`); }
+      if (ask) send(res, 200, GUARD_ASK, JSON_HDR); else send(res, 200);
+      try { ingest(e); } catch (err) { d.log(`ingest failed: ${String(err)}`); }
+      return;
+    }
     if (e.event !== 'PermissionRequest') {
       send(res, 200);
       try { ingest(e); } catch (err) { d.log(`ingest failed: ${String(err)}`); }
@@ -181,8 +237,9 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     const canDeliver = req.headers['x-kubicle-hook-kind'] === 'perm';
     // Hook caller gone (curl killed/timed out): nobody can receive an answer, so hand the
     // prompt to the terminal instead of showing a dead "answer here" button for 120 s.
-    res.once('close', () => { if (!res.writableEnded) d.approvals.release(agentKey(e)); });
-    // While the office waits, send a space every HEARTBEAT_MS (I2). The shim's curl gives up after
+    let gone = false;
+    res.once('close', () => { if (!res.writableEnded) { gone = true; d.approvals.release(agentKey(e)); } });
+    // While Bubbles triages and the office waits, send a space every HEARTBEAT_MS (I2). The shim's curl gives up after
     // ~3 s without bytes, so a frozen server never holds a session for the full hook timeout.
     // Immediate answers (not opted in, no UI) finish before the first beat and stay byte-exact.
     const beat = setInterval(() => {
@@ -192,7 +249,9 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     }, HEARTBEAT_MS);
     try {
       ingest(e);
-      if (canDeliver) decision = await d.approvals.request(e);
+      // Bubbles triage, then the office (if a UI is connected), else the terminal. A caller that disconnects
+      // during triage still gets its triage finished and logged, but no office wait starts.
+      decision = await d.flow.decide(e, { canDeliver, gone: () => gone || res.destroyed, input: rawInput });
     } catch (err) { d.log(`approval failed: ${String(err)}`); }
     finally { clearInterval(beat); }
     const body = hookResponse(decision);
@@ -205,6 +264,107 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     if (r === 'ok') return true;
     send(res, r === 'unauthorized' ? 401 : 403, r);
     return false;
+  }
+
+  function readGuard(req: IncomingMessage, res: ServerResponse): boolean {
+    const r = d.auth.checkRead(req);
+    if (r === 'ok') return true;
+    send(res, r === 'unauthorized' ? 401 : 403, r);
+    return false;
+  }
+
+  const sendJson = (res: ServerResponse, status: number, v: unknown) => send(res, status, JSON.stringify(v), JSON_HDR);
+  const knownProject = (id: unknown) => typeof id === 'string' && d.projects.list().some((p) => p.id === id);
+
+  /** Runs a policy write; PolicyError -> 400 with its message. */
+  function policyWrite(res: ServerResponse, fn: () => void): boolean {
+    try { fn(); return true; } catch (err) {
+      if (err instanceof PolicyError) { send(res, 400, err.message); return false; }
+      throw err;
+    }
+  }
+
+  async function bubblesWrite(req: IncomingMessage, res: ServerResponse, what: string): Promise<void> {
+    if (!guard(req, res)) return;
+    const b = await readJson(req);
+    if (!isObj(b)) return send(res, 400, 'bad body');
+    const pol = d.bubbles.policy;
+    const who = 'owner (office)';
+    switch (what) {
+      case 'enabled': {
+        if (typeof b.enabled !== 'boolean') return send(res, 400, 'enabled must be true or false');
+        pol.setEnabled(b.enabled, who);
+        if (b.enabled) d.bubbles.ownerToggledOn();
+        d.bubbles.changed();
+        return send(res, 204);
+      }
+      case 'instructions': {
+        if (b.projectId !== null && !knownProject(b.projectId)) return send(res, 400, 'unknown project');
+        if (b.id !== undefined && (typeof b.id !== 'string' || !b.id || b.id.length > 100)) return send(res, 400, 'bad id');
+        let out: unknown;
+        if (!policyWrite(res, () => { out = pol.addInstruction({ projectId: b.projectId as string | null, text: b.text as string, ...(b.id ? { id: b.id as string } : {}) }, who); })) return;
+        d.bubbles.changed();
+        return sendJson(res, 201, out);
+      }
+      case 'grants': {
+        if (!knownProject(b.projectId)) return send(res, 400, 'unknown project');
+        if (b.uses !== null && b.uses !== undefined && typeof b.uses !== 'number') return send(res, 400, 'uses must be a positive integer or null');
+        if (b.ttlMs !== undefined && typeof b.ttlMs !== 'number') return send(res, 400, 'ttlMs must be a number');
+        let out: unknown;
+        if (!policyWrite(res, () => {
+          out = pol.addGrant({ projectId: b.projectId as string, action: b.action as 'push' | 'merge', branch: (b.branch ?? null) as string | null,
+            uses: b.uses as number | null | undefined, ttlMs: b.ttlMs as number | undefined }, who);
+        })) return;
+        d.bubbles.changed();
+        return sendJson(res, 201, out);
+      }
+      case 'revoke': {
+        if ((b.target !== 'grant' && b.target !== 'instruction') || typeof b.id !== 'string' || !b.id) return send(res, 400, 'bad body');
+        if (!pol.revoke(b.target, b.id, who)) return send(res, 404, `no active ${b.target} with id ${b.id}`);
+        d.bubbles.changed();
+        return send(res, 204);
+      }
+    }
+    send(res, 404, 'not found');
+  }
+
+  async function bubblesPending(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+    if (!guard(req, res)) return;
+    const b = await readJson(req);
+    if (!isObj(b) || typeof b.confirm !== 'boolean') return send(res, 400, 'confirm must be true or false');
+    const pol = d.bubbles.policy;
+    const p = pol.pending().find((x) => x.id === id);
+    if (!p) return send(res, 404, 'no such pending change (handled, or older than 15 min)');
+    if (b.confirm) {
+      if (pol.confirm(id) !== 'ok') { d.bubbles.changed(); return send(res, 404, 'no such pending change (or no longer valid)'); }
+      if (p.change.type === 'toggle' && p.change.enabled) d.bubbles.ownerToggledOn();
+    } else pol.reject(id);
+    d.bubbles.changed();
+    send(res, 204);
+  }
+
+  /** Socket-only (never TCP), ingest token required: the `kubicle bubbles` / `kubicle log` CLI. */
+  async function cliRoute(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    if (!checkIngest(req, d.ingestToken)) { req.resume(); return send(res, 401, 'unauthorized'); }
+    const m = req.method ?? 'GET';
+    const p = url.pathname;
+    if (m === 'POST' && p === '/cli/propose') {
+      const b = await readJson(req);
+      if (!isObj(b) || !isObj(b.change)) return send(res, 400, 'body must be { change: {...} }');
+      const c = b.change as PendingChange['change'];
+      if ((c.type === 'grant' || (c.type === 'instruction' && c.projectId !== null)) && !knownProject(c.projectId)) {
+        return send(res, 400, `unknown project: ${String(c.projectId)}`);
+      }
+      let out: PendingChange | undefined;
+      if (!policyWrite(res, () => { out = d.bubbles.policy.propose(c); })) return;
+      d.bubbles.changed();
+      return sendJson(res, 201, { id: out!.id, confirmUrl: `http://127.0.0.1:${d.port}/#bubbles` });
+    }
+    if (m === 'GET' && p === '/cli/log') return sendJson(res, 200, d.bubbles.log.query(logQuery(url)));
+    if (m === 'GET' && p === '/cli/log/verify') return sendJson(res, 200, d.bubbles.log.verify());
+    if (m === 'GET' && p === '/cli/bubbles') return sendJson(res, 200, d.bubbles.state());
+    req.resume();
+    send(res, 404, 'not found');
   }
 
   async function answer(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
@@ -329,11 +489,15 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     } catch { return send(res, 404, 'not found'); }
   }
 
-  async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  async function route(req: IncomingMessage, res: ServerResponse, channel: Channel): Promise<void> {
     let url: URL;
     try { url = new URL(req.url ?? '/', 'http://127.0.0.1'); } catch { return send(res, 400, 'bad url'); }
     const p = url.pathname;
     const m = req.method ?? 'GET';
+    if (p === '/cli' || p.startsWith('/cli/')) {
+      if (channel !== 'socket') { req.resume(); return send(res, 404, 'not found'); }
+      return cliRoute(req, res, url);
+    }
 
     if (m === 'POST') {
       if (p === '/hooks') return hooks(req, res);
@@ -346,6 +510,10 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       if (mm) return floorSave(req, res, param(mm[1]));
       mm = /^\/api\/agents\/([^/]+)\/room$/.exec(p);
       if (mm) return agentRoom(req, res, param(mm[1]));
+      mm = /^\/api\/bubbles\/(enabled|instructions|grants|revoke)$/.exec(p);
+      if (mm) return bubblesWrite(req, res, mm[1]);
+      mm = /^\/api\/bubbles\/pending\/([^/]+)$/.exec(p);
+      if (mm) return bubblesPending(req, res, param(mm[1]));
       return send(res, 404, 'not found');
     }
     // GET only: a HEAD (e.g. a link preview) must not burn the one-time code.
@@ -353,6 +521,14 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     if (debug && m === 'GET' && p === '/api/debug/agents') {
       if (!d.auth.isOwner(req)) return send(res, 403, LOGIN_HINT);
       return send(res, 200, JSON.stringify(d.registry.list()), { 'content-type': 'application/json' });
+    }
+    if (m === 'GET' && p === '/api/bubbles') {
+      if (!readGuard(req, res)) return;
+      return sendJson(res, 200, d.bubbles.state());
+    }
+    if (m === 'GET' && p === '/api/log') {
+      if (!readGuard(req, res)) return;
+      return sendJson(res, 200, d.bubbles.log.query(logQuery(url)));
     }
     if (m === 'GET' || m === 'HEAD') {
       if (p === '/' || p.startsWith('/ui/')) {
@@ -363,8 +539,8 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     return send(res, 404, 'not found');
   }
 
-  return (req, res) => {
-    route(req, res).catch((err: unknown) => {
+  return (req, res, channel = 'tcp') => {
+    route(req, res, channel).catch((err: unknown) => {
       if (err instanceof HttpError) {
         // 413: Node drains the rest of the body after the response (closing early resets the
         // client mid-upload). Only reachable past the token/owner check; Node's requestTimeout bounds it.

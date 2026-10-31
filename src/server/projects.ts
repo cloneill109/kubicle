@@ -57,7 +57,7 @@ export class Projects {
     let name = basename(root) || root;
     if (rows.some((r) => r.name === name)) name = `${name} (${basename(dirname(root))})`;
     const order = rows.reduce((m, r) => Math.max(m, r.order), -1) + 1;
-    const row: ProjectRow = { id: root, name, order, slug: slugFor(root), approvals: 'off', archived: false, firstSeen: now };
+    const row: ProjectRow = { id: root, name, order, slug: slugFor(root), approvals: 'office', archived: false, firstSeen: now };
     this.#store.upsertProject(row);
     this.onCreate?.(row);
     return row;

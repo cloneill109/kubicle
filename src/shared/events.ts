@@ -24,7 +24,7 @@ export interface AgentEvent {
   model?: string;
   notificationType?: string;
   message?: string;
-  /** PermissionRequest only: the full tool_input as 2-space JSON, from the ORIGINAL payload (C1). */
+  /** PermissionRequest and PreToolUse: the full tool_input as 2-space JSON, from the ORIGINAL payload (C1). Never stored. */
   toolInput?: string;
   toolInputTruncated?: boolean;
   payload: string;
@@ -188,7 +188,7 @@ export function normalizeHook(raw: unknown, now: number, cap: number = DEFAULT_C
   const msg = str(raw.message);
   set('message', msg === undefined ? undefined : clip(msg, 500));
   if (toolName) e.activity = summarizeTool(toolName, raw.tool_input, cwd);
-  if (name === 'PermissionRequest' && raw.tool_input !== undefined) {
+  if ((name === 'PermissionRequest' || name === 'PreToolUse') && raw.tool_input !== undefined) {
     // What the owner approves must be exactly what runs: keep the whole input (capped), not the
     // one-line summary, and take it before truncatePayload cuts long strings.
     let json: string | undefined;

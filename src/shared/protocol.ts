@@ -1,5 +1,13 @@
-// Browser-safe: no Node-only imports.
+// Browser-safe: no Node-only imports (the Bubbles types below are type-only and erased).
 import type { Building } from './building.ts';
+import type { BubblesStatus, EscalateWhy } from '../server/bubbles/triage.ts';
+import type { Grant, Instruction, PendingChange } from '../server/bubbles/policy.ts';
+import type { LogEntry } from '../server/bubbles/log.ts';
+
+export type { BubblesStatus, EscalateWhy, Grant, Instruction, PendingChange, LogEntry };
+
+/** Bubbles' state as the office sees it: the `bubbles` message body, also in the snapshot and GET /api/bubbles. */
+export interface BubblesState { status: BubblesStatus; instructions: Instruction[]; grants: Grant[]; pending: PendingChange[] }
 
 export interface ProjectRow {
   id: string;
@@ -24,6 +32,8 @@ export interface PendingApproval {
   input?: string;
   /** The input was cut at the cap: the owner cannot review it here, so the office never offers Approve. */
   inputTruncated?: boolean;
+  /** Why Bubbles handed this to the owner (agent/model text: textContent only). */
+  bubbles?: { reason: string; recommendation?: string; why: EscalateWhy };
 }
 
 export interface AgentView {
@@ -48,6 +58,8 @@ export interface AgentView {
   /** Owner-set room (id) for this session; subagents follow their parent. */
   roomLabel?: string;
   approvals: 'off' | 'office'; // effective mode (session setting ?? project setting)
+  /** Bubbles is triaging this agent's permission request right now. */
+  bubblesThinking?: boolean;
   log: string[]; // newest first, max 20
 }
 
@@ -59,10 +71,12 @@ export interface FeedItem {
 }
 
 export type ServerMsg =
-  | { t: 'snapshot'; agents: AgentView[]; projects: ProjectRow[]; feed: FeedItem[]; banner: string | null; building: Building }
+  | { t: 'snapshot'; agents: AgentView[]; projects: ProjectRow[]; feed: FeedItem[]; banner: string | null; building: Building; bubbles: BubblesState }
   | { t: 'agent'; agent: AgentView }
   | { t: 'agentRemoved'; id: string; reason: 'ended' | 'expired' }
   | { t: 'feed'; item: FeedItem }
   | { t: 'projects'; projects: ProjectRow[] }
   | { t: 'banner'; text: string | null }
-  | { t: 'building'; building: Building };
+  | { t: 'building'; building: Building }
+  | ({ t: 'bubbles' } & BubblesState)
+  | { t: 'log'; entry: LogEntry };

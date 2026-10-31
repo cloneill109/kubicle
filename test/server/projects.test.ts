@@ -98,7 +98,7 @@ test('wings 0,1,2 in first-seen order, stable across new Projects', () => {
     const rows = dirs.map((d, i) => p.resolve(d, 100 + i));
     assert.deepEqual(rows.map((r) => r.order), [0, 1, 2]);
     assert.deepEqual(rows.map((r) => r.name), ['p0', 'p1', 'p2']);
-    assert.equal(rows[0].approvals, 'off');
+    assert.equal(rows[0].approvals, 'office'); // Bubbles: Kubicle handles approvals by default
     assert.equal(rows[0].archived, false);
     assert.equal(rows[0].id, dirs[0]);
     const p2 = new Projects(store);

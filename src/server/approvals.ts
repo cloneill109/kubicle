@@ -1,5 +1,5 @@
 import type { AgentEvent } from '../shared/events.ts';
-import type { AgentView } from '../shared/protocol.ts';
+import type { AgentView, PendingApproval } from '../shared/protocol.ts';
 import type { Config } from './config.ts';
 import type { Registry } from './registry.ts';
 
@@ -7,7 +7,9 @@ export type Decision = 'allow' | 'deny';
 
 const RESOLVED_MAX = 500;
 
-interface PendingBase { id: string; toolName: string; activity: string; since: number; input?: string; inputTruncated?: boolean }
+export type BubblesNote = NonNullable<PendingApproval['bubbles']>;
+
+interface PendingBase { id: string; toolName: string; activity: string; since: number; input?: string; inputTruncated?: boolean; bubbles?: BubblesNote }
 
 interface Waiter {
   id: string;
@@ -75,7 +77,12 @@ export class Approvals {
     for (const w of [...this.#waiting.values()]) this.#release(w);
   }
 
-  request(e: AgentEvent): Promise<Decision | null> {
+  /**
+   * Waits for the office (if a UI is connected and the agent is opted in). Resolves with the owner's answer,
+   * or null when it falls to the terminal (timeout, release, supersede, cancel, truncated input, no UI).
+   * `note`: why Bubbles escalated, shown on the card.
+   */
+  request(e: AgentEvent, note?: BubblesNote): Promise<Decision | null> {
     const agentId = e.agentId ? `${e.sessionId}:${e.agentId}` : e.sessionId;
     const agent = this.#registry.get(agentId);
     if (!agent || agent.approvals === 'off' || !this.#uiConnected()) return Promise.resolve(null);
@@ -91,6 +98,7 @@ export class Approvals {
       since: agent.pending?.since ?? e.ts,
     };
     if (e.toolInput !== undefined) base.input = e.toolInput;
+    if (note) base.bubbles = { ...note };
     if (e.toolInputTruncated) {
       // The owner could not review all of it here, so never wait: the terminal prompt appears at once.
       // The panel still shows the (capped) input, marked "Answer this in the terminal".

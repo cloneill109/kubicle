@@ -179,3 +179,20 @@ test('I2: read-only openStore lists projects on a stage-1 schema (no room column
     assert.ok(!cols.includes('room'), 'not migrated');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('migration user_version 0 -> 1: every project becomes office once; a later explicit off survives reopening', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ao-store-'));
+  try {
+    const file = join(dir, 'office.db');
+    stage1Db(file, [{ id: '/p/a', name: 'a', wing: 0 }, { id: '/p/b', name: 'b', wing: 1 }]);
+    let st = openStore(file);
+    assert.deepEqual(st.listProjects().map((p) => p.approvals), ['office', 'office']);
+    assert.equal((st.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 1);
+    const a = st.listProjects()[0]!;
+    st.upsertProject({ ...a, approvals: 'off' });
+    st.close();
+    st = openStore(file);
+    assert.deepEqual(st.listProjects().map((p) => p.approvals), ['off', 'office']);
+    st.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

@@ -1,10 +1,17 @@
 import { spawn } from 'node:child_process';
-import { chmodSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { FeedItem } from '../shared/protocol.ts';
+import type { BubblesState, FeedItem } from '../shared/protocol.ts';
+import { loadBubblesConfig } from './bubbles/config.ts';
+import { BubblesLog } from './bubbles/log.ts';
+import { Policy } from './bubbles/policy.ts';
+import { makeRedactor } from './bubbles/redact.ts';
+import { ClaudeRunner } from './bubbles/runner.ts';
+import { Bubbles, type BubblesStatus, type Timeouts } from './bubbles/triage.ts';
+import { PermissionFlow } from './permission-flow.ts';
 import { Approvals } from './approvals.ts';
 import { ensureIngestToken, OwnerAuth } from './auth.ts';
 import { ensureHome, loadConfig, type Config } from './config.ts';
@@ -25,12 +32,30 @@ const SOCKET_PATH_MAX = 103;
 const PROBE_MS = 300;
 const ROOT = resolve(import.meta.dirname, '..', '..');
 
-/** The banner text: the hooks banner (if any), then the first building problem, never hidden behind it. */
-export function composeBanner(base: string | null, warnings: readonly string[]): string | null {
-  if (warnings.length === 0) return base;
-  const more = warnings.length > 1 ? ` (+${warnings.length - 1} more)` : '';
-  const building = `Building file problem: ${warnings[0]}${more}`;
-  return base === null ? building : `${base} · ${building}`;
+/** Banner items for Bubbles: config and log-mirror warnings, then a failing / off-duty / unavailable state. */
+export function bubblesBannerItems(status: BubblesStatus, configWarning: string | null, logWarning: string | null): string[] {
+  const out: string[] = [];
+  if (configWarning) out.push(`Bubbles config problem: ${configWarning}`);
+  if (logWarning) out.push(logWarning);
+  if (status.state === 'failing') out.push(`Bubbles is failing: ${status.detail} Requests go to you.`);
+  else if (status.state === 'off-duty') out.push(`Bubbles is off duty: ${status.detail} Requests go to you.`);
+  else if (status.state === 'unavailable') out.push(`Bubbles is unavailable: ${status.detail} Requests go to you.`);
+  return out;
+}
+
+/**
+ * The banner text, in order: the hooks banner (if any), then the first building problem (never hidden behind it),
+ * then the Bubbles items.
+ */
+export function composeBanner(base: string | null, warnings: readonly string[], bubbles: readonly string[] = []): string | null {
+  const parts: string[] = [];
+  if (base !== null) parts.push(base);
+  if (warnings.length > 0) {
+    const more = warnings.length > 1 ? ` (+${warnings.length - 1} more)` : '';
+    parts.push(`Building file problem: ${warnings[0]}${more}`);
+  }
+  parts.push(...bubbles);
+  return parts.length === 0 ? null : parts.join(' · ');
 }
 
 export interface RunningServer {
@@ -76,10 +101,14 @@ function listenSocket(server: Server, path: string): Promise<void> {
   });
 }
 
-export async function startServer(
-  cfg: Config,
-  opts: { openBrowser?: boolean; log?: (s: string) => void } = {},
-): Promise<RunningServer> {
+export interface StartOpts {
+  openBrowser?: boolean;
+  log?: (s: string) => void;
+  /** Test hooks: the `claude` binary (default KUBICLE_CLAUDE_BIN or `claude`), extra child env, triage timeouts. */
+  bubbles?: { bin?: string; env?: Record<string, string | undefined>; timeouts?: Partial<Timeouts> };
+}
+
+export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<RunningServer> {
   const log = opts.log ?? (() => {});
   if (Buffer.byteLength(cfg.hookSocket) > SOCKET_PATH_MAX) {
     throw new Error(`Hook socket path is too long (${Buffer.byteLength(cfg.hookSocket)} bytes, max ${SOCKET_PATH_MAX}): ${cfg.hookSocket}. Use a shorter KUBICLE_HOME.`);
@@ -97,6 +126,28 @@ export async function startServer(
   const approvals = new Approvals(registry, cfg, () => hub.count() > 0, (a) => hub.broadcast({ t: 'agent', agent: a }));
   hub.onEmpty(() => approvals.releaseAll()); // R12: nobody left to answer
 
+  // Bubbles: config is read once at start (no hot reload yet).
+  const { config: bubblesConfig, warning: bubblesConfigWarning } = loadBubblesConfig(cfg.home);
+  if (bubblesConfigWarning) log(bubblesConfigWarning);
+  const redact = makeRedactor(cfg.home);
+  const bubblesLog = new BubblesLog(store.db, cfg.home, redact);
+  const policy = new Policy(store.db, bubblesLog, { defaultEnabled: bubblesConfig.enabled });
+  const bubblesCwd = join(cfg.home, 'bubbles');
+  mkdirSync(bubblesCwd, { recursive: true, mode: 0o700 });
+  chmodSync(bubblesCwd, 0o700);
+  const runner = new ClaudeRunner({
+    bin: opts.bubbles?.bin ?? (process.env.KUBICLE_CLAUDE_BIN || 'claude'),
+    cwd: bubblesCwd,
+    ...(opts.bubbles?.env ? { env: opts.bubbles.env } : {}),
+  });
+  const bubbles = new Bubbles({
+    runner, log: bubblesLog, policy, config: () => bubblesConfig, redact,
+    ...(opts.bubbles?.timeouts ? { timeouts: opts.bubbles.timeouts } : {}),
+  });
+  const bubblesState = (): BubblesState => ({
+    status: bubbles.status(), instructions: policy.allInstructions(), grants: policy.grants(Date.now()), pending: policy.pending(),
+  });
+
   // Feed starts empty after a restart; oldest first internally, newest first in the snapshot.
   const feed: FeedItem[] = [];
   const pushFeed = (item: FeedItem) => { feed.push(item); if (feed.length > FEED_MAX) feed.shift(); };
@@ -109,21 +160,34 @@ export async function startServer(
   const building = new BuildingService(cfg.home);
   const setBanner = (now: number) => {
     const hooks = now - badTokenAt < cfg.bannerMs ? BAD_TOKEN_BANNER : staleBanner;
-    const next = composeBanner(hooks, building.snapshot().warnings);
+    const next = composeBanner(hooks, building.snapshot().warnings,
+      bubblesBannerItems(bubbles.status(), bubblesConfigWarning, bubblesLog.warning()));
     if (next !== banner) { banner = next; hub.broadcast({ t: 'banner', text: banner }); }
   };
 
   building.start(() => projects.list());
   building.onChange = (b) => { hub.broadcast({ t: 'building', building: b }); setBanner(Date.now()); };
   setBanner(Date.now()); // a file already broken at startup
+  const bubblesChanged = () => { hub.broadcast({ t: 'bubbles', ...bubblesState() }); setBanner(Date.now()); };
+  // status() fires onStatus on a change, and setBanner calls status(): guard the re-entry.
+  let inStatus = false;
+  bubbles.onStatus = () => {
+    if (inStatus) return;
+    inStatus = true;
+    try { bubblesChanged(); } finally { inStatus = false; }
+  };
+  bubblesLog.onAppend = (entry) => {
+    hub.broadcast({ t: 'log', entry });
+    setBanner(Date.now()); // the mirror warning may have appeared or cleared
+  };
 
   hub.onConnect((send) => send({
     t: 'snapshot', agents: registry.list(), projects: projects.list(), feed: [...feed].reverse(), banner,
-    building: building.snapshot(),
+    building: building.snapshot(), bubbles: bubblesState(),
   }));
 
   const server = createServer();
-  // The hook socket: the same handler, but ONLY POST /hooks; every other path is 404 (no UI, no API).
+  // The hook socket: the same handler, but ONLY POST /hooks and the CLI's /cli/* (no UI, no owner API).
   const sockServer = createServer();
   let port: number;
   try {
@@ -138,8 +202,16 @@ export async function startServer(
   const auth = new OwnerAuth(port);
   const url = `http://127.0.0.1:${port}`;
   const loginUrl = `${url}/login?code=${auth.newLoginCode()}`;
+  const flow = new PermissionFlow({
+    registry, approvals, policy, log: bubblesLog, bubbles, config: () => bubblesConfig, home: cfg.home, port,
+    uiConnected: () => hub.count() > 0,
+    projectName: (id) => projects.list().find((p) => p.id === id)?.name ?? id,
+    onAgent: (a) => hub.broadcast({ t: 'agent', agent: a }),
+    onError: log,
+  });
   const handler = createHandler({
-    cfg, ingestToken, auth, store, writer, projects, registry, building, approvals, hub, pushFeed, rootDir: ROOT, port, log,
+    cfg, ingestToken, auth, store, writer, projects, registry, building, approvals, hub, pushFeed, rootDir: ROOT, port, log, flow,
+    bubbles: { policy, log: bubblesLog, state: bubblesState, ownerToggledOn: () => bubbles.ownerToggledOn(), changed: bubblesChanged },
     onBadToken: () => {
       badTokenCount++;
       if (badTokenCount === 1 || badTokenCount % 100 === 0) log(`hooks: ${badTokenCount} request(s) with a wrong ingest token`);
@@ -149,7 +221,9 @@ export async function startServer(
   });
   server.on('request', handler);
   sockServer.on('request', (req, res) => {
-    if (req.method === 'POST' && (req.url ?? '').split('?')[0] === '/hooks') return handler(req, res);
+    const path = (req.url ?? '').split('?')[0]!;
+    if (req.method === 'POST' && path === '/hooks') return handler(req, res, 'socket');
+    if (path.startsWith('/cli/')) return handler(req, res, 'socket');
     req.resume(); // drop any body
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8', 'content-length': 9 });
     res.end('not found');

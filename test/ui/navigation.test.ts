@@ -16,7 +16,8 @@ const v = (id: string, o: Partial<AgentView> = {}): AgentView => ({
 const proj = (id: string, order: number, o: Partial<ProjectRow> = {}): ProjectRow => ({ id, name: id.slice(1), order, slug: id.slice(1), approvals: 'off', archived: false, firstSeen: 0, ...o });
 const bld = (ids: string[]): Building => ({ divisions: DIVS, floors: Object.fromEntries(ids.map((id) => [id, defaultFloor()])), warnings: [] });
 const snap = (agents: AgentView[], projects: ProjectRow[] = [proj('/a', 0), proj('/b', 1)]): ServerMsg =>
-  ({ t: 'snapshot', agents, projects, feed: [], banner: null, building: bld(projects.map((p) => p.id)) });
+  ({ t: 'snapshot', agents, projects, feed: [], banner: null, building: bld(projects.map((p) => p.id)),
+    bubbles: { status: { state: 'on', detail: '', callsToday: 0, cap: 300, thinking: 0 }, instructions: [], grants: [], pending: [] } });
 const pend = (since: number) => ({ id: `p${since}`, toolName: 'Bash', activity: 'x', since, answerable: true });
 
 test('floorBadges counts agents and needs-you per project (unassigned under "")', () => {

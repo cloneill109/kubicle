@@ -84,6 +84,16 @@ export class Policy {
     return rows.map(toInstr);
   }
 
+  /** Every active instruction, global and per project, oldest first (the office list). */
+  allInstructions(): Instruction[] {
+    const rows = this.db.prepare(
+      `SELECT i.* FROM bubbles_instructions i
+       WHERE i.revoked_at IS NULL
+         AND i.version = (SELECT MAX(version) FROM bubbles_instructions WHERE id = i.id)
+       ORDER BY i.created_at, i.rowid`).all() as unknown as InstrRow[];
+    return rows.map(toInstr);
+  }
+
   pending(): PendingChange[] {
     const rows = this.db.prepare('SELECT id, created_at, json FROM bubbles_pending WHERE created_at > ? ORDER BY created_at, rowid')
       .all(this.now() - PENDING_TTL_MS) as unknown as { id: string; created_at: number; json: string }[];

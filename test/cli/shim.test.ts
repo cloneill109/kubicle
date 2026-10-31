@@ -12,6 +12,11 @@ import { fileURLToPath } from 'node:url';
 import { hookResponse } from '../../src/server/approvals.ts';
 import { GUARD_ASK, guardResponse } from '../../src/server/permission-flow.ts';
 
+// Bubbles triage runs on every PermissionRequest now: never the real claude here. The fake escalates by
+// default, so these office-approval tests still reach the owner.
+process.env.KUBICLE_CLAUDE_BIN = join(import.meta.dirname, '..', 'fixtures', 'fake-claude.mjs');
+process.env.FAKE_CLAUDE_MODE ??= 'escalate';
+
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const SHIM = join(root, 'bin', 'kubicle-hook');
 const fixture = readFileSync(join(root, 'test', 'fixtures', 'hooks', 'PreToolUse.json'), 'utf8');
@@ -266,13 +271,13 @@ test('I2: real server, opted-in wait with heartbeat: decision still delivered af
   }
 });
 
-test('I2: real server, not opted in: perm shim returns at once with nothing', async () => {
+test('I2: real server, no office open: perm shim returns quickly with nothing (after Bubbles escalates)', async () => {
   const home = realpathSync(mkdtempSync('/tmp/ksr-'));
   const srv = await startOffice({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 });
   try {
     const r = await runShim({ KUBICLE_HOME: home }, ['140', 'perm'], permFixture);
     assert.equal(r.stdout, '');
-    assert.ok(r.ms < 500, `took ${r.ms}ms`);
+    assert.ok(r.ms < 2000, `took ${r.ms}ms`); // one fake-claude spawn, then the terminal
   } finally {
     await srv.close();
     rmSync(home, { recursive: true, force: true });

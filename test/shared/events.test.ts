@@ -171,7 +171,12 @@ test('C1: truncation never splits a surrogate pair; a 2 MB input stays fast', ()
   assert.ok(performance.now() - t0 < 500, `took ${performance.now() - t0}ms`);
 });
 
-test('C1: only PermissionRequest carries tool input', () => {
+test('C1: PermissionRequest and PreToolUse (the guard) carry tool input; other events do not', () => {
   const e = normalizeHook({ ...fx('PreToolUse'), tool_input: { command: 'ls' } }, 1)!;
-  assert.equal(e.toolInput, undefined);
+  assert.equal(e.toolInput, JSON.stringify({ command: 'ls' }, null, 2));
+  const big = normalizeHook({ ...fx('PreToolUse'), tool_name: 'Write', tool_input: { content: 'y'.repeat(9 * 1024) } }, 1)!;
+  assert.equal(big.toolInputTruncated, true);
+  assert.equal(big.toolInput!.length, 8192);
+  const post = normalizeHook({ ...fx('PreToolUse'), hook_event_name: 'PostToolUse', tool_input: { command: 'ls' } }, 1)!;
+  assert.equal(post.toolInput, undefined);
 });

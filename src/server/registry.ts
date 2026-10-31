@@ -340,6 +340,14 @@ export class Registry {
     return snap(a);
   }
 
+  /** Bubbles is (or stopped) triaging this agent's request. */
+  setThinking(agentId: string, on: boolean): AgentView | undefined {
+    const a = this.#agents.get(agentId);
+    if (!a) return undefined;
+    if (on) a.bubblesThinking = true; else delete a.bubblesThinking;
+    return snap(a);
+  }
+
   /** The owner answered from the office: the prompt is gone and the agent carries on. */
   answered(agentId: string): AgentView | undefined {
     const a = this.#agents.get(agentId);
