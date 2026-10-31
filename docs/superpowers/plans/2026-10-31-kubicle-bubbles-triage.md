@@ -27,7 +27,7 @@
   - CLI exit codes: `0` ok, `1` error, `2` usage, `3` conflict.
 - **No Anthropic API, API key or Agent SDK anywhere.** Model calls are `claude -p` child processes only. The binary is `claude` on `PATH`, overridable by `KUBICLE_CLAUDE_BIN` (tests use a fake).
 - **Hook socket:** `<home>/run/hook.sock`, inside `<home>/run` (mode `0700`). The server refuses to start if the socket path is longer than 103 bytes, with an error naming the path. Tests use short `mkdtemp` homes under `/tmp`. A stale socket file that no one answers is unlinked at start. A live one fails the start with `Kubicle is already running`.
-- **Bubbles invocation:** `claude -p --model <alias> --tools "" --strict-mcp-config --settings '{"disableAllHooks":true}' --system-prompt <prompt> --output-format json`, with:
+- **Bubbles invocation:** `claude -p --model <alias> --tools "" --strict-mcp-config --setting-sources "" --settings '{"disableAllHooks":true}' --system-prompt <prompt> --output-format json`, with:
   - `cwd` = `<home>/bubbles` (`0700`, empty);
   - env = process env plus `KUBICLE_AGENT=bubbles` (the shim already exits on `KUBICLE_AGENT`);
   - the request goes on stdin;
