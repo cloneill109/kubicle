@@ -6,7 +6,7 @@ import { Sim } from './sim/agents.ts';
 import { STYLES, preferredSize, type Renderer, type StyleId, type SimAgent } from './render/types.ts';
 import { drawOverlays, type SignRect } from './render/overlays.ts';
 import { ROLE, roleColor } from './render/sprite.ts';
-import { OfficeState, titleFor, liveWings, moveWing, type Change } from './state.ts';
+import { OfficeState, titleFor, liveWings, moveWing, pickNeedsYou, shouldAutoSelect, type Change } from './state.ts';
 import { Inspector, post, roleLabel } from './panel.ts';
 
 const STYLE_KEY = 'agent-office-style';
@@ -134,12 +134,40 @@ function renderCounts(): void {
     s.append(b, ` ${label}`);
     return s;
   };
-  $('counts').replaceChildren(chip(sessions, 'sessions'), chip(subagents, 'subagents'), chip(needYou, 'need you', needYou > 0));
+  // "need you" is a button (I5): it jumps to the oldest agent waiting on the owner.
+  const need = document.createElement('button');
+  need.type = 'button';
+  need.className = `chip needyou${needYou > 0 ? ' warn' : ''}`;
+  need.disabled = needYou === 0;
+  need.title = needYou > 0 ? 'Show the agent that has waited longest for you' : 'Nobody is waiting on you';
+  const nb = document.createElement('b'); nb.textContent = String(needYou);
+  need.append(nb, ' need you');
+  need.addEventListener('click', jumpToNeedsYou);
+  $('counts').replaceChildren(chip(sessions, 'sessions'), chip(subagents, 'subagents'), need);
   document.title = titleFor(needYou);
   // Only after the server has told us the floor is empty (not while connecting).
   $('emptyFloor').hidden = !gotSnapshot || state.agents.size > 0;
 }
 let gotSnapshot = false;
+
+/** Scroll the map box (and the page, if needed) so an agent is on screen. */
+function revealAgent(id: string): void {
+  const a = sim.agents().find((x) => x.view.id === id);
+  if (!a) return;
+  const c = R.center(a);
+  const vis = scroller.clientWidth;
+  if (c.x < scroller.scrollLeft + 20 || c.x > scroller.scrollLeft + vis - 20) scroller.scrollLeft = Math.max(0, c.x - vis / 2);
+  const y = canvas.getBoundingClientRect().top + c.y;
+  if (y < 40 || y > window.innerHeight - 40) window.scrollBy(0, y - window.innerHeight / 2);
+}
+
+function jumpToNeedsYou(): void {
+  const a = pickNeedsYou(state.agents.values());
+  if (!a) return;
+  closeMenu();
+  inspector.select(a.id);
+  revealAgent(a.id);
+}
 
 const timeFmt = (ts: number) => new Date(ts).toLocaleTimeString([], { hour12: false });
 function feedLi(f: FeedItem): HTMLLIElement {
@@ -347,6 +375,11 @@ function onMessage(m: ServerMsg): void {
   if (c.banner) renderBanner();
   if (c.upserted.length || c.removed.length) { renderCounts(); renderLegend(); }
   if (c.newlyWaiting.length) chime();
+  // A new approval the owner can answer here takes the inspector, unless one is already open there.
+  for (const a of c.newlyAnswerable) {
+    const cur = inspector.selectedId ? state.agents.get(inspector.selectedId) : undefined;
+    if (state.agents.get(a.id)?.pending?.answerable && shouldAutoSelect(cur, a)) inspector.select(a.id);
+  }
   if (c.firstSnapshot && !inspector.selectedId) {
     const first = [...state.agents.values()].find((a) => a.status === 'waiting') ?? [...state.agents.values()][0];
     if (first) inspector.select(first.id);

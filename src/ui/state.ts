@@ -12,6 +12,8 @@ export interface Change {
   removed: { view: AgentView; reason: 'ended' | 'expired' }[];
   /** Agents that just entered `waiting` (never on the first snapshot, never while staying waiting). */
   newlyWaiting: AgentView[];
+  /** Agents with an answerable approval the client has not seen before (never on the first snapshot). */
+  newlyAnswerable: AgentView[];
   projects: boolean;
   feed: FeedItem[];
   banner: boolean;
@@ -19,7 +21,7 @@ export interface Change {
   firstSnapshot: boolean;
 }
 
-const empty = (): Change => ({ upserted: [], removed: [], newlyWaiting: [], projects: false, feed: [], banner: false, snapshot: false, firstSnapshot: false });
+const empty = (): Change => ({ upserted: [], removed: [], newlyWaiting: [], newlyAnswerable: [], projects: false, feed: [], banner: false, snapshot: false, firstSnapshot: false });
 
 export class OfficeState {
   agents = new Map<string, AgentView>();
@@ -39,6 +41,7 @@ export class OfficeState {
         for (const a of m.agents) {
           const prev = this.agents.get(a.id);
           if (this.#hadSnapshot && a.status === 'waiting' && prev?.status !== 'waiting') c.newlyWaiting.push(a);
+          if (this.#hadSnapshot && isNewAnswerable(prev, a)) c.newlyAnswerable.push(a);
           c.upserted.push(a);
         }
         this.agents = next;
@@ -54,6 +57,7 @@ export class OfficeState {
       case 'agent': {
         const prev = this.agents.get(m.agent.id);
         if (m.agent.status === 'waiting' && prev?.status !== 'waiting') c.newlyWaiting.push(m.agent);
+        if (isNewAnswerable(prev, m.agent)) c.newlyAnswerable.push(m.agent);
         this.agents.set(m.agent.id, m.agent);
         c.upserted.push(m.agent);
         break;
@@ -90,6 +94,30 @@ export class OfficeState {
   }
 
   project(id: string): ProjectRow | undefined { return this.projects.find((p) => p.id === id); }
+}
+
+const answerableId = (a: AgentView | undefined): string | undefined => (a?.pending?.answerable ? a.pending.id : undefined);
+function isNewAnswerable(prev: AgentView | undefined, next: AgentView): boolean {
+  const id = answerableId(next);
+  return id !== undefined && id !== answerableId(prev);
+}
+
+/** The agent the "need you" chip jumps to: oldest answerable approval, else the oldest waiting agent. */
+export function pickNeedsYou(agents: Iterable<AgentView>): AgentView | undefined {
+  let best: AgentView | undefined;
+  let bestKey: [number, number] = [2, Infinity];
+  for (const a of agents) {
+    if (a.status !== 'waiting') continue;
+    const key: [number, number] = [a.pending?.answerable ? 0 : 1, a.pending?.since ?? a.lastSeen];
+    if (key[0] < bestKey[0] || (key[0] === bestKey[0] && key[1] < bestKey[1])) { best = a; bestKey = key; }
+  }
+  return best;
+}
+
+/** A new answerable approval takes the inspector unless the current selection has one open. */
+export function shouldAutoSelect(current: AgentView | undefined, incoming: AgentView): boolean {
+  if (current?.id === incoming.id) return false;
+  return !current?.pending?.answerable;
 }
 
 export function sameProjects(a: ProjectRow[], b: ProjectRow[]): boolean {

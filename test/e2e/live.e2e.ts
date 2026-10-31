@@ -36,6 +36,7 @@ after(async () => {
 });
 
 type Office = {
+  renderer(): { center(a: unknown): { x: number; y: number } };
   sim: { agents(): { view: { id: string; name: string; status: string }; anim: string; x: number; y: number }[] };
   center(id: string): { x: number; y: number };
   style(): string;
@@ -187,6 +188,47 @@ test('live office: state, approvals, wings, styles, narrow view, disconnect', as
   await page.waitForFunction(() => /Answer this in the terminal/.test(document.getElementById('iPending')!.innerText), null, { timeout: 3000 });
   assert.ok(await page.locator('#approve').isHidden(), 'no Approve for an unanswerable prompt');
   await postOk({ session_id: S1, hook_event_name: 'PostToolUse', cwd: alpha, tool_name: 'Bash', tool_input: { command: 'rm -rf build' }, tool_use_id: 't2' });
+
+  // ---- I5: approvals are hard to miss: auto-select, and the "need you" chip jumps to the agent ----
+  await page.setViewportSize({ width: 400, height: 900 });
+  await page.waitForTimeout(300);
+  await clickAgent(page, S1);
+  const hidden = hook({ session_id: S2, hook_event_name: 'PermissionRequest', cwd: beta, tool_name: 'Bash', tool_input: { command: 'make deploy' } });
+  // a new answerable approval takes the inspector when the selection has none open
+  await page.waitForFunction((id) => document.getElementById('inspector')!.dataset.agent === id, S2, { timeout: 5000 });
+  await clickAgent(page, S1); // the owner looks elsewhere...
+  // ...and scrolls the map away from S2
+  const away = await page.evaluate((id) => {
+    const sc = document.getElementById('mapScroll')!;
+    const a = window.__office.sim.agents().find((x) => x.view.id === id)!;
+    const cx = window.__office.renderer().center(a).x;
+    sc.scrollLeft = cx > sc.scrollWidth / 2 ? 0 : sc.scrollWidth;
+    window.scrollTo(0, document.body.scrollHeight);
+    const vy = document.getElementById('map')!.getBoundingClientRect().top + window.__office.renderer().center(a).y;
+    return { cx, left: sc.scrollLeft, w: sc.clientWidth, sw: sc.scrollWidth, vy, ih: window.innerHeight };
+  }, S2);
+  assert.ok(away.sw > away.w, `map scrolls horizontally at 400px (${JSON.stringify(away)})`);
+  assert.ok(away.vy < 0 || away.vy > away.ih, `S2 scrolled off screen ${JSON.stringify(away)}`);
+  const chipBtn = page.locator('#counts button.needyou');
+  assert.match(await chipBtn.innerText(), /1 need you/);
+  await chipBtn.click();
+  await page.waitForFunction((id) => document.getElementById('inspector')!.dataset.agent === id, S2, { timeout: 3000 });
+  await page.locator('#approve').waitFor({ state: 'visible', timeout: 3000 });
+  const shown = await page.evaluate((id) => {
+    const sc = document.getElementById('mapScroll')!;
+    const a = window.__office.sim.agents().find((x) => x.view.id === id)!;
+    const c = window.__office.renderer().center(a);
+    const r = document.getElementById('map')!.getBoundingClientRect();
+    return { cx: c.x, left: sc.scrollLeft, w: sc.clientWidth, vy: r.top + c.y, ih: window.innerHeight };
+  }, S2);
+  assert.ok(shown.cx >= shown.left && shown.cx <= shown.left + shown.w, `S2 scrolled into the map box ${JSON.stringify(shown)}`);
+  assert.ok(shown.vy >= 0 && shown.vy <= shown.ih, `S2 on screen vertically ${JSON.stringify(shown)}`);
+  await page.screenshot({ path: join(outDir, 'live-needyou-jump.png') });
+  await page.locator('#deny').click();
+  assert.equal(JSON.parse((await (await hidden).text()).trim()).hookSpecificOutput.decision.behavior, 'deny');
+  await page.waitForFunction(() => /0 need you/.test(document.getElementById('counts')!.innerText), null, { timeout: 5000 });
+  await page.setViewportSize({ width: 1400, height: 1000 });
+  await page.waitForTimeout(300);
 
   // ---- wing menu: rename and move via the door sign ----
   const signFor = async (suffix: string) => page.evaluate((s) => {
