@@ -544,3 +544,33 @@ test('pushMergeAction: grantable only for exactly one plain push to origin / one
     assert.ok(r === null || r.grantable === false, c);
   }
 });
+
+// ---- Task 7 review 3: local git steps in a grantable command take whitelisted flags only ----
+test('pushMergeAction: local git steps beside the push only take whitelisted flags', () => {
+  for (const c of ['git status -s && git push origin main', 'git log --oneline -n 5 && git push origin main', 'git log -3 --stat && git push origin main',
+    'git diff --cached --stat && git push origin main', 'git fetch origin && git push origin main', 'git fetch -p origin main && git push origin main',
+    'git add -A && git commit -q -m "ship it" && git push origin main', 'git commit -am wip && git push origin main', 'git show HEAD --name-only && git push origin main']) {
+    assert.equal(pm(c)?.grantable, true, c);
+  }
+  for (const c of ['git diff --output=.git/config && git push origin main', 'git fetch --upload-pack=/tmp/x origin && git push origin main',
+    'git log --output=.git/config && git push origin main', 'git show --output=/tmp/x HEAD && git push origin main', 'git diff --ext-diff && git push origin main',
+    'git diff --textconv && git push origin main', 'git log -O/tmp/order && git push origin main', 'git fetch origin +main:main && git push origin main',
+    'git fetch origin a:b && git push origin main', 'git fetch evil && git push origin main', 'git fetch --exec=/x origin && git push origin main',
+    'git commit --amend -m x && git push origin main', 'git commit -m x file && git push origin main', 'git add -p && git push origin main',
+    'git log -n x && git push origin main', 'git rev-parse HEAD && git push origin main', 'git describe && git push origin main',
+    'git push origin refs/tags/v1', 'git push origin HEAD:refs/remotes/origin/main']) {
+    const r = pm(c);
+    assert.ok(r === null || r.grantable === false, c); // a tag push is not protected at all (Task 2 rules)
+  }
+});
+
+test('pushMergeAction: refs/heads/X destinations match grants as X', () => {
+  assert.deepEqual([pm('git push origin refs/heads/main')?.hit.branch, pm('git push origin refs/heads/main')?.grantable], ['main', true]);
+  assert.deepEqual([pm('git push origin HEAD:refs/heads/master')?.hit.branch, pm('git push origin HEAD:refs/heads/master')?.grantable], ['master', true]);
+  const g = (branch: string | null): Grant[] => [{ id: 'g', projectId: 'P', action: 'push', branch, usesLeft: 1, expiresAt: Date.now() + 60_000, createdAt: 0, confirmedAt: 0, revokedAt: null }];
+  assert.ok(grantMatches(pm('git push origin refs/heads/main')!.hit, 'P', g('main'), Date.now()));
+  assert.equal(grantMatches(pm('git push origin HEAD:refs/heads/master')!.hit, 'P', g('main'), Date.now()), null);
+  // documented: a grant with branch null covers any branch; a branch-null hit only ever matches such a grant
+  assert.equal(grantMatches({ kind: 'push', branch: null, reason: 'x' }, 'P', g('main'), Date.now()), null);
+  assert.ok(grantMatches({ kind: 'push', branch: null, reason: 'x' }, 'P', g(null), Date.now()));
+});

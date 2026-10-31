@@ -477,3 +477,24 @@ test('a single-use grant for main covers exactly one plain push: anything more a
   assert.equal((await pre(s, 'one', 'git push origin main')).body, '');
   assert.equal((await pre(s, 'one', 'git push origin main')).body, GUARD_ASK);
 });
+
+test('local git steps with unsafe flags make a push ungrantable; refs/heads/main counts as main', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  await seen(s, 'lf');
+  assert.equal((await control(s, cookie, '/api/bubbles/grants', { projectId: s.cwd, action: 'push', branch: 'main', uses: 1, ttlMs: 60_000 })).status, 201);
+  const cmds = ['git diff --output=.git/config && git push origin main', 'git fetch --upload-pack=/tmp/x origin && git push origin main',
+    'git log --output=.git/config && git push origin main', 'git show --output=/tmp/x HEAD && git push origin main',
+    'git push origin HEAD:refs/heads/master'];
+  for (const c of cmds) {
+    const id = `tu-${c}`;
+    assert.equal((await pre(s, 'lf', c, { tool_use_id: id })).body, GUARD_ASK, c);
+    assert.equal((await perm(s, 'lf', c, { tool_use_id: id })).body.trim(), '', c);
+  }
+  assert.equal(s.fakeCalls(), 0);
+  const es = await logOf(s);
+  assert.ok(es.filter((e) => e.kind === 'guard').every((e) => e.outcome === 'ask'));
+  assert.deepEqual([...new Set(es.filter((e) => e.kind === 'triage').map((e) => e.outcome))], ['escalated:protected']);
+  assert.equal((await pre(s, 'lf', 'git push origin refs/heads/main')).body, '', 'refs/heads/main is main: the grant covers it once');
+  assert.equal((await pre(s, 'lf', 'git push origin refs/heads/main')).body, GUARD_ASK);
+});

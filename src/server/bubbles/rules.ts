@@ -899,7 +899,16 @@ export function pushMergeAction(toolName: string, input: unknown, ctx: RulesCtx)
       const cmd = typeof inp.command === 'string' ? inp.command : '';
       const p = classify(toolName, input, ctx, 'pm');
       if (!p || (p.kind !== 'push' && p.kind !== 'merge')) return null;
-      return { hit: p, grantable: grantableCmd(cmd) };
+      const g = grantableCmd(cmd);
+      if (!g) return { hit: p, grantable: false };
+      if (g.push !== undefined && p.kind === 'push') {
+        // Grant matching uses the one destination itself: `refs/heads/X` is X; any other `refs/...` is never grantable.
+        let dst = g.push.split(':').pop()!;
+        if (dst.startsWith('refs/heads/')) dst = dst.slice('refs/heads/'.length);
+        else if (dst.startsWith('refs/')) return { hit: p, grantable: false };
+        if (!isHeadLike(dst) && p.branch !== dst) return { hit: { ...p, branch: dst }, grantable: true };
+      }
+      return { hit: p, grantable: true };
     }
     const p = classify(toolName, input, ctx, 'pm');
     return p && (p.kind === 'push' || p.kind === 'merge') ? { hit: p, grantable: false } : null;
@@ -911,22 +920,57 @@ export function pushMergeAction(toolName: string, input: unknown, ctx: RulesCtx)
 const REPO_MOVE_OPT = /^(-C|--git-dir|--work-tree|-R|--repo)(=|$)/;
 // Global git options that change nothing about which repo/config is used.
 const GRANT_GIT_GLOBAL = new Set(['--no-pager', '--paginate', '-p', '-P', '--no-optional-locks']);
-// Other git subcommands a granted command may also run: local or read-only, they cannot move refs on a remote.
-const GRANT_GIT_LOCAL = new Set(['status', 'log', 'diff', 'show', 'fetch', 'rev-parse', 'add', 'commit', 'ls-files', 'describe']);
+// Other git steps a granted command may also run, each with a per-subcommand FLAG WHITELIST (no --output, no
+// --upload-pack/--exec, no ext-diff/textconv: nothing that writes a file or runs a program). `value` flags take the next word.
+const GRANT_LOCAL_FLAGS: Record<string, { flags: Set<string>; value?: Set<string>; numeric?: boolean; positional: 'any' | 'none' }> = {
+  status: { flags: new Set(['-s', '-b', '--short', '--branch', '--porcelain']), positional: 'any' },
+  log: { flags: new Set(['--oneline', '--stat', '--name-only', '--name-status', '--no-color', '--']), value: new Set(['-n']), numeric: true, positional: 'any' },
+  show: { flags: new Set(['--oneline', '--stat', '--name-only', '--name-status', '--no-color', '--']), value: new Set(['-n']), numeric: true, positional: 'any' },
+  diff: { flags: new Set(['--stat', '--name-only', '--name-status', '--no-color', '--cached', '--staged', '--']), positional: 'any' },
+  add: { flags: new Set(['-A', '-u', '--all', '--']), positional: 'any' },
+  commit: { flags: new Set(['-a', '-q', '--quiet']), value: new Set(['-m', '-am']), positional: 'none' },
+};
+const GRANT_FETCH_FLAGS = new Set(['--prune', '-p', '--quiet', '-q']);
+
+/** A local git step with only whitelisted flags. */
+function plainLocal(sub: string, args: string[]): boolean {
+  if (sub === 'fetch') {
+    const pos: string[] = [];
+    for (const a of args) { if (a.startsWith('-')) { if (!GRANT_FETCH_FLAGS.has(a)) return false; } else pos.push(a); }
+    if (pos.length > 2 || (pos.length >= 1 && pos[0] !== 'origin')) return false;
+    return pos.length < 2 || (REF_PART.test(pos[1]) && !pos[1].includes('..'));
+  }
+  const spec = GRANT_LOCAL_FLAGS[sub];
+  if (!spec) return false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (!a.startsWith('-') || a === '-') { if (spec.positional === 'none') return false; continue; }
+    if (spec.flags.has(a)) continue;
+    if (spec.numeric && /^-\d+$/.test(a)) continue;
+    if (spec.value?.has(a)) {
+      const v = args[i + 1];
+      if (v === undefined || (a === '-n' && !/^\d+$/.test(v))) return false;
+      i++;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
 const GRANT_PUSH_FLAGS = new Set(['-u', '--set-upstream', '-v', '--verbose', '-q', '--quiet', '--no-verify', '--progress', '-n', '--dry-run']);
 const GRANT_MERGE_FLAGS = new Set(['--no-ff', '--ff-only', '--ff', '--no-edit', '--squash', '--no-squash', '-q', '--quiet', '-v', '--verbose']);
 const GRANT_GH_MERGE_FLAGS = new Set(['--squash', '--merge', '--rebase', '--auto', '-s', '-m', '-r']);
 const REF_PART = /^[A-Za-z0-9._\/-]+$/;
 
-/** `git push origin <one refspec>`: no force/delete/mirror/all/tags, no `+`, no empty source. */
-function plainPush(args: string[]): boolean {
+/** `git push origin <one refspec>`: no force/delete/mirror/all/tags, no `+`, no empty source. Returns the refspec. */
+function plainPush(args: string[]): string | null {
   const pos: string[] = [];
   for (const a of args) {
-    if (a.startsWith('-')) { if (!GRANT_PUSH_FLAGS.has(a)) return false; } else pos.push(a);
+    if (a.startsWith('-')) { if (!GRANT_PUSH_FLAGS.has(a)) return null; } else pos.push(a);
   }
-  if (pos.length !== 2 || pos[0] !== 'origin') return false;
+  if (pos.length !== 2 || pos[0] !== 'origin') return null;
   const parts = pos[1].split(':');
-  return parts.length <= 2 && parts.every((x) => x !== '' && REF_PART.test(x) && !x.includes('..'));
+  return parts.length <= 2 && parts.every((x) => x !== '' && REF_PART.test(x) && !x.includes('..')) ? pos[1] : null;
 }
 
 /** `git merge <one branch>` with only harmless flags. */
@@ -948,41 +992,43 @@ function plainGhMerge(w: string[]): boolean {
  * one plain merge, in the session's own repo, alongside nothing but harmless programs and local git subcommands:
  * no write redirects or process substitution, no cd/-C/--git-dir/--work-tree/-R, no sensitive env, no wrappers.
  */
-function grantableCmd(cmd: string): boolean {
-  if (cmd.length > MAX_COMMAND_LEN) return false;
+function grantableCmd(cmd: string): { push?: string } | null {
+  const no = null;
+  if (cmd.length > MAX_COMMAND_LEN) return no;
   // same normalisation as classify(): fd duplication and /dev/null sinks are harmless
   const segs = segmentsOf(cmd.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' '));
   let invocations = 0;
+  let push: string | undefined;
   for (const s of segs) {
-    if (s.redirs.some((r) => /[>]/.test(r.op))) return false; // > >> >| &> <> and fd-prefixed forms
-    if (s.words.some((w) => /[<>]\(/.test(w))) return false;
+    if (s.redirs.some((r) => /[>]/.test(r.op))) return no; // > >> >| &> <> and fd-prefixed forms
+    if (s.words.some((w) => /[<>]\(/.test(w))) return no;
     let i = 0;
-    while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) { if (SENS_ENV.test(s.words[i])) return false; i++; }
+    while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) { if (SENS_ENV.test(s.words[i])) return no; i++; }
     const w = s.words.slice(i);
     if (w.length === 0) continue;
-    if (/[$`*?\[{]/.test(w[0])) return false;
+    if (/[$`*?\[{]/.test(w[0])) return no;
     const base = lc(basename(w[0]));
-    if (w.slice(1).some((x) => REPO_MOVE_OPT.test(x) || /^-C./.test(x))) return false;
+    if (w.slice(1).some((x) => REPO_MOVE_OPT.test(x) || /^-C./.test(x))) return no;
     if (base === 'gh') {
-      if (!plainGhMerge(w)) return false;
+      if (!plainGhMerge(w)) return no;
       invocations++;
       continue;
     }
     if (base === 'git' || base === 'hub' || /^git-[\w-]+$/.test(base)) {
       const gw = base.startsWith('git-') ? [base.slice(4), ...w.slice(1)] : w.slice(1);
       let j = 0;
-      while (j < gw.length && gw[j].startsWith('-')) { if (!GRANT_GIT_GLOBAL.has(gw[j])) return false; j++; }
+      while (j < gw.length && gw[j].startsWith('-')) { if (!GRANT_GIT_GLOBAL.has(gw[j])) return no; j++; }
       const sub = gw[j];
       const args = gw.slice(j + 1);
-      if (sub === 'push') { if (!plainPush(args)) return false; invocations++; }
-      else if (sub === 'merge') { if (!plainMerge(args)) return false; invocations++; }
-      else if (sub === undefined || !GRANT_GIT_LOCAL.has(sub)) return false;
+      if (sub === 'push') { const r = plainPush(args); if (r === null) return no; push = r; invocations++; }
+      else if (sub === 'merge') { if (!plainMerge(args)) return no; invocations++; }
+      else if (sub === undefined || !plainLocal(sub, args)) return no;
       continue;
     }
     if (HARMLESS.has(base)) continue;
-    return false;
+    return no;
   }
-  return invocations === 1;
+  return invocations === 1 ? (push !== undefined ? { push } : {}) : no;
 }
 
 function classify(toolName: string, input: unknown, ctx: RulesCtx, mode: 'all' | 'pm' | 'rest'): Protected | null {
