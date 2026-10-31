@@ -7,6 +7,7 @@ import type { FeedItem } from '../shared/protocol.ts';
 import { Approvals } from './approvals.ts';
 import { ensureIngestToken, OwnerAuth } from './auth.ts';
 import { ensureHome, loadConfig, type Config } from './config.ts';
+import { BuildingService } from './building/service.ts';
 import { createHandler } from './http.ts';
 import { Hub } from './hub.ts';
 import { Projects } from './projects.ts';
@@ -62,14 +63,21 @@ export async function startServer(
   let staleBanner: string | null = null;
   let badTokenAt = -Infinity;
   let badTokenCount = 0;
+  const building = new BuildingService(cfg.home);
   const setBanner = (now: number) => {
-    const next = now - badTokenAt < cfg.bannerMs ? BAD_TOKEN_BANNER : staleBanner;
+    const warning = building.snapshot().warnings[0];
+    const next = now - badTokenAt < cfg.bannerMs ? BAD_TOKEN_BANNER
+      : staleBanner ?? (warning !== undefined ? `Building file problem: ${warning}` : null);
     if (next !== banner) { banner = next; hub.broadcast({ t: 'banner', text: banner }); }
   };
 
+  building.start(() => projects.list());
+  building.onChange = (b) => { hub.broadcast({ t: 'building', building: b }); setBanner(Date.now()); };
+  setBanner(Date.now()); // a file already broken at startup
+
   hub.onConnect((send) => send({
     t: 'snapshot', agents: registry.list(), projects: projects.list(), feed: [...feed].reverse(), banner,
-    building: { divisions: [], floors: {}, warnings: [] }, // Task 7 wires BuildingService
+    building: building.snapshot(),
   }));
 
   const server = createServer();
@@ -77,6 +85,7 @@ export async function startServer(
   try {
     port = await listen(server, cfg.port);
   } catch (err) {
+    building.stop();
     writer.stop();
     store.close();
     throw err;
@@ -86,7 +95,7 @@ export async function startServer(
   const url = `http://127.0.0.1:${port}`;
   const loginUrl = `${url}/login?code=${auth.newLoginCode()}`;
   server.on('request', createHandler({
-    cfg, ingestToken, auth, store, writer, projects, registry, approvals, hub, pushFeed, rootDir: ROOT, port, log,
+    cfg, ingestToken, auth, store, writer, projects, registry, building, approvals, hub, pushFeed, rootDir: ROOT, port, log,
     onBadToken: () => {
       badTokenCount++;
       if (badTokenCount === 1 || badTokenCount % 100 === 0) log(`hooks: ${badTokenCount} request(s) with a wrong ingest token`);
@@ -131,6 +140,7 @@ export async function startServer(
       server.close(() => r());
       server.closeAllConnections();
     });
+    building.stop();
     writer.stop();
     store.close();
   })();

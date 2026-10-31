@@ -358,8 +358,8 @@ function currentFloor(): FloorDef {
 let worldKey = '';
 function syncWorld(): void {
   const floor = currentFloor();
-  // No divisions yet (server not wired to the building service): use the defaults, not "Unknown division" everywhere.
-  const divisions = building?.divisions.length ? building.divisions : DEFAULT_DIVISIONS;
+  // Defaults only until the first building arrives; an empty received list means the user deleted them all.
+  const divisions = building ? building.divisions : DEFAULT_DIVISIONS;
   const key = JSON.stringify([floor.rooms, divisions.map((d) => [d.id, d.color])]);
   if (key === worldKey) return;
   worldKey = key;

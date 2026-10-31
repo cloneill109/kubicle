@@ -2,7 +2,9 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, join, resolve, sep } from 'node:path';
 import { normalizeHook, type AgentEvent } from '../shared/events.ts';
-import { ID_RE } from '../shared/building.ts';
+import { ID_RE, type RoomDef } from '../shared/building.ts';
+import type { BuildingService } from './building/service.ts';
+import { BuildingFileError, RevisionConflict } from './building/files.ts';
 import type { AgentView, FeedItem, ServerMsg } from '../shared/protocol.ts';
 import { hookResponse, type Approvals } from './approvals.ts';
 import { checkIngest, type OwnerAuth } from './auth.ts';
@@ -46,6 +48,7 @@ export interface HttpDeps {
   writer: EventWriter;
   projects: Projects;
   registry: Registry;
+  building: BuildingService;
   approvals: Approvals;
   hub: Hub;
   pushFeed(item: FeedItem): void;
@@ -63,6 +66,7 @@ class HttpError extends Error {
   constructor(status: number, msg: string) { super(msg); this.status = status; }
 }
 
+const JSON_HDR = { 'content-type': 'application/json' };
 const BASE_HEADERS = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY' };
 
 function send(res: ServerResponse, status: number, body = '', headers: Record<string, string> = {}): void {
@@ -132,7 +136,10 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
   const debug = process.env.KUBICLE_DEBUG === '1'; // smoke-test aid; off by default
   // A new project appears during ingest (inside registry.apply): broadcast the list before the
   // agent update that references it, so clients already have its floor.
-  d.projects.onCreate = () => broadcast({ t: 'projects', projects: d.projects.list() });
+  d.projects.onCreate = () => {
+    d.building.refresh(); // so the new project's floor is in the building before clients see the project
+    broadcast({ t: 'projects', projects: d.projects.list() });
+  };
 
   function ingest(e: AgentEvent): void {
     // The full tool input is for the live approval card only; storage keeps the capped payload.
@@ -249,8 +256,43 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     if (Object.keys(patch).length === 0) return send(res, 400, 'empty patch');
     if (!d.projects.list().some((p) => p.id === id)) return send(res, 404, 'unknown project');
     const row = d.projects.update(id, patch);
+    d.building.refresh();
     broadcast({ t: 'projects', projects: d.projects.list() });
     send(res, 200, JSON.stringify(row), { 'content-type': 'application/json' });
+  }
+
+  async function floorSave(req: IncomingMessage, res: ServerResponse, projectId: string): Promise<void> {
+    if (!guard(req, res)) return;
+    const b = await readJson(req);
+    if (!isObj(b) || !Number.isInteger(b.baseRevision) || (b.baseRevision as number) < 0 || !Array.isArray(b.rooms)) {
+      return send(res, 400, JSON.stringify({ error: 'body must be { baseRevision: integer >= 0, rooms: array }' }), JSON_HDR);
+    }
+    try {
+      const stored = d.building.saveFloor(projectId, b.rooms as RoomDef[], b.baseRevision as number);
+      send(res, 200, JSON.stringify(stored), JSON_HDR);
+    } catch (err) {
+      if (err instanceof RevisionConflict) return send(res, 409, JSON.stringify({ error: 'conflict', current: err.current }), JSON_HDR);
+      if (err instanceof BuildingFileError) {
+        const status = err.message.endsWith('unknown or archived project') ? 404 : 400;
+        return send(res, status, JSON.stringify({ error: err.message }), JSON_HDR);
+      }
+      throw err;
+    }
+  }
+
+  async function agentRoom(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+    if (!guard(req, res)) return;
+    const b = await readJson(req);
+    if (!isObj(b) || !('room' in b) || (b.room !== null && typeof b.room !== 'string')) return send(res, 400, JSON.stringify({ error: 'room must be a string or null' }), JSON_HDR);
+    const agent = d.registry.get(id);
+    if (!agent) return send(res, 404, JSON.stringify({ error: 'unknown agent' }), JSON_HDR);
+    if (agent.kind !== 'session') return send(res, 400, JSON.stringify({ error: 'only sessions can be moved' }), JSON_HDR);
+    if (b.room !== null) {
+      const floor = d.building.snapshot().floors[agent.projectId];
+      if (!floor || !floor.rooms.some((r) => r.id === b.room)) return send(res, 400, JSON.stringify({ error: `no room "${b.room}" on this agent's floor` }), JSON_HDR);
+    }
+    broadcastAgents(d.registry.setRoomLabel(id, b.room));
+    send(res, 204);
   }
 
   function login(req: IncomingMessage, res: ServerResponse, url: URL): void {
@@ -297,6 +339,10 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       if (mm) return answer(req, res, param(mm[1]));
       mm = /^\/api\/projects\/([^/]+)$/.exec(p);
       if (mm) return projectPatch(req, res, param(mm[1]));
+      mm = /^\/api\/floors\/([^/]+)$/.exec(p);
+      if (mm) return floorSave(req, res, param(mm[1]));
+      mm = /^\/api\/agents\/([^/]+)\/room$/.exec(p);
+      if (mm) return agentRoom(req, res, param(mm[1]));
       return send(res, 404, 'not found');
     }
     // GET only: a HEAD (e.g. a link preview) must not burn the one-time code.

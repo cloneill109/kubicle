@@ -1,6 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -609,4 +609,126 @@ test('ingest reads x-kubicle-division / x-kubicle-room into the agent, ignoring 
   assert.equal(bad.agent.room, undefined);
   const snap = await c.waitFor((m) => m.t === 'snapshot');
   assert.ok(snap.t === 'snapshot' && snap.building && Array.isArray(snap.building.divisions));
+});
+
+// ---------------------------------------------------------------- building routes
+const floorPath = (id: string) => `/api/floors/${encodeURIComponent(id)}`;
+const BULLPEN = { id: 'bullpen', name: 'Bullpen', band: 'bottom', width: 14 };
+
+async function withProject(s: Srv, cookie: string) {
+  const proj = tmpHome();
+  await postHook(s, { ...fixture('SessionStart'), session_id: 'bs1', cwd: proj });
+  const c = await owner(s, cookie);
+  const snap = await c.waitFor((m) => m.t === 'snapshot');
+  assert.ok(snap.t === 'snapshot');
+  return { proj, c, snap };
+}
+
+function floorFiles(home: string): string[] {
+  try { return readdirSync(join(home, 'floors')); } catch { return []; }
+}
+
+test('snapshot carries the real building; floor save: 200 + building broadcast, stale 409 leaves file, invalid 400, no CSRF 403, unknown 404', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const { proj, c, snap } = await withProject(s, cookie);
+  assert.ok(snap.t === 'snapshot' && snap.building.divisions.length > 0);
+  const rooms = [{ id: 'qa', name: 'QA', division: 'qa', band: 'top', width: 12 }, BULLPEN];
+
+  assert.equal((await fetch(`${s.url}${floorPath(proj)}`, { method: 'POST', headers: { 'content-type': 'application/json', cookie, origin: s.url }, body: '{}' })).status, 403);
+  assert.deepEqual(floorFiles(s.home), []);
+
+  const ok = await control(s, cookie, floorPath(proj), { baseRevision: 0, rooms });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).revision, 1);
+  await c.waitFor((m) => m.t === 'building' && m.building.floors[proj]?.rooms.length === 2);
+  const file = join(s.home, 'floors', floorFiles(s.home)[0]!);
+  const before = readFileSync(file, 'utf8');
+
+  const stale = await control(s, cookie, floorPath(proj), { baseRevision: 0, rooms: [BULLPEN] });
+  assert.equal(stale.status, 409);
+  const body = await stale.json();
+  assert.equal(body.error, 'conflict');
+  assert.equal(body.current, 1);
+  assert.equal(readFileSync(file, 'utf8'), before);
+
+  const two = await control(s, cookie, floorPath(proj), { baseRevision: 1, rooms: [BULLPEN, BULLPEN] });
+  assert.equal(two.status, 400);
+  assert.equal(typeof (await two.json()).error, 'string');
+
+  for (const bad of [{ rooms: [] }, { baseRevision: -1, rooms: [] }, { baseRevision: 1.5, rooms: [] }, { baseRevision: 1, rooms: 'x' }, []]) {
+    assert.equal((await control(s, cookie, floorPath(proj), bad)).status, 400);
+  }
+  assert.equal((await control(s, cookie, floorPath('/nope'), { baseRevision: 0, rooms })).status, 404);
+  assert.equal((await control(s, cookie, '/api/floors/%E0%A4%A', { baseRevision: 0, rooms })).status, 400);
+
+  // a hand-broken target file: 400 and the file is untouched
+  writeFileSync(file, 'revision: [oops');
+  const broken = await control(s, cookie, floorPath(proj), { baseRevision: 1, rooms });
+  assert.equal(broken.status, 400);
+  assert.match((await broken.json()).error, /fix or delete/);
+  assert.equal(readFileSync(file, 'utf8'), 'revision: [oops');
+});
+
+test('POST /api/agents/:id/room: set, clear, invalid, unknown, subagent', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const { proj, c } = await withProject(s, cookie);
+  const id = 'bs1';
+  const path = `/api/agents/${id}/room`;
+  assert.equal((await control(s, cookie, path, { room: 'qa' })).status, 204);
+  const a = await c.waitFor(isAgent((x) => x.id === id && x.roomLabel === 'qa'));
+  assert.equal(a.agent.roomLabel, 'qa');
+  assert.equal((await control(s, cookie, path, { room: 'nope' })).status, 400);
+  assert.equal((await control(s, cookie, path, { room: 5 })).status, 400);
+  assert.equal((await control(s, cookie, path, {})).status, 400);
+  assert.equal((await control(s, cookie, '/api/agents/ghost/room', { room: null })).status, 404);
+  assert.equal((await fetch(`${s.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: '{"room":null}' })).status, 403);
+  assert.equal((await control(s, cookie, path, { room: null })).status, 204);
+  await c.waitFor(isAgent((x) => x.id === id && x.roomLabel === undefined && c.msgs.filter((m) => m.t === 'agent').length > 1));
+
+  // a room that only exists on another floor is refused: shrink this floor, then ask for qa
+  assert.equal((await control(s, cookie, floorPath(proj), { baseRevision: 0, rooms: [BULLPEN] })).status, 200);
+  assert.equal((await control(s, cookie, path, { room: 'qa' })).status, 400);
+  assert.equal((await control(s, cookie, path, { room: 'bullpen' })).status, 204);
+
+  // subagent ids can't be moved
+  await postHook(s, { ...fixture('SubagentStart'), session_id: 'bs1', cwd: proj });
+  const sub = c.msgs.map((m) => (m.t === 'agent' ? m.agent : null)).find((x) => x && x.kind === 'subagent');
+  if (sub) assert.equal((await control(s, cookie, `/api/agents/${encodeURIComponent(sub.id)}/room`, { room: null })).status, 400);
+});
+
+test('external floor edit reaches the WS within 1 s; corrupt file raises a banner that clears', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const { proj, c } = await withProject(s, cookie);
+  assert.equal((await control(s, cookie, floorPath(proj), { baseRevision: 0, rooms: [BULLPEN] })).status, 200);
+  const file = join(s.home, 'floors', floorFiles(s.home)[0]!);
+  const good = readFileSync(file, 'utf8');
+  await c.waitFor((m) => m.t === 'building' && m.building.floors[proj]?.rooms.length === 1);
+
+  writeFileSync(file, good.replace('revision: 1', 'revision: 2').replace('width: 14', 'width: 16'));
+  await c.waitFor((m) => m.t === 'building' && m.building.floors[proj]?.rooms[0]?.width === 16, 1000);
+
+  writeFileSync(file, 'revision: [oops');
+  const b = await c.waitFor((m) => m.t === 'banner' && !!m.text?.includes('Building file problem:'), 1500) as Extract<ServerMsg, { t: 'banner' }>;
+  assert.match(b.text!, /^Building file problem: /);
+  writeFileSync(file, good);
+  await c.waitFor((m) => m.t === 'banner' && m.text === null, 1500);
+  const c2 = await owner(s, cookie);
+  const snap = await c2.waitFor((m) => m.t === 'snapshot');
+  assert.ok(snap.t === 'snapshot' && snap.banner === null);
+});
+
+test('a new project gets a floor in the next building broadcast; archiving drops it', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  await c.waitFor((m) => m.t === 'snapshot');
+  const proj = tmpHome();
+  await postHook(s, { ...fixture('SessionStart'), session_id: 'np1', cwd: proj });
+  const b = await c.waitFor((m) => m.t === 'building' && !!m.building.floors[proj]);
+  assert.ok(b.t === 'building');
+  assert.equal((await control(s, cookie, `/api/projects/${encodeURIComponent(proj)}`, { archived: true })).status, 200);
+  await c.waitFor((m) => m.t === 'building' && !m.building.floors[proj]);
 });
