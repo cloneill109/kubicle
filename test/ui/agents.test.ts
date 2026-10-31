@@ -292,3 +292,30 @@ test('a subagent that arrives before its parent joins the parent once it appears
   const p = get(sim, 'p')!, s = get(sim, 'p:x')!;
   assert.ok(Math.hypot(s.x - p.x, s.y - p.y) < 2.5);
 });
+
+test('a standing session that gets a freed desk brings its subagent along', () => {
+  const w = floor();
+  const sim = new Sim(w);
+  for (let i = 0; i < 5; i++) sim.upsert(view({ id: `s${i}`, division: 'qa' }), 0, { place: true });
+  sim.upsert(view({ id: 's4:x', kind: 'subagent', parentId: 's4' }), 0, { place: true });
+  assert.equal(get(sim, 's4')!.desk, undefined, 's4 stands (qa has 4 desks)');
+  sim.remove('s0', 'ended', 0);
+  run(sim, 0, 60);
+  const p = get(sim, 's4')!, s = get(sim, 's4:x')!;
+  assert.equal(p.anim, 'seated');
+  const seat = seatOf(p.desk!);
+  assert.ok(Math.hypot(s.x - seat.x, s.y - seat.y) < 2.5, `subagent near the new seat (${s.x},${s.y} vs ${seat.x},${seat.y})`);
+});
+
+test('a session revived while leaving brings its subagent back next to it', () => {
+  const w = floor();
+  const sim = new Sim(w);
+  sim.upsert(view({ id: 'p', division: 'qa' }), 0, { place: true });
+  sim.upsert(view({ id: 'p:x', kind: 'subagent', parentId: 'p' }), 0, { place: true });
+  sim.remove('p', 'ended', 0);
+  sim.upsert(view({ id: 'p', division: 'imagegen' }), 0.1);
+  run(sim, 0.1, 60);
+  const p = get(sim, 'p')!, s = get(sim, 'p:x')!;
+  assert.equal(p.desk?.room, 'imagegen');
+  assert.ok(Math.hypot(s.x - p.x, s.y - p.y) < 2.5, `subagent next to revived parent (${s.x},${s.y} vs ${p.x},${p.y})`);
+});

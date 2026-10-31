@@ -114,7 +114,8 @@ export class Sim {
     if (a.mode === 'leaving') { // came back (e.g. a resumed session) before it got out
       a.mode = 'home'; a.fading = false; a.alpha = 1;
       this.#seat(a, false);
-      return this.#goHome(a);
+      this.#goHome(a);
+      return this.#rehomeChildren(a);
     }
     const moved = this.#roomOf(a) !== a.homeRoom || (v.kind === 'subagent' && v.parentId !== prev.parentId);
     if (moved) {
@@ -259,7 +260,7 @@ export class Sim {
     for (const a of this.#agents.values()) {
       if (a.mode === 'leaving' || a.desk || a.view.kind !== 'session' || this.#roomOf(a) !== room) continue;
       this.#seat(a, false);
-      if (a.desk) this.#goHome(a);
+      if (a.desk) { this.#goHome(a); this.#rehomeChildren(a); }
     }
   }
 
