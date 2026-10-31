@@ -94,12 +94,14 @@ test('PermissionRequest waits, PostToolUse clears pending', () => {
   assert.equal(reg.get('s1')!.pending, undefined);
 });
 
-test('existing pending (from Approvals) is kept on PermissionRequest; Stop clears', () => {
+test('PermissionRequest always replaces an earlier pending (M2); idle_prompt clears', () => {
   const { reg } = mk();
   reg.apply(ev('SessionStart'));
   reg.setPending('s1', { id: 'p', toolName: 'Bash', activity: 'x', since: 1, answerable: true });
-  reg.apply(ev('PermissionRequest', { toolName: 'Bash' }));
-  assert.equal(reg.get('s1')!.pending!.answerable, true);
+  reg.apply(ev('PermissionRequest', { toolName: 'Bash', activity: 'Bash(second)' }));
+  // Approvals upgrades the fresh pending to answerable when it actually waits.
+  assert.equal(reg.get('s1')!.pending!.answerable, false);
+  assert.equal(reg.get('s1')!.pending!.activity, 'Bash(second)');
   reg.apply(ev('Notification', { notificationType: 'idle_prompt' }));
   assert.equal(reg.get('s1')!.status, 'idle');
   assert.equal(reg.get('s1')!.pending, undefined);
@@ -279,4 +281,45 @@ test('subagent events keep parent working and lastSeen never goes backward', () 
   reg.apply(ev('PreToolUse', { agentId: 'a', toolName: 'T', activity: 'old', ts: 5 * MIN }));
   assert.equal(reg.get('s1')!.lastSeen, 10 * MIN);
   assert.equal(reg.get('s1:a')!.lastSeen, 10 * MIN);
+});
+
+test('M2: two consecutive PermissionRequests (not opted in) -> pending shows the second', () => {
+  const { reg } = mk();
+  reg.apply(ev('PermissionRequest', { id: 'pr1', toolName: 'Bash', activity: 'Bash(rm -rf a)', ts: 10 }));
+  reg.apply(ev('PermissionRequest', { id: 'pr2', toolName: 'Bash', activity: 'Bash(rm -rf b)', ts: 20 }));
+  const p = reg.get('s1')!.pending!;
+  assert.equal(p.id, 'pr2');
+  assert.equal(p.activity, 'Bash(rm -rf b)');
+  assert.equal(p.since, 20);
+});
+
+test('I3: waiting 31 min with unchanged transcript mtime -> lost, pending cleared, need-you drops', () => {
+  const { reg } = mk(() => 50);
+  reg.apply(ev('UserPromptSubmit', { ts: 0, transcriptPath: '/t' }));
+  reg.apply(ev('PermissionRequest', { ts: 1000, toolName: 'Bash', activity: 'Bash(x)' }));
+  assert.equal(reg.get('s1')!.status, 'waiting');
+  assert.equal(reg.list().filter((a) => a.status === 'waiting').length, 1);
+  assert.equal(reg.tick(10 * MIN).changed.length, 0, 'waiting does not go quiet');
+  const r = reg.tick(31 * MIN + 1000);
+  assert.equal(reg.get('s1')!.status, 'lost');
+  assert.equal(reg.get('s1')!.pending, undefined);
+  assert.equal(r.changed[0]!.status, 'lost');
+  assert.equal(reg.list().filter((a) => a.status === 'waiting').length, 0);
+});
+
+test('I3: waiting with advancing transcript mtime stays waiting; idle never ages', () => {
+  let m = 50;
+  const { reg } = mk(() => m);
+  reg.apply(ev('PermissionRequest', { ts: 0, toolName: 'Bash', activity: 'Bash(x)', transcriptPath: '/t' }));
+  reg.apply(ev('SessionStart', { sessionId: 'i', ts: 0, transcriptPath: '/t2' }));
+  m = 100;
+  reg.tick(31 * MIN);
+  assert.equal(reg.get('s1')!.status, 'waiting');
+  assert.ok(reg.get('s1')!.pending);
+  m = 150;
+  reg.tick(32 * MIN);
+  assert.equal(reg.get('s1')!.status, 'waiting');
+  reg.tick(33 * MIN); // unchanged since last tick
+  assert.equal(reg.get('s1')!.status, 'lost');
+  assert.equal(reg.get('i')!.status, 'idle');
 });

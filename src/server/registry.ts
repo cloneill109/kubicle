@@ -194,16 +194,16 @@ export class Registry {
           if (t.pending && t.pending.toolName === (e.toolName ?? '')) t.pending = undefined;
           break;
         case 'PermissionRequest':
+          // Always the newest request (M2): an earlier pending would show stale text. Approvals
+          // upgrades this one to answerable when it actually waits for the owner.
           setStatus(t, 'waiting');
-          if (!t.pending) {
-            t.pending = {
-              id: e.id,
-              toolName: e.toolName ?? '',
-              activity: e.activity ?? e.toolName ?? '',
-              since: e.ts,
-              answerable: false,
-            };
-          }
+          t.pending = {
+            id: e.id,
+            toolName: e.toolName ?? '',
+            activity: e.activity ?? e.toolName ?? '',
+            since: e.ts,
+            answerable: false,
+          };
           break;
         case 'Notification':
           if (e.notificationType === 'permission_prompt') {
@@ -254,6 +254,12 @@ export class Registry {
       }
     }
 
+    // Entering/staying in `waiting`: remember the transcript mtime so tick() can tell a prompt
+    // still on screen (transcript unchanged, but events keep coming) from a closed terminal (R17).
+    if (target && target.status === 'waiting' && this.#agents.has(target.id)) {
+      this.#quietMtime.set(target.id, this.#mtime(target));
+    }
+
     if (e.event === 'SessionEnd') {
       // Put the session itself first, matching the brief's expectation.
       removed.sort((a, b) => (a.id === e.sessionId ? -1 : b.id === e.sessionId ? 1 : 0));
@@ -287,7 +293,8 @@ export class Registry {
         continue;
       }
       let next: AgentStatus = a.status;
-      if (a.status === 'quiet' && idle > this.#cfg.lostMs) {
+      if ((a.status === 'quiet' || a.status === 'waiting') && idle > this.#cfg.lostMs) {
+        // waiting ages like quiet (R17): a terminal closed at a permission prompt sends nothing more.
         const cur = this.#mtime(a);
         if (cur === null || (this.#quietMtime.has(a.id) && cur === this.#quietMtime.get(a.id))) next = 'lost';
         else this.#quietMtime.set(a.id, cur); // transcript still changing: alive
@@ -298,6 +305,7 @@ export class Registry {
       }
       if (next !== a.status) {
         a.status = next;
+        if (next === 'lost') a.pending = undefined;
         changed.push(snap(a));
       }
     }
