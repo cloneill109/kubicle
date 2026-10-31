@@ -21,6 +21,14 @@ const FEED_MAX = 200;
 export const BAD_TOKEN_BANNER = 'Hooks are sending the wrong token. Re-run npm run install-hooks.';
 const ROOT = resolve(import.meta.dirname, '..', '..');
 
+/** The banner text: the hooks banner (if any), then the first building problem, never hidden behind it. */
+export function composeBanner(base: string | null, warnings: readonly string[]): string | null {
+  if (warnings.length === 0) return base;
+  const more = warnings.length > 1 ? ` (+${warnings.length - 1} more)` : '';
+  const building = `Building file problem: ${warnings[0]}${more}`;
+  return base === null ? building : `${base} · ${building}`;
+}
+
 export interface RunningServer {
   url: string;
   loginUrl: string;
@@ -59,15 +67,15 @@ export async function startServer(
   const feed: FeedItem[] = [];
   const pushFeed = (item: FeedItem) => { feed.push(item); if (feed.length > FEED_MAX) feed.shift(); };
   let banner: string | null = null;
-  // Banner: a wrong-token warning (any /hooks 401 within bannerMs) wins over the stale-hooks one.
+  // Banner: a wrong-token warning (any /hooks 401 within bannerMs) wins over the stale-hooks one;
+  // building file problems are appended to whichever shows.
   let staleBanner: string | null = null;
   let badTokenAt = -Infinity;
   let badTokenCount = 0;
   const building = new BuildingService(cfg.home);
   const setBanner = (now: number) => {
-    const warning = building.snapshot().warnings[0];
-    const next = now - badTokenAt < cfg.bannerMs ? BAD_TOKEN_BANNER
-      : staleBanner ?? (warning !== undefined ? `Building file problem: ${warning}` : null);
+    const hooks = now - badTokenAt < cfg.bannerMs ? BAD_TOKEN_BANNER : staleBanner;
+    const next = composeBanner(hooks, building.snapshot().warnings);
     if (next !== banner) { banner = next; hub.broadcast({ t: 'banner', text: banner }); }
   };
 

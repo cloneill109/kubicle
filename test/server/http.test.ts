@@ -735,3 +735,48 @@ test('a new project gets a floor in the next building broadcast; archiving drops
   assert.equal((await control(s, cookie, `/api/projects/${encodeURIComponent(proj)}`, { archived: true })).status, 200);
   await c.waitFor((m) => m.t === 'building' && !m.building.floors[proj]);
 });
+
+// ---------------------------------------------------------------- final review M6 / M8
+import { composeBanner } from '../../src/server/main.ts';
+
+test('M6: composeBanner appends building problems to any banner, with a (+N more) count', () => {
+  assert.equal(composeBanner(null, []), null);
+  assert.equal(composeBanner('Hooks stale.', []), 'Hooks stale.');
+  assert.equal(composeBanner(null, ['/a.yaml:3: bad']), 'Building file problem: /a.yaml:3: bad');
+  assert.equal(composeBanner('Hooks stale.', ['/a.yaml:3: bad', '/b.yaml: x', '/c.yaml: y']),
+    'Hooks stale. · Building file problem: /a.yaml:3: bad (+2 more)');
+});
+
+test('M6: a building problem shows beside the wrong-token banner, with a trimmed YAML reason', async () => {
+  const home = tmpHome();
+  mkdirSync(join(home, 'divisions'), { recursive: true });
+  const bad = join(home, 'divisions', 'qa.yaml');
+  writeFileSync(bad, 'id: qa\nname: [oops\n');
+  const s = await start(home);
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  const snap = await c.waitFor((m) => m.t === 'snapshot') as Extract<ServerMsg, { t: 'snapshot' }>;
+  assert.match(snap.banner!, new RegExp(`^Building file problem: ${bad.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\d+: [^\\n]+$`));
+  assert.doesNotMatch(snap.banner!, /column \d+:?$|:$/);
+  await postHook(s, fixture('PreToolUse'), null); // wrong token
+  const b = await c.waitFor((m) => m.t === 'banner' && !!m.text?.startsWith('Hooks are sending')) as Extract<ServerMsg, { t: 'banner' }>;
+  assert.equal(b.text, `Hooks are sending the wrong token. Re-run npm run install-hooks. · ${snap.banner}`);
+});
+
+test('M8: a 409 floor save broadcasts the on-disk floor before answering', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const { proj, c } = await withProject(s, cookie);
+  assert.equal((await control(s, cookie, floorPath(proj), { baseRevision: 0, rooms: [BULLPEN] })).status, 200);
+  await c.waitFor((m) => m.t === 'building' && m.building.floors[proj]?.revision === 1);
+  const file = join(s.home, 'floors', floorFiles(s.home)[0]!);
+  // someone else writes revision 2; the watcher debounces 100 ms, so only the save path can be faster
+  writeFileSync(file, readFileSync(file, 'utf8').replace('revision: 1', 'revision: 2').replace('width: 14', 'width: 16'));
+  const got = c.waitFor((m) => m.t === 'building' && m.building.floors[proj]?.revision === 2, 2000);
+  const r = await control(s, cookie, floorPath(proj), { baseRevision: 1, rooms: [BULLPEN] });
+  const at = Date.now();
+  assert.equal(r.status, 409);
+  const m = await got as Extract<ServerMsg, { t: 'building' }>;
+  assert.ok(Date.now() - at < 50, `building message ${Date.now() - at} ms after the 409`);
+  assert.equal(m.building.floors[proj]!.rooms[0]!.width, 16);
+});
