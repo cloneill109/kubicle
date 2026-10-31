@@ -53,7 +53,10 @@ function repo(name: string): string {
 function hook(body: Record<string, unknown>): Promise<Response> {
   return fetch(`${srv!.url}/hooks`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-office-token': srv!.ingestToken },
+    headers: {
+      'content-type': 'application/json', 'x-office-token': srv!.ingestToken,
+      ...(body.hook_event_name === 'PermissionRequest' ? { 'x-office-hook-kind': 'perm' } : {}),
+    },
     body: JSON.stringify({ transcript_path: join(tmp, 'none.jsonl'), ...body }),
   });
 }
@@ -151,7 +154,7 @@ test('live office: state, approvals, wings, styles, narrow view, disconnect', as
   await page.locator('#approve').click();
   const res = await pending;
   assert.equal(res.status, 200);
-  const body = await res.json() as { hookSpecificOutput: { decision: { behavior: string } } };
+  const body = JSON.parse((await res.text()).trim()) as { hookSpecificOutput: { decision: { behavior: string } } };
   assert.equal(body.hookSpecificOutput.decision.behavior, 'allow');
   await page.waitForFunction(() => /0 need you/.test(document.getElementById('counts')!.innerText), null, { timeout: 5000 });
   await page.waitForFunction(() => document.title === 'Agent Office', null, { timeout: 3000 });
@@ -167,7 +170,7 @@ test('live office: state, approvals, wings, styles, narrow view, disconnect', as
   assert.equal(await page.locator('#deny').isDisabled(), false, 'Deny stays enabled');
   await page.screenshot({ path: join(outDir, 'live-approval-too-long.png') });
   await page.locator('#deny').click();
-  const longBody = await (await long).json() as { hookSpecificOutput: { decision: { behavior: string } } };
+  const longBody = JSON.parse((await (await long).text()).trim()) as { hookSpecificOutput: { decision: { behavior: string } } };
   assert.equal(longBody.hookSpecificOutput.decision.behavior, 'deny');
   await page.waitForFunction(() => /0 need you/.test(document.getElementById('counts')!.innerText), null, { timeout: 5000 });
 

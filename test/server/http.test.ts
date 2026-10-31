@@ -50,6 +50,8 @@ async function login(s: Srv): Promise<string> {
 function postHook(s: Srv, body: unknown, token: string | null = s.ingestToken): Promise<Response> {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (token !== null) headers['x-office-token'] = token;
+  // What `office-hook 140 perm` sends: only such a caller can receive a decision.
+  if (typeof body === 'object' && body !== null && (body as { hook_event_name?: unknown }).hook_event_name === 'PermissionRequest') headers['x-office-hook-kind'] = 'perm';
   return fetch(`${s.url}/hooks`, { method: 'POST', headers, body: typeof body === 'string' ? body : JSON.stringify(body) });
 }
 
@@ -241,7 +243,7 @@ test('PermissionRequest for an opted-in session with UI waits; approve → allow
   assert.equal((await control(s, cookie, `/api/approvals/${id}`, { decision: 'allow' })).status, 204);
   const res = await hook;
   assert.equal(res.status, 200);
-  assert.equal(res.body, hookResponse('allow'));
+  assert.equal(res.body.trim(), hookResponse('allow'));
   await c.waitFor(isAgent((a) => a.id === 'sP' && a.pending === undefined));
   assert.equal((await control(s, cookie, `/api/approvals/${id}`, { decision: 'deny' })).status, 409);
 });
@@ -254,7 +256,7 @@ test('PermissionRequest deny path returns the deny response', async () => {
   const hook = postHook(s, perm('sD')).then((r) => r.text());
   const m = await c.waitFor(isAgent((a) => a.id === 'sD' && a.pending?.answerable === true));
   assert.equal((await control(s, cookie, `/api/approvals/${m.agent.pending!.id}`, { decision: 'deny' })).status, 204);
-  assert.equal(await hook, hookResponse('deny'));
+  assert.equal((await hook).trim(), hookResponse('deny'));
 });
 
 test('PermissionRequest with no UI connected returns empty immediately', async () => {
@@ -418,7 +420,7 @@ test('hook client disconnecting mid-wait makes the prompt unanswerable', async (
   const ac = new AbortController();
   const hook = fetch(`${s.url}/hooks`, {
     method: 'POST', signal: ac.signal,
-    headers: { 'content-type': 'application/json', 'x-office-token': s.ingestToken }, body: JSON.stringify(perm('sX2')),
+    headers: { 'content-type': 'application/json', 'x-office-token': s.ingestToken, 'x-office-hook-kind': 'perm' }, body: JSON.stringify(perm('sX2')),
   }).catch(() => 'aborted');
   const m = await c.waitFor(isAgent((a) => a.id === 'sX2' && a.pending?.answerable === true));
   c.msgs.length = 0; // only messages after the abort count
@@ -449,6 +451,50 @@ test('C1: the approval card gets the full tool input (padded Bash, MCP, truncate
   assert.equal((await control(s, cookie, `/api/approvals/${m.agent.pending!.id}`, { decision: 'allow' })).status, 422);
   assert.equal((await control(s, cookie, `/api/approvals/${m.agent.pending!.id}`, { decision: 'deny' })).status, 204);
   assert.equal((await hook).trim(), hookResponse('deny'));
+});
+
+test('I1/I2: PermissionRequest without the perm kind header never waits, even opted in with UI', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  await control(s, cookie, '/api/approvals-mode', { scope: 'session', id: 'sOld', mode: 'office' });
+  const t0 = performance.now();
+  const r = await fetch(`${s.url}/hooks`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-office-token': s.ingestToken }, body: JSON.stringify(perm('sOld')),
+  });
+  assert.equal(await r.text(), '');
+  assert.ok(performance.now() - t0 < 200);
+  await c.waitFor(isAgent((a) => a.id === 'sOld' && a.pending?.answerable === false));
+});
+
+test('I2: an opted-in wait streams heartbeat spaces, then the decision', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  await control(s, cookie, '/api/approvals-mode', { scope: 'session', id: 'sHB', mode: 'office' });
+  const chunks: { t: number; text: string }[] = [];
+  const t0 = performance.now();
+  const done = new Promise<void>((resolve, reject) => {
+    const body = JSON.stringify(perm('sHB'));
+    const req = httpRequest(`${s.url}/hooks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'x-office-token': s.ingestToken, 'x-office-hook-kind': 'perm' },
+    }, (res) => {
+      res.setEncoding('utf8');
+      res.on('data', (d: string) => chunks.push({ t: performance.now() - t0, text: d }));
+      res.on('end', () => resolve());
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+  const m = await c.waitFor(isAgent((a) => a.id === 'sHB' && a.pending?.answerable === true));
+  await sleep(1700);
+  assert.ok(chunks.length >= 2, `heartbeats arrived: ${chunks.length}`);
+  assert.ok(chunks.every((x) => x.text.trim() === ''), 'only whitespace before the answer');
+  assert.ok(chunks[0]!.t < 1000, `first byte within 1 s (${chunks[0]!.t})`);
+  assert.equal((await control(s, cookie, `/api/approvals/${m.agent.pending!.id}`, { decision: 'allow' })).status, 204);
+  await done;
+  assert.equal(chunks.map((x) => x.text).join('').trim(), hookResponse('allow'));
 });
 
 test('HEAD /login does not consume the code', async () => {

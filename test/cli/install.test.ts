@@ -38,15 +38,15 @@ test('planInstall keeps user hooks and adds ours', () => {
   const pre = out.hooks.PreToolUse;
   assert.equal(pre.length, 2);
   assert.equal(pre[0].hooks[0].command, '/usr/local/bin/mine');
-  assert.deepEqual(pre[1], { matcher: '*', hooks: [{ type: 'command', command: `'${SHIM}' 2`, timeout: 5 }] });
-  assert.deepEqual(out.hooks.SessionStart, [{ hooks: [{ type: 'command', command: `'${SHIM}' 2`, timeout: 5 }] }]);
-  assert.deepEqual(out.hooks.PermissionRequest, [{ matcher: '*', hooks: [{ type: 'command', command: `'${SHIM}' 140`, timeout: 150 }] }]);
+  assert.deepEqual(pre[1], { matcher: '*', hooks: [{ type: 'command', command: `'${SHIM}' 1`, timeout: 5 }] });
+  assert.deepEqual(out.hooks.SessionStart, [{ hooks: [{ type: 'command', command: `'${SHIM}' 1`, timeout: 5 }] }]);
+  assert.deepEqual(out.hooks.PermissionRequest, [{ matcher: '*', hooks: [{ type: 'command', command: `'${SHIM}' 140 perm`, timeout: 150 }] }]);
   for (const e of HOOK_EVENTS) assert.ok(out.hooks[e], e);
 });
 
 test('unquoted when path has no spaces', () => {
   const out = planInstall({}, '/x/bin/office-hook');
-  assert.equal(out.hooks.Stop[0].hooks[0].command, '/x/bin/office-hook 2');
+  assert.equal(out.hooks.Stop[0].hooks[0].command, '/x/bin/office-hook 1');
 });
 
 test('install twice deep-equals install once; does not mutate input', () => {
@@ -204,7 +204,7 @@ test('produced command actually executes for awkward paths', () => {
     writeFileSync(stub, '#!/bin/bash\necho "ran:$1"\n', { mode: 0o755 });
     const cmd = planInstall({}, stub).hooks.Stop[0].hooks[0].command;
     const r = spawnSync('bash', ['-c', cmd], { encoding: 'utf8' });
-    assert.equal(r.stdout.trim(), 'ran:2', cmd);
+    assert.equal(r.stdout.trim(), 'ran:1', cmd);
   }
 });
 

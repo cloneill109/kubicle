@@ -52,7 +52,7 @@ export function planInstall(settings: any, shimPath: string): any {
   for (const ev of HOOK_EVENTS) {
     const perm = ev === 'PermissionRequest';
     const group: any = {
-      hooks: [{ type: 'command', command: `${quote(shimPath)} ${perm ? 140 : 2}`, timeout: perm ? 150 : 5 }],
+      hooks: [{ type: 'command', command: `${quote(shimPath)} ${perm ? '140 perm' : 1}`, timeout: perm ? 150 : 5 }],
     };
     if (TOOL_EVENTS.has(ev)) group.matcher = '*';
     hooks[ev] = [...stripOurs(hooks[ev] ?? []), group];

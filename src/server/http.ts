@@ -13,6 +13,8 @@ import type { EventWriter, Store } from './store.ts';
 
 export const BODY_LIMIT = 2 * 1024 * 1024;
 export const BODY_TIMEOUT_MS = 10_000;
+/** Heartbeat while a PermissionRequest waits: 2 B/s, well above the shim's 1 B/s floor. */
+export const HEARTBEAT_MS = 500;
 export const LOGIN_HINT = 'This login link was already used. Restart the server for a new one.';
 const NAME_MAX = 80;
 const WING_MAX = 999;
@@ -155,14 +157,27 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       return;
     }
     let decision: 'allow' | 'deny' | null = null;
+    // Only a shim run as `office-hook <max> perm` can deliver a decision (I1). Anything else (an
+    // older install's command line) gets no office wait, so its terminal prompt appears at once.
+    const canDeliver = req.headers['x-office-hook-kind'] === 'perm';
     // Hook caller gone (curl killed/timed out): nobody can receive an answer, so hand the
     // prompt to the terminal instead of showing a dead "answer here" button for 120 s.
     res.once('close', () => { if (!res.writableEnded) d.approvals.release(agentKey(e)); });
+    // While the office waits, send a space every HEARTBEAT_MS (I2). The shim's curl gives up after
+    // ~3 s without bytes, so a frozen server never holds a session for the full hook timeout.
+    // Immediate answers (not opted in, no UI) finish before the first beat and stay byte-exact.
+    const beat = setInterval(() => {
+      if (res.destroyed || res.writableEnded) return;
+      if (!res.headersSent) res.writeHead(200, { ...BASE_HEADERS, 'content-type': 'application/json' });
+      res.write(' ');
+    }, HEARTBEAT_MS);
     try {
       ingest(e);
-      decision = await d.approvals.request(e);
+      if (canDeliver) decision = await d.approvals.request(e);
     } catch (err) { d.log(`approval failed: ${String(err)}`); }
+    finally { clearInterval(beat); }
     const body = hookResponse(decision);
+    if (res.headersSent) { if (!res.destroyed && !res.writableEnded) res.end(body); return; }
     send(res, 200, body, body ? { 'content-type': 'application/json' } : {});
   }
 
