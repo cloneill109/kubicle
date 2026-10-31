@@ -96,6 +96,10 @@ test('live office: state, approvals, wings, styles, narrow view, disconnect', as
   await page.goto(srv.loginUrl);
   await page.waitForFunction(() => !!window.__office && document.body.dataset.conn === 'open', null, { timeout: 10000 });
   assert.match(await counts(page), /0 sessions/);
+  // I4: an empty floor says why, instead of looking broken.
+  await page.locator('#emptyFloor').waitFor({ state: 'visible', timeout: 3000 });
+  assert.equal(await page.locator('#emptyFloor').innerText(), 'No sessions yet. Claude Code sessions started after install-hooks appear here.');
+  await page.screenshot({ path: join(outDir, 'live-empty.png') });
 
   // ---- two projects, a session with a subagent ----
   await postOk({ session_id: S1, hook_event_name: 'SessionStart', cwd: alpha, source: 'startup' });
@@ -106,6 +110,7 @@ test('live office: state, approvals, wings, styles, narrow view, disconnect', as
 
   await page.waitForFunction(() => /2 sessions/.test(document.getElementById('counts')!.innerText) && /1 subagents/.test(document.getElementById('counts')!.innerText), null, { timeout: 5000 });
   assert.match(await counts(page), /0 need you/);
+  assert.ok(await page.locator('#emptyFloor').isHidden(), 'hint gone once sessions appear');
   await page.waitForFunction(() => window.__office.world().rooms.filter((r) => r.id.endsWith('/alpha') || r.id.endsWith('/beta')).length === 2, null, { timeout: 5000 });
   await page.waitForFunction(() => document.querySelectorAll('#feed li').length >= 4, null, { timeout: 5000 });
   assert.match(await page.locator('#feed').innerText(), /SubagentStart/);

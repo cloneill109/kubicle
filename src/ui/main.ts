@@ -136,7 +136,10 @@ function renderCounts(): void {
   };
   $('counts').replaceChildren(chip(sessions, 'sessions'), chip(subagents, 'subagents'), chip(needYou, 'need you', needYou > 0));
   document.title = titleFor(needYou);
+  // Only after the server has told us the floor is empty (not while connecting).
+  $('emptyFloor').hidden = !gotSnapshot || state.agents.size > 0;
 }
+let gotSnapshot = false;
 
 const timeFmt = (ts: number) => new Date(ts).toLocaleTimeString([], { hour12: false });
 function feedLi(f: FeedItem): HTMLLIElement {
@@ -333,6 +336,7 @@ const sessionsFirst = (a: AgentView, b: AgentView) => (a.kind === b.kind ? 0 : a
 function onMessage(m: ServerMsg): void {
   const c = state.apply(m);
   const now = performance.now() / 1000;
+  if (c.snapshot && !gotSnapshot) { gotSnapshot = true; renderCounts(); }
   if (c.projects) { syncWorld(); renderArchived(); }
   for (const r of c.removed) {
     sim.remove(r.view.id, r.reason, now);

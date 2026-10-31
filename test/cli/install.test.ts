@@ -10,6 +10,9 @@ import { HOOK_EVENTS, planInstall, planUninstall, quote } from '../../src/cli/in
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CLI = join(root, 'src', 'cli', 'install.ts');
 const SHIM = '/opt/agent office/bin/office-hook';
+// I4: the install-time port and home are baked into every command.
+const ENV = { port: 4317, home: '/Users/me/.agent-office' };
+const PRE = 'AGENT_OFFICE_PORT=4317 AGENT_OFFICE_HOME=/Users/me/.agent-office';
 
 const userSettings = () => ({
   theme: 'dark',
@@ -32,45 +35,45 @@ test('HOOK_EVENTS has all 14', () => {
 });
 
 test('planInstall keeps user hooks and adds ours', () => {
-  const out = planInstall(userSettings(), SHIM);
+  const out = planInstall(userSettings(), SHIM, ENV);
   assert.equal(out.theme, 'dark');
   assert.deepEqual(out.permissions, { allow: ['Bash(ls)'] });
   const pre = out.hooks.PreToolUse;
   assert.equal(pre.length, 2);
   assert.equal(pre[0].hooks[0].command, '/usr/local/bin/mine');
-  assert.deepEqual(pre[1], { matcher: '*', hooks: [{ type: 'command', command: `'${SHIM}' 1`, timeout: 5 }] });
-  assert.deepEqual(out.hooks.SessionStart, [{ hooks: [{ type: 'command', command: `'${SHIM}' 1`, timeout: 5 }] }]);
-  assert.deepEqual(out.hooks.PermissionRequest, [{ matcher: '*', hooks: [{ type: 'command', command: `'${SHIM}' 140 perm`, timeout: 150 }] }]);
+  assert.deepEqual(pre[1], { matcher: '*', hooks: [{ type: 'command', command: `${PRE} '${SHIM}' 1`, timeout: 5 }] });
+  assert.deepEqual(out.hooks.SessionStart, [{ hooks: [{ type: 'command', command: `${PRE} '${SHIM}' 1`, timeout: 5 }] }]);
+  assert.deepEqual(out.hooks.PermissionRequest, [{ matcher: '*', hooks: [{ type: 'command', command: `${PRE} '${SHIM}' 140 perm`, timeout: 150 }] }]);
   for (const e of HOOK_EVENTS) assert.ok(out.hooks[e], e);
 });
 
 test('unquoted when path has no spaces', () => {
-  const out = planInstall({}, '/x/bin/office-hook');
-  assert.equal(out.hooks.Stop[0].hooks[0].command, '/x/bin/office-hook 1');
+  const out = planInstall({}, '/x/bin/office-hook', ENV);
+  assert.equal(out.hooks.Stop[0].hooks[0].command, `${PRE} /x/bin/office-hook 1`);
 });
 
 test('install twice deep-equals install once; does not mutate input', () => {
   const s = userSettings();
-  const once = planInstall(s, SHIM);
+  const once = planInstall(s, SHIM, ENV);
   assert.deepEqual(s, userSettings());
-  assert.deepEqual(planInstall(once, SHIM), once);
+  assert.deepEqual(planInstall(once, SHIM, ENV), once);
 });
 
 test('uninstall after install deep-equals original', () => {
-  assert.deepEqual(planUninstall(planInstall(userSettings(), SHIM)), userSettings());
-  assert.deepEqual(planUninstall(planInstall({}, SHIM)), {});
+  assert.deepEqual(planUninstall(planInstall(userSettings(), SHIM, ENV)), userSettings());
+  assert.deepEqual(planUninstall(planInstall({}, SHIM, ENV)), {});
 });
 
 test('uninstall keeps a user hook sharing a group with ours', () => {
-  const s = planInstall({}, SHIM);
+  const s = planInstall({}, SHIM, ENV);
   s.hooks.Stop[0].hooks.unshift({ type: 'command', command: 'echo hi' });
   const out = planUninstall(s);
   assert.deepEqual(out, { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo hi' }] }] } });
 });
 
 test('planInstall throws on non-object hooks', () => {
-  assert.throws(() => planInstall({ hooks: [] }, SHIM));
-  assert.throws(() => planInstall({ hooks: { Stop: 'x' } }, SHIM));
+  assert.throws(() => planInstall({ hooks: [] }, SHIM, ENV));
+  assert.throws(() => planInstall({ hooks: { Stop: 'x' } }, SHIM, ENV));
 });
 
 test('CLI install/uninstall roundtrip with backup, mode, token', () => {
@@ -90,6 +93,7 @@ test('CLI install/uninstall roundtrip with backup, mode, token', () => {
   const parsed = JSON.parse(text);
   assert.equal(parsed.hooks.PreToolUse.length, 2);
   assert.ok(parsed.hooks.Stop[1].hooks[0].command.includes('/bin/office-hook'));
+  assert.ok(parsed.hooks.Stop[1].hooks[0].command.startsWith(`AGENT_OFFICE_PORT=4317 AGENT_OFFICE_HOME=${home} `), 'I4: env from loadConfig baked in');
   assert.ok(existsSync(join(home, 'ingest-token')));
 
   const again = cli(['install', '--settings', file], home);
@@ -201,10 +205,10 @@ test('produced command actually executes for awkward paths', () => {
     const d = join(base, name, 'bin');
     mkdirSync(d, { recursive: true });
     const stub = join(d, 'office-hook');
-    writeFileSync(stub, '#!/bin/bash\necho "ran:$1"\n', { mode: 0o755 });
-    const cmd = planInstall({}, stub).hooks.Stop[0].hooks[0].command;
+    writeFileSync(stub, '#!/bin/bash\necho "ran:$1:$AGENT_OFFICE_PORT:$AGENT_OFFICE_HOME"\n', { mode: 0o755 });
+    const cmd = planInstall({}, stub, { port: 4999, home: join(base, 'my home') }).hooks.Stop[0].hooks[0].command;
     const r = spawnSync('bash', ['-c', cmd], { encoding: 'utf8' });
-    assert.equal(r.stdout.trim(), 'ran:1', cmd);
+    assert.equal(r.stdout.trim(), `ran:1:4999:${join(base, 'my home')}`, cmd);
   }
 });
 
@@ -233,4 +237,25 @@ test('backup keeps the ORIGINAL across repeated installs; no-op rewrites nothing
   assert.equal(statSync(file).mtimeMs, m2);
   assert.equal(readFileSync(file + '.agent-office.bak', 'utf8'), orig);
   void mtime;
+});
+
+test('I4: old command forms (no env, old args) are recognized: reinstall replaces, uninstall removes', () => {
+  const old = (args: string) => ({ type: 'command', command: `'${SHIM}' ${args}`, timeout: args === '140' ? 150 : 5 });
+  const s = userSettings() as any;
+  s.hooks.Stop.push({ hooks: [old('2')] });
+  s.hooks.PermissionRequest = [{ matcher: '*', hooks: [old('140')] }];
+  const out = planInstall(s, SHIM, ENV);
+  assert.equal(out.hooks.Stop.length, 2);
+  assert.equal(out.hooks.Stop[1].hooks[0].command, `${PRE} '${SHIM}' 1`);
+  assert.equal(out.hooks.PermissionRequest.length, 1);
+  assert.equal(out.hooks.PermissionRequest[0].hooks[0].command, `${PRE} '${SHIM}' 140 perm`);
+  assert.deepEqual(planUninstall(s), userSettings());
+});
+
+test('I4: reinstall with a different port/home replaces our entries (no duplicates)', () => {
+  const a = planInstall(userSettings(), SHIM, ENV);
+  const b = planInstall(a, SHIM, { port: 5000, home: '/tmp/other home' });
+  assert.equal(b.hooks.Stop.length, 2);
+  assert.equal(b.hooks.Stop[1].hooks[0].command, `AGENT_OFFICE_PORT=5000 AGENT_OFFICE_HOME='/tmp/other home' '${SHIM}' 1`);
+  assert.deepEqual(planUninstall(b), userSettings());
 });

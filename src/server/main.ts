@@ -17,6 +17,7 @@ const TICK_MS = 5_000;
 const PRUNE_MS = 3_600_000;
 const KEEP_EVENTS_MS = 7 * 86_400_000;
 const FEED_MAX = 200;
+export const BAD_TOKEN_BANNER = 'Hooks are sending the wrong token. Re-run npm run install-hooks.';
 const ROOT = resolve(import.meta.dirname, '..', '..');
 
 export interface RunningServer {
@@ -57,6 +58,14 @@ export async function startServer(
   const feed: FeedItem[] = [];
   const pushFeed = (item: FeedItem) => { feed.push(item); if (feed.length > FEED_MAX) feed.shift(); };
   let banner: string | null = null;
+  // Banner: a wrong-token warning (any /hooks 401 within bannerMs) wins over the stale-hooks one.
+  let staleBanner: string | null = null;
+  let badTokenAt = -Infinity;
+  let badTokenCount = 0;
+  const setBanner = (now: number) => {
+    const next = now - badTokenAt < cfg.bannerMs ? BAD_TOKEN_BANNER : staleBanner;
+    if (next !== banner) { banner = next; hub.broadcast({ t: 'banner', text: banner }); }
+  };
 
   hub.onConnect((send) => send({
     t: 'snapshot', agents: registry.list(), projects: projects.list(), feed: [...feed].reverse(), banner,
@@ -77,6 +86,12 @@ export async function startServer(
   const loginUrl = `${url}/login?code=${auth.newLoginCode()}`;
   server.on('request', createHandler({
     cfg, ingestToken, auth, store, writer, projects, registry, approvals, hub, pushFeed, rootDir: ROOT, port, log,
+    onBadToken: () => {
+      badTokenCount++;
+      if (badTokenCount === 1 || badTokenCount % 100 === 0) log(`hooks: ${badTokenCount} request(s) with a wrong ingest token`);
+      badTokenAt = Date.now();
+      setBanner(badTokenAt);
+    },
   }));
   hub.attach(server, auth);
 
@@ -86,7 +101,8 @@ export async function startServer(
       const gone = new Set(r.removed.map((x) => x.id));
       for (const a of r.changed) if (!gone.has(a.id)) hub.broadcast({ t: 'agent', agent: a });
       for (const x of r.removed) hub.broadcast({ t: 'agentRemoved', id: x.id, reason: x.reason });
-      if (r.banner !== banner) { banner = r.banner; hub.broadcast({ t: 'banner', text: banner }); }
+      staleBanner = r.banner;
+      setBanner(Date.now());
     } catch (err) { log(`tick failed: ${String(err)}`); }
   }, TICK_MS);
   tick.unref();

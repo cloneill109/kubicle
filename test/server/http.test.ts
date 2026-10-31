@@ -497,6 +497,32 @@ test('I2: an opted-in wait streams heartbeat spaces, then the decision', async (
   assert.equal(chunks.map((x) => x.text).join('').trim(), hookResponse('allow'));
 });
 
+test('I4: /hooks 401s raise the wrong-token banner (live and in the snapshot)', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  const snap = await c.waitFor((m) => m.t === 'snapshot') as Extract<ServerMsg, { t: 'snapshot' }>;
+  assert.equal(snap.banner, null);
+  assert.equal((await postHook(s, fixture('PreToolUse'), 'f'.repeat(64))).status, 401);
+  const b = await c.waitFor((m) => m.t === 'banner') as Extract<ServerMsg, { t: 'banner' }>;
+  assert.equal(b.text, 'Hooks are sending the wrong token. Re-run npm run install-hooks.');
+  const c2 = await owner(s, cookie);
+  const snap2 = await c2.waitFor((m) => m.t === 'snapshot') as Extract<ServerMsg, { t: 'snapshot' }>;
+  assert.equal(snap2.banner, 'Hooks are sending the wrong token. Re-run npm run install-hooks.');
+});
+
+test('I4: wrong-token banner beats the stale banner, then expires bannerMs after the last 401', async () => {
+  const s = await start(undefined, { bannerMs: 300 });
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  await c.waitFor((m) => m.t === 'snapshot');
+  assert.equal((await postHook(s, { ...fixture('UserPromptSubmit'), session_id: 'sBan' })).status, 200); // working
+  await postHook(s, fixture('PreToolUse'), null);
+  await c.waitFor((m) => m.t === 'banner' && m.text === 'Hooks are sending the wrong token. Re-run npm run install-hooks.');
+  // the server ticks every 5 s: once the 401 is older than bannerMs, the stale banner shows instead
+  await c.waitFor((m) => m.t === 'banner' && m.text === 'No hook events for 10 min. Are the hooks installed?', 7000);
+});
+
 test('HEAD /login does not consume the code', async () => {
   const s = await start();
   assert.equal((await fetch(s.loginUrl, { method: 'HEAD', redirect: 'manual' })).status, 404);

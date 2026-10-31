@@ -48,6 +48,8 @@ export interface HttpDeps {
   approvals: Approvals;
   hub: Hub;
   pushFeed(item: FeedItem): void;
+  /** A hook arrived with a missing or wrong ingest token (I4). */
+  onBadToken?(): void;
   /** Repo root: serves `src/ui/index.html`, `src/ui/styles.css`, `dist/ui/*`. */
   rootDir: string;
   /** Actual bound port (for the CSP connect-src). */
@@ -147,7 +149,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
   }
 
   async function hooks(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (!checkIngest(req, d.ingestToken)) return send(res, 401, 'unauthorized');
+    if (!checkIngest(req, d.ingestToken)) { d.onBadToken?.(); return send(res, 401, 'unauthorized'); }
     const raw = await readJson(req);
     const e = normalizeHook(raw, Date.now(), d.cfg.payloadCap);
     if (!e) return send(res, 400, 'not a hook event');
