@@ -1,0 +1,74 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  ID_RE, BULLPEN, DEFAULT_DIVISIONS, defaultFloor, validateFloor, resolveRoom,
+  type FloorDef, type RoomDef,
+} from '../../src/shared/building.ts';
+
+const ids = new Set(DEFAULT_DIVISIONS.map((d) => d.id));
+const room = (id: string, extra: Partial<RoomDef> = {}): RoomDef => ({ id, name: id, band: 'top', width: 12, ...extra });
+const floor = (rooms: RoomDef[]): FloorDef => ({ revision: 1, source: 'home', rooms });
+const bp = (): RoomDef => room(BULLPEN, { band: 'bottom', width: 14 });
+
+test('ID_RE and BULLPEN', () => {
+  assert.equal(BULLPEN, 'bullpen');
+  assert.ok(ID_RE.test('a') && ID_RE.test('0-x') && ID_RE.test('a'.repeat(32)));
+  assert.ok(!ID_RE.test('') && !ID_RE.test('-a') && !ID_RE.test('A') && !ID_RE.test('a'.repeat(33)) && !ID_RE.test('a_b'));
+});
+
+test('DEFAULT_DIVISIONS match constraints', () => {
+  assert.deepEqual(
+    DEFAULT_DIVISIONS.map((d) => [d.id, d.name, d.color]),
+    [
+      ['qa', 'QA', '#62c4a0'],
+      ['security', 'Cybersecurity', '#ec5f5f'],
+      ['uxui', 'UX/UI', '#d571d9'],
+      ['frontend', 'Front end', '#5b93f5'],
+      ['backend', 'Back end', '#2fb79c'],
+      ['animation', 'Animation', '#b98cf2'],
+      ['imagegen', 'Image gen', '#f38b3d'],
+    ],
+  );
+  for (const d of DEFAULT_DIVISIONS) assert.deepEqual(d.harness, {});
+});
+
+test('defaultFloor layout is valid', () => {
+  const f = defaultFloor();
+  assert.equal(f.revision, 0);
+  assert.equal(f.source, 'default');
+  assert.deepEqual(f.rooms.filter((r) => r.band === 'top').map((r) => r.id), ['qa', 'security', 'uxui', 'frontend']);
+  assert.deepEqual(f.rooms.filter((r) => r.band === 'bottom').map((r) => r.id), ['bullpen', 'backend', 'animation', 'imagegen']);
+  assert.equal(f.rooms.length, 8);
+  for (const r of f.rooms) assert.equal(r.width, r.id === 'bullpen' ? 14 : 12);
+  assert.equal(f.rooms.find((r) => r.id === 'bullpen')!.division, undefined);
+  assert.equal(f.rooms.find((r) => r.id === 'qa')!.division, 'qa');
+  assert.deepEqual(validateFloor(f, ids), []);
+  assert.notEqual(defaultFloor().rooms, f.rooms);
+});
+
+test('validateFloor errors', () => {
+  assert.deepEqual(validateFloor(floor([bp(), room('a'), room('a')]), ids), ['duplicate room id "a"']);
+  assert.deepEqual(validateFloor(floor([bp(), room('Bad_Id')]), ids), ['room id "Bad_Id" is invalid']);
+  assert.deepEqual(validateFloor(floor([bp(), room('a', { width: 7 })]), ids), ['width of "a" must be 8–24']);
+  assert.deepEqual(validateFloor(floor([bp(), room('a', { width: 25 })]), ids), ['width of "a" must be 8–24']);
+  assert.deepEqual(validateFloor(floor([bp(), room('a', { width: 8.5 })]), ids), ['width of "a" must be 8–24']);
+  assert.deepEqual(validateFloor(floor([room('a')]), ids), ['"bullpen" is missing']);
+  assert.deepEqual(validateFloor(floor([{ ...bp(), division: 'qa' }]), ids), ['"bullpen" cannot have a division']);
+  assert.deepEqual(validateFloor(floor([bp(), room('a', { band: 'left' as never })]), ids), ['band "left" is invalid']);
+});
+
+test('unknown division is not an error', () => {
+  assert.deepEqual(validateFloor(floor([bp(), room('a', { division: 'nope' })]), ids), []);
+});
+
+test('resolveRoom', () => {
+  const f = floor([bp(), room('fe1', { division: 'frontend' }), room('fe2', { division: 'frontend' }), room('qa', { division: 'qa' })]);
+  assert.equal(resolveRoom(f, { label: 'qa', room: 'fe2', division: 'frontend' }), 'qa');
+  assert.equal(resolveRoom(f, { room: 'fe2', division: 'qa' }), 'fe2');
+  assert.equal(resolveRoom(f, { division: 'frontend' }), 'fe1');
+  assert.equal(resolveRoom(f, { label: 'nope', room: 'fe2' }), 'fe2');
+  assert.equal(resolveRoom(f, { room: 'nope', division: 'nope' }), BULLPEN);
+  assert.equal(resolveRoom(f, {}), BULLPEN);
+  assert.equal(resolveRoom(f, { label: '', room: '', division: '' }), BULLPEN);
+  assert.equal(resolveRoom(f, { room: '__proto__', label: 'constructor' }), BULLPEN);
+});
