@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { OfficeState, titleFor, moveWing, FEED_MAX, pickNeedsYou, shouldAutoSelect } from '../../src/ui/state.ts';
+import { OfficeState, titleFor, moveFloor, FEED_MAX, pickNeedsYou, shouldAutoSelect } from '../../src/ui/state.ts';
 import type { AgentView, ProjectRow } from '../../src/shared/protocol.ts';
 
 const v = (id: string, o: Partial<AgentView> = {}): AgentView => ({
@@ -41,15 +41,15 @@ test('counts, removal and feed cap', () => {
   assert.equal(s.apply({ t: 'banner', text: 'hi' }).banner, false);
 });
 
-test('projects change detection and wing moves', () => {
+test('projects change detection and floor moves', () => {
   const s = new OfficeState();
   const ps = [proj('/a', 0), proj('/b', 1), proj('/c', 2, { archived: true }), proj('/d', 5)];
   assert.equal(s.apply({ t: 'projects', projects: ps }).projects, true);
   assert.equal(s.apply({ t: 'projects', projects: ps.map((p) => ({ ...p })) }).projects, false);
-  assert.deepEqual(moveWing(ps, '/a', -1), null);
-  assert.deepEqual(moveWing(ps, '/a', 1), { order: 1 });
-  assert.deepEqual(moveWing(ps, '/b', 1), { order: 5 }, 'skips archived wings');
-  assert.deepEqual(moveWing(ps, '/d', 1), null);
+  assert.deepEqual(moveFloor(ps, '/a', -1), null);
+  assert.deepEqual(moveFloor(ps, '/a', 1), { order: 1 });
+  assert.deepEqual(moveFloor(ps, '/b', 1), { order: 5 }, 'skips archived wings');
+  assert.deepEqual(moveFloor(ps, '/d', 1), null);
 });
 
 const pend = (id: string, since: number, answerable: boolean) => ({ id, toolName: 'Bash', activity: 'x', since, answerable });

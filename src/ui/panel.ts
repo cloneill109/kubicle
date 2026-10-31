@@ -30,12 +30,18 @@ export class Inspector {
   #routeBusy = { session: false, project: false };
   #routeNote = '';
   #logKey = '';
+  #roomBusy = false;
+  #roomNote = '';
+  #roomKey = '';
   #state: OfficeState;
   #simAgents: () => SimAgent[];
+  #rooms: (projectId: string) => { id: string; name: string }[];
 
-  constructor(state: OfficeState, simAgents: () => SimAgent[]) {
+  constructor(state: OfficeState, simAgents: () => SimAgent[], rooms: (projectId: string) => { id: string; name: string }[] = () => []) {
     this.#state = state;
     this.#simAgents = simAgents;
+    this.#rooms = rooms;
+    $<HTMLSelectElement>('iRoom').addEventListener('change', (e) => void this.#moveRoom((e.target as HTMLSelectElement).value));
     $('approve').addEventListener('click', () => void this.#answer('allow'));
     $('deny').addEventListener('click', () => void this.#answer('deny'));
     $<HTMLInputElement>('routeSession').addEventListener('change', (e) => void this.#route('session', (e.target as HTMLInputElement).checked));
@@ -47,6 +53,7 @@ export class Inspector {
     this.selectedId = id;
     this.#left = null;
     this.#routeNote = '';
+    this.#roomNote = '';
     this.#logKey = '';
     this.render(0);
   }
@@ -115,6 +122,24 @@ export class Inspector {
       ? 'Permission prompts from this session show up here while this page is open.'
       : 'Off: permission prompts appear in the terminal as usual.'));
 
+    // ---- move to room (sessions on a floor; subagents follow their parent) ----
+    const row = $('iMoveRow');
+    row.hidden = v.kind !== 'session' || !project;
+    if (!row.hidden) {
+      const sel = $<HTMLSelectElement>('iRoom');
+      const rooms = this.#rooms(v.projectId);
+      const key = v.projectId + '\n' + rooms.map((r) => `${r.id}=${r.name}`).join('\n');
+      if (key !== this.#roomKey) {
+        this.#roomKey = key;
+        const opt = (value: string, text: string) => { const o = document.createElement('option'); o.value = value; o.textContent = text; return o; };
+        sel.replaceChildren(opt('', 'Automatic'), ...rooms.map((r) => opt(r.id, r.name)));
+      }
+      const want = v.roomLabel && rooms.some((r) => r.id === v.roomLabel) ? v.roomLabel : '';
+      if (!this.#roomBusy && document.activeElement !== sel && sel.value !== want) sel.value = want;
+      sel.disabled = this.#roomBusy;
+      setText($('iRoomNote'), this.#roomNote);
+    }
+
     // ---- recent activity ----
     const logKey = v.log.slice(0, 8).join('\n');
     if (logKey !== this.#logKey) {
@@ -158,6 +183,23 @@ export class Inspector {
       st.busy = false;
     }
     st.note = note;
+    this.render(0);
+  }
+
+  async #moveRoom(room: string): Promise<void> {
+    const v = this.selectedId ? this.#state.agents.get(this.selectedId) : undefined;
+    if (!v || v.kind !== 'session') return;
+    this.#roomBusy = true;
+    this.#roomNote = '';
+    this.render(0);
+    try {
+      const r = await post(`/api/agents/${encodeURIComponent(v.id)}/room`, { room: room || null });
+      if (r.status !== 204) this.#roomNote = r.status === 400 ? 'That room is not on this floor any more.' : `Could not move them (HTTP ${r.status}).`;
+    } catch {
+      this.#roomNote = 'Could not reach the office server.';
+    }
+    this.#roomBusy = false;
+    if (this.#roomNote) { const cur = this.selectedId ? this.#state.agents.get(this.selectedId) : undefined; $<HTMLSelectElement>('iRoom').value = cur?.roomLabel ?? ''; }
     this.render(0);
   }
 

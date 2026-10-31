@@ -15,6 +15,9 @@
     <h1>Kubicle</h1>
     <p>Your Claude Code sessions, live. Click anyone on the floor.</p>
   </div>
+  <button class="floor-btn" id="floorBtn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-keyshortcuts="E" title="Take the elevator to another floor (E)">
+    <span class="lbl">Floor</span><span class="name">Lobby</span><span class="glow" hidden></span><span class="caret" aria-hidden="true">▾</span>
+  </button>
   <div class="counts" id="counts" aria-live="polite"></div>
   <div class="tools">
     <button class="btn chime" id="chime" type="button" aria-pressed="false" title="Play a sound when an agent starts waiting on you">Chime off</button>
@@ -27,13 +30,13 @@
 <div class="layout">
   <section class="stage">
     <div class="map-wrap" id="mapWrap">
-      <div class="map-scroll" id="mapScroll"><canvas id="map" aria-label="Office floor: division rooms and the Bullpen, agents at their desks"></canvas></div>
+      <div class="map-scroll" id="mapScroll"><canvas id="map" aria-label="Office floor: division rooms and the Bullpen, agents at their desks. The elevator on the left goes to other floors."></canvas></div>
+      <section class="lobby" id="lobby" aria-label="Lobby" hidden></section>
       <div class="empty-floor" id="emptyFloor" hidden><p>No sessions yet. Claude Code sessions started after install-hooks appear here.</p></div>
       <div class="offline" id="disconnected" hidden><p>Disconnected from the office server. Reconnecting…</p></div>
     </div>
     <p class="note" id="styleNote"></p>
     <div class="legend" id="legend"></div>
-    <div class="archived" id="archived" hidden></div>
     <section class="feed">
       <header><h2>Hook events</h2><span>What your Claude sessions report to the office</span></header>
       <ol id="feed"></ol>
@@ -64,6 +67,11 @@
         <dt>Model</dt><dd id="iModel" class="mono"></dd>
         <dt>Link</dt><dd id="iConn"></dd>
       </dl>
+      <div class="move-room" id="iMoveRow" hidden>
+        <label for="iRoom">Move to room</label>
+        <select id="iRoom"></select>
+        <p class="conn" id="iRoomNote"></p>
+      </div>
       <fieldset class="routing">
         <legend>Answer approvals here</legend>
         <label><input type="checkbox" id="routeSession"> this session</label>
@@ -82,7 +90,7 @@
   </aside>
 </div>
 
-<div class="wing-menu" id="wingMenu" role="menu" hidden></div>
+<div class="floor-menu" id="floorMenu" role="menu" hidden></div>
 
 <script type="module" src="/ui/main.js"></script>
 </body>
