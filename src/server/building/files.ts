@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync, readdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { parseDocument, stringify } from 'yaml';
@@ -16,6 +16,18 @@ export class BuildingFileError extends Error {
     this.name = 'BuildingFileError';
     this.file = file;
     this.line = line;
+  }
+}
+
+/**
+ * A file the office refuses to load at all (repo floor with non-layout keys, a symbolic link where
+ * one is not allowed, not a regular file, too large). Unlike a plain parse/validation error, a
+ * refused repo floor never keeps its last good version: the floor falls back to home/default.
+ */
+export class RefusedFileError extends BuildingFileError {
+  constructor(file: string, reason: string) {
+    super(file, reason);
+    this.name = 'RefusedFileError';
   }
 }
 
@@ -42,16 +54,63 @@ export function slugFor(root: string): string {
   return base ? `${base}-${hash}` : hash;
 }
 
-function parseFile(file: string): Record<string, unknown> {
-  let text: string;
-  try { text = readFileSync(file, 'utf8'); }
-  catch (e) { throw new BuildingFileError(file, `cannot read file (${(e as NodeJS.ErrnoException).code ?? 'error'})`); }
-  const doc = parseDocument(text);
-  if (doc.errors.length > 0) {
-    const err = doc.errors[0]!;
-    throw new BuildingFileError(file, err.message.split('\n')[0]!, err.linePos?.[0]?.line);
+export const MAX_FILE_BYTES = 262_144;
+
+/**
+ * Reads a building file without ever blocking or reading without bound: no FIFOs, devices or
+ * directories (O_NONBLOCK + fstat on the opened fd), at most MAX_FILE_BYTES, and for repo files
+ * no symbolic links (lstat + O_NOFOLLOW).
+ */
+function readText(file: string, origin: 'home' | 'repo'): string {
+  const cannot = (e: unknown) => new BuildingFileError(file, `cannot read file (${(e as NodeJS.ErrnoException).code ?? 'error'})`);
+  const symlink = () => new RefusedFileError(file, 'symbolic links are not allowed for repo floor files');
+  if (origin === 'repo') {
+    let link: boolean;
+    try { link = lstatSync(file).isSymbolicLink(); } catch (e) { throw cannot(e); }
+    if (link) throw symlink();
   }
-  const data = doc.toJS();
+  let fd: number;
+  try {
+    fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | (origin === 'repo' ? constants.O_NOFOLLOW : 0));
+  } catch (e) {
+    if (origin === 'repo' && (e as NodeJS.ErrnoException).code === 'ELOOP') throw symlink();
+    throw cannot(e);
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new RefusedFileError(file, 'not a regular file');
+    const tooBig = () => new RefusedFileError(file, 'file is larger than 256 KB');
+    if (st.size > MAX_FILE_BYTES) throw tooBig();
+    const buf = Buffer.alloc(MAX_FILE_BYTES + 1);
+    let n = 0;
+    for (;;) {
+      let got: number;
+      try { got = readSync(fd, buf, n, buf.length - n, null); } catch (e) { throw cannot(e); }
+      if (got === 0) break;
+      n += got;
+      if (n > MAX_FILE_BYTES) throw tooBig(); // grew after the fstat
+    }
+    return buf.toString('utf8', 0, n);
+  } finally { closeSync(fd); }
+}
+
+/** yaml reports "<reason> at line N, column M:" plus a code frame; keep only "<reason>". */
+const yamlReason = (msg: string): string => msg.split('\n')[0]!.replace(/\s+at line \d+, column \d+:?\s*$/, '').replace(/:\s*$/, '');
+
+function parseFile(file: string, origin: 'home' | 'repo' = 'home'): Record<string, unknown> {
+  const text = readText(file, origin);
+  let data: unknown;
+  try {
+    const doc = parseDocument(text);
+    if (doc.errors.length > 0) {
+      const err = doc.errors[0]!;
+      throw new BuildingFileError(file, yamlReason(err.message), err.linePos?.[0]?.line);
+    }
+    data = doc.toJS();
+  } catch (e) {
+    if (e instanceof BuildingFileError) throw e;
+    throw new BuildingFileError(file, yamlReason(e instanceof Error ? e.message : String(e)));
+  }
   if (!isMap(data)) throw new BuildingFileError(file, 'top level must be a mapping');
   return data;
 }
@@ -68,11 +127,6 @@ function divisionProblems(d: any): string[] {
 
 function floorProblems(f: FloorDef): string[] {
   const errs = validateFloor(f, new Set());
-  if (Array.isArray(f?.rooms)) {
-    for (const r of f.rooms) {
-      if (isMap(r) && (typeof r.name !== 'string' || r.name.length === 0)) errs.push(`room "${r.id}" needs a name`);
-    }
-  }
   if (!validRev(f?.revision)) errs.push('revision must be an integer >= 1');
   return errs;
 }
@@ -93,7 +147,7 @@ const ROOM_KEYS = new Set(['id', 'name', 'division', 'band', 'width']);
 
 function checkLayoutOnly(file: string, data: Record<string, unknown>): void {
   const bad = (key: string, path: string): never => {
-    throw new BuildingFileError(file, `Repo floor files may only set layout: ${key} is not allowed (${path})`);
+    throw new RefusedFileError(file, `Repo floor files may only set layout: ${key} is not allowed (${path})`);
   };
   for (const k of Object.keys(data)) if (k !== 'revision' && k !== 'rooms') bad(k, k);
   if (Array.isArray(data.rooms)) {
@@ -104,7 +158,7 @@ function checkLayoutOnly(file: string, data: Record<string, unknown>): void {
 }
 
 export function readFloor(file: string, origin: 'home' | 'repo'): FloorDef {
-  const data = parseFile(file);
+  const data = parseFile(file, origin);
   if (origin === 'repo') checkLayoutOnly(file, data);
   const rooms = Array.isArray(data.rooms)
     ? data.rooms.map((r): any => (isMap(r)
@@ -122,16 +176,16 @@ export function readFloor(file: string, origin: 'home' | 'repo'): FloorDef {
  * check and the rename (no cross-process lock); acceptable for a single-owner tool.
  * A present-but-unreadable file is never overwritten.
  */
-function currentRevision(file: string): number {
+function currentRevision(file: string, origin: 'home' | 'repo'): number {
   if (!existsSync(file)) return 0;
-  const rev = parseFile(file).revision;
+  const rev = parseFile(file, origin).revision;
   if (!validRev(rev)) throw new BuildingFileError(file, 'revision must be an integer >= 1');
   return rev;
 }
 
-function checkBase(file: string, baseRevision: number): void {
+function checkBase(file: string, baseRevision: number, origin: 'home' | 'repo' = 'home'): void {
   if (!Number.isInteger(baseRevision) || baseRevision < 0) throw new BuildingFileError(file, 'base revision must be an integer >= 0');
-  const cur = currentRevision(file);
+  const cur = currentRevision(file, origin);
   if (cur !== baseRevision) throw new RevisionConflict(file, cur);
 }
 
@@ -152,7 +206,7 @@ export function writeFloor(file: string, f: FloorDef, baseRevision: number): Flo
   const rooms = f.rooms.map((r: RoomDef) => ({
     id: r.id, name: r.name, ...(r.division ? { division: r.division } : {}), band: r.band, width: r.width,
   }));
-  checkBase(file, baseRevision);
+  checkBase(file, baseRevision, f.source === 'repo' ? 'repo' : 'home');
   writeAtomic(file, stringify({ revision: stored.revision, rooms }), FILE_MODE, DIR_MODE);
   return { ...stored, rooms };
 }

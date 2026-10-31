@@ -81,3 +81,21 @@ test('validateFloor does not throw on malformed shapes', () => {
   assert.deepEqual(validateFloor(bad([bp(), 42]), ids), ['room #2 must be a mapping']);
   assert.deepEqual(validateFloor(bad([bp(), 'x']), ids), ['room #2 must be a mapping']);
 });
+
+test('I1b: a floor can have at most 40 rooms', () => {
+  const rs = [bp(), ...Array.from({ length: 39 }, (_, i) => room(`r${i}`))];
+  assert.deepEqual(validateFloor(floor(rs), ids), []);
+  assert.ok(validateFloor(floor([...rs, room('r40')]), ids).includes('a floor can have at most 40 rooms'));
+});
+
+test('M4/M5: division must be absent or an id; name must be 1–40 characters', () => {
+  const errs = (r: Partial<RoomDef> & Record<string, unknown>) => validateFloor(floor([bp(), { ...room('a'), ...r } as RoomDef]), ids);
+  assert.deepEqual(errs({ division: 'qa' }), []);
+  assert.deepEqual(errs({ name: 'x'.repeat(40) }), []);
+  assert.ok(errs({ division: 5 as unknown as string }).includes('division of "a" is invalid'));
+  assert.ok(errs({ division: 'Bad Div' }).includes('division of "a" is invalid'));
+  assert.ok(errs({ division: '' }).includes('division of "a" is invalid'));
+  for (const name of ['', 'x'.repeat(41), 7, undefined]) {
+    assert.ok(errs({ name: name as unknown as string }).includes('name of "a" must be 1–40 characters'), String(name));
+  }
+});

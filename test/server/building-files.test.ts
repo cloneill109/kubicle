@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, statSync, readdirSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, statSync, readdirSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -157,4 +157,82 @@ test('seedDivisions: 7 files on empty/missing dir, then false and no writes', ()
   const empty = join(tmp(), 'e'); mkdirSync(empty);
   assert.equal(seedDivisions(empty), true);
   assert.equal(readdirSync(empty).length, 7);
+});
+
+// ---- final review I1: refuse files that could hang or exhaust a read ----
+import { symlinkSync } from 'node:fs';
+
+const ROOMS_OK = 'revision: 1\nrooms:\n  - {id: bullpen, name: B, band: bottom, width: 14}\n';
+const fast = (fn: () => void) => { const t = Date.now(); fn(); assert.ok(Date.now() - t < 1000, 'completes in < 1 s'); };
+
+test('I1: a repo floor that is a symbolic link is refused (even to a valid file); a home one may be a link', () => {
+  const d = tmp();
+  const real = join(d, 'real.yaml');
+  writeFileSync(real, ROOMS_OK);
+  const link = join(d, 'floor.yaml');
+  symlinkSync(real, link);
+  fast(() => assert.throws(() => readFloor(link, 'repo'),
+    (e: any) => e instanceof BuildingFileError && e.message === `${link}: symbolic links are not allowed for repo floor files`));
+  assert.equal(readFloor(link, 'home').rooms.length, 1);
+  const zero = join(d, 'zero.yaml');
+  symlinkSync('/dev/zero', zero);
+  fast(() => assert.throws(() => readFloor(zero, 'repo'), /symbolic links are not allowed for repo floor files/));
+  fast(() => assert.throws(() => readFloor(zero, 'home'), (e: any) => e instanceof BuildingFileError && e.message === `${zero}: not a regular file`));
+});
+
+test('I1: a directory is "not a regular file"; a file over 256 KB is refused; both for every building file', () => {
+  const d = tmp();
+  const dirFile = join(d, 'floor.yaml');
+  mkdirSync(dirFile);
+  for (const origin of ['home', 'repo'] as const) {
+    fast(() => assert.throws(() => readFloor(dirFile, origin), (e: any) => e instanceof BuildingFileError && e.message === `${dirFile}: not a regular file`));
+  }
+  const divDir = join(d, 'divisions', 'qa.yaml');
+  mkdirSync(divDir, { recursive: true });
+  fast(() => assert.throws(() => readDivision(divDir), (e: any) => e.message === `${divDir}: not a regular file`));
+  const big = join(d, 'big.yaml');
+  writeFileSync(big, ROOMS_OK + '# ' + 'x'.repeat(300 * 1024) + '\n');
+  for (const origin of ['home', 'repo'] as const) {
+    fast(() => assert.throws(() => readFloor(big, origin), (e: any) => e instanceof BuildingFileError && e.message === `${big}: file is larger than 256 KB`));
+  }
+  // exactly at the limit is fine
+  const edge = join(d, 'edge.yaml');
+  writeFileSync(edge, ROOMS_OK + '#'.repeat(262144 - ROOMS_OK.length - 1) + '\n');
+  assert.equal(statSync(edge).size, 262144);
+  assert.equal(readFloor(edge, 'home').rooms.length, 1);
+  // writes refuse to compare against a non-regular target too (no hang, nothing written)
+  fast(() => assert.throws(() => writeFloor(dirFile, { ...defaultFloor(), source: 'home' }, 0), /not a regular file/));
+});
+
+test('I1: errors thrown by the yaml library (alias bomb) become BuildingFileError naming the file', () => {
+  const d = tmp();
+  const f = join(d, 'bomb.yaml');
+  writeFileSync(f, 'a: &a [x,x,x,x,x,x,x,x,x,x]\n' + Array.from({ length: 200 }, (_, i) => `k${i}: *a`).join('\n') + '\n');
+  assert.throws(() => readFloor(f, 'home'), (e: any) => e instanceof BuildingFileError && e.message.startsWith(`${f}: `));
+});
+
+test('M6: YAML syntax errors read "<file>:<line>: <reason>" without a dangling "at line N, column M:"', () => {
+  const d = tmp();
+  const f = join(d, 'f.yaml');
+  writeFileSync(f, 'revision: 1\nrooms: [oops\n');
+  assert.throws(() => readFloor(f, 'home'), (e: any) => {
+    assert.match(e.message, new RegExp(`^${f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\d+: \\S`));
+    assert.doesNotMatch(e.message, /at line \d+, column \d+/);
+    assert.doesNotMatch(e.message, /:$/);
+    return true;
+  });
+});
+
+test('M4/M5: room division and name are validated on read and on write', () => {
+  const d = tmp();
+  const f = join(d, 'f.yaml');
+  writeFileSync(f, 'revision: 1\nrooms:\n  - {id: bullpen, name: B, band: bottom, width: 14}\n  - {id: a, name: A, division: 5, band: top, width: 12}\n');
+  assert.throws(() => readFloor(f, 'home'), (e: any) => e instanceof BuildingFileError && e.message.includes('division of "a" is invalid'));
+  writeFileSync(f, `revision: 1\nrooms:\n  - {id: bullpen, name: B, band: bottom, width: 14}\n  - {id: a, name: ${'n'.repeat(41)}, band: top, width: 12}\n`);
+  assert.throws(() => readFloor(f, 'home'), (e: any) => e.message.includes('name of "a" must be 1–40 characters'));
+  const w = join(d, 'w.yaml');
+  const bp = { id: 'bullpen', name: 'B', band: 'bottom' as const, width: 14 };
+  assert.throws(() => writeFloor(w, { revision: 0, source: 'home', rooms: [bp, { id: 'a', name: 'A', division: 'Bad Div', band: 'top', width: 12 }] }, 0), /division of "a" is invalid/);
+  assert.throws(() => writeFloor(w, { revision: 0, source: 'home', rooms: [bp, { id: 'a', name: 'x'.repeat(41), band: 'top', width: 12 }] }, 0), /name of "a" must be 1–40 characters/);
+  assert.equal(existsSync(w), false);
 });

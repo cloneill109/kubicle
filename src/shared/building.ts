@@ -37,9 +37,13 @@ export function defaultFloor(): FloorDef {
 
 // Unknown divisions are deliberately not errors: they render as "Unknown division".
 // `divisionIds` is accepted for call-site symmetry with callers that hold the set.
+export const MAX_ROOMS = 40;
+export const MAX_NAME = 40;
+
 export function validateFloor(f: FloorDef, _divisionIds: Set<string>): string[] {
   if (!f || typeof f !== 'object' || !Array.isArray(f.rooms)) return ['rooms must be a list'];
   const errs: string[] = [];
+  if (f.rooms.length > MAX_ROOMS) errs.push(`a floor can have at most ${MAX_ROOMS} rooms`);
   const seen = new Set<string>();
   let hasBullpen = false;
   for (const [i, r] of f.rooms.entries()) {
@@ -49,6 +53,8 @@ export function validateFloor(f: FloorDef, _divisionIds: Set<string>): string[] 
     if (typeof r.id !== 'string' || !ID_RE.test(r.id)) errs.push(`room id "${r.id}" is invalid`);
     if (!Number.isInteger(r.width) || r.width < 8 || r.width > 24) errs.push(`width of "${r.id}" must be 8–24`);
     if (r.band !== 'top' && r.band !== 'bottom') errs.push(`band "${r.band}" is invalid`);
+    if (r.division !== undefined && (typeof r.division !== 'string' || !ID_RE.test(r.division))) errs.push(`division of "${r.id}" is invalid`);
+    if (typeof r.name !== 'string' || r.name.length === 0 || r.name.length > MAX_NAME) errs.push(`name of "${r.id}" must be 1–${MAX_NAME} characters`);
     if (r.id === BULLPEN) {
       hasBullpen = true;
       if (r.division) errs.push('"bullpen" cannot have a division');
