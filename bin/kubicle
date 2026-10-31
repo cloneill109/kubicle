@@ -1,0 +1,9 @@
+#!/usr/bin/env -S node --disable-warning=ExperimentalWarning
+// Resolve our real location first so this works through a symlink (npm link).
+import { realpathSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const here = dirname(realpathSync(fileURLToPath(import.meta.url)));
+const { main } = await import(pathToFileURL(join(here, '..', 'src', 'cli', 'kubicle.ts')).href);
+process.exitCode = await main(process.argv.slice(2));

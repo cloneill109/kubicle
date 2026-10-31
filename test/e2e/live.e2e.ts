@@ -4,7 +4,7 @@
 // Screenshots land in test-results/live-*.png for a human look. Run with `npm run test:e2e`.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -733,5 +733,64 @@ test('floor edit mode: drag, resize, add, remove, save; conflict, 400, 404, netw
   assert.equal(await editRooms(page), null);
 
   assert.deepEqual(errors, [], 'no page errors');
+  await page.close();
+});
+
+test('CLI parity: kubicle edits show up live in the office, and UI saves show in kubicle; conflicts match', async () => {
+  await srv?.close();
+  const home = join(tmp, 'home-cli');
+  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, { openBrowser: false });
+  const delta = repo('delta');
+  await postOk({ session_id: 'dddddddd-0000-4000-8000-000000000004', hook_event_name: 'SessionStart', cwd: delta, source: 'startup' });
+  const kubicle = (args: string[], env: Record<string, string> = {}) => spawnSync(join(root, 'bin', 'kubicle'), args, { cwd: delta, encoding: 'utf8', env: { ...process.env, KUBICLE_HOME: home, ...env } });
+
+  const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } });
+  await page.goto(srv.loginUrl);
+  await page.waitForFunction(() => !!window.__office && document.body.dataset.conn === 'open' && window.__office.floor() !== 'lobby', null, { timeout: 10000 });
+  await goFloor(page, 'delta');
+  const worldRooms = () => page.evaluate(() => window.__office.world().rooms.map((r) => `${r.id}:${r.name}`));
+  assert.equal((await worldRooms()).filter((r) => r.endsWith(':Cybersecurity')).length, 1);
+
+  // CLI add-room → the canvas shows a second Cybersecurity room within 1 s
+  const added = kubicle(['floor', 'add-room', 'security', '--project', delta]);
+  assert.equal(added.status, 0, added.stderr);
+  await page.waitForFunction(() => window.__office.world().rooms.filter((r) => r.name === 'Cybersecurity').length === 2, null, { timeout: 1000 });
+  assert.ok((await worldRooms()).includes('security-2:Cybersecurity'));
+
+  // UI save → kubicle floor show prints it
+  const editBtn = page.locator('#editBtn');
+  await editBtn.click();
+  await page.locator('#editSheet').waitFor({ state: 'visible', timeout: 3000 });
+  await page.locator('#editAddKind').selectOption({ label: 'Custom room' });
+  await page.locator('#editAddName').fill('Docs');
+  await page.locator('#editAddBand').selectOption('bottom');
+  await page.locator('#editAdd').click();
+  const did = await projectId(page, 'delta');
+  // CLI writes while the UI edit is open: the UI's save is rejected, the CLI edit survives
+  assert.equal(kubicle(['floor', 'resize-room', 'qa', '16']).status, 0);
+  await page.waitForFunction((id) => window.__office.state.building.floors[id]?.revision === 2, did, { timeout: 3000 });
+  const resp = page.waitForResponse((r) => r.url().includes('/api/floors/'));
+  await page.locator('#editSave').click();
+  assert.equal((await resp).status(), 409);
+  await page.waitForFunction((t) => document.getElementById('editMsg')!.textContent === t, CONFLICT, { timeout: 3000 });
+  await page.locator('#editReload').click();
+  await page.locator('#editAddKind').selectOption({ label: 'Custom room' });
+  await page.locator('#editAddName').fill('Docs');
+  await page.locator('#editAddBand').selectOption('bottom');
+  await page.locator('#editAdd').click();
+  const saved = page.waitForResponse((r) => r.url().includes('/api/floors/'));
+  await page.locator('#editSave').click();
+  assert.equal((await saved).status(), 200);
+  await page.locator('#editSheet').waitFor({ state: 'hidden', timeout: 3000 });
+  const shown = kubicle(['floor', 'show']);
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.match(shown.stdout, /bottom\s+docs\s+Docs\s+-\s+12/);
+  assert.match(shown.stdout, /top\s+qa\s+QA\s+qa\s+16/, 'the CLI edit survived');
+  assert.match(shown.stdout, /top\s+security-2\s+Cybersecurity\s+security\s+12/);
+
+  // and a stale CLI write is the CLI's conflict
+  const stale = kubicle(['floor', 'remove-room', 'docs'], { KUBICLE_TEST_BUMP: '1' });
+  assert.equal(stale.status, 3);
+  assert.ok(stale.stderr.includes(CONFLICT));
   await page.close();
 });

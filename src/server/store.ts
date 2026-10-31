@@ -20,8 +20,14 @@ export interface Store {
   close(): void;
 }
 
-export function openStore(file: string): Store {
-  const db = new DatabaseSync(file);
+/** `readOnly` opens an existing file without creating tables, changing the journal mode or chmod-ing (the CLI uses it to list projects). */
+export function openStore(file: string, opts: { readOnly?: boolean } = {}): Store {
+  const db = new DatabaseSync(file, opts.readOnly ? { readOnly: true } : {});
+  if (!opts.readOnly) initSchema(db, file);
+  return storeOn(db);
+}
+
+function initSchema(db: DatabaseSync, file: string): void {
   db.exec('PRAGMA journal_mode=WAL');
   db.exec(`
     CREATE TABLE IF NOT EXISTS events (
@@ -44,7 +50,9 @@ export function openStore(file: string): Store {
       if (existsSync(f)) chmodSync(f, 0o600);
     }
   }
+}
 
+function storeOn(db: DatabaseSync): Store {
   const insEvent = db.prepare(
     'INSERT OR IGNORE INTO events (id, ts, session_id, agent_id, event, json) VALUES (?,?,?,?,?,?)');
   const selRecent = db.prepare('SELECT json FROM events ORDER BY ts DESC, rowid DESC LIMIT ?');

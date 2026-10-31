@@ -90,7 +90,7 @@ function countOurs(s: any): number {
   return n;
 }
 
-function main(argv: string[]): number {
+export function main(argv: string[]): number {
   const cmd = argv[0];
   if (cmd !== 'install' && cmd !== 'uninstall') {
     console.error('usage: install.ts install|uninstall [--settings <path>]');

@@ -6,6 +6,9 @@
   "engines": {
     "node": ">=24"
   },
+  "bin": {
+    "kubicle": "bin/kubicle"
+  },
   "scripts": {
     "test": "node --disable-warning=ExperimentalWarning --test 'test/**/*.test.ts'",
     "test:e2e": "node --disable-warning=ExperimentalWarning --test 'test/e2e/*.e2e.ts'",
@@ -13,8 +16,8 @@
     "build:ui": "esbuild src/ui/main.ts --bundle --format=esm --outfile=dist/ui/main.js",
     "start": "npm run build:ui && node --disable-warning=ExperimentalWarning src/server/main.ts",
     "smoke": "bash scripts/smoke-real.sh",
-    "install-hooks": "node src/cli/install.ts install",
-    "uninstall-hooks": "node src/cli/install.ts uninstall"
+    "install-hooks": "bin/kubicle install-hooks",
+    "uninstall-hooks": "bin/kubicle uninstall-hooks"
   },
   "dependencies": {
     "ws": "^8.22.0",
