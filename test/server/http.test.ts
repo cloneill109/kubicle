@@ -638,9 +638,12 @@ test('snapshot carries the real building; floor save: 200 + building broadcast, 
   assert.equal((await fetch(`${s.url}${floorPath(proj)}`, { method: 'POST', headers: { 'content-type': 'application/json', cookie, origin: s.url }, body: '{}' })).status, 403);
   assert.deepEqual(floorFiles(s.home), []);
 
-  const ok = await control(s, cookie, floorPath(proj), { baseRevision: 0, rooms });
+  const ok = await control(s, cookie, floorPath(proj), { baseRevision: 0, rooms: [{ ...rooms[0], harness: { x: 1 } }, rooms[1]] });
   assert.equal(ok.status, 200);
-  assert.equal((await ok.json()).revision, 1);
+  const okBody = await ok.json();
+  assert.equal(okBody.revision, 1);
+  assert.deepEqual(okBody.rooms, rooms); // cleaned: the extra key is neither stored nor echoed
+  assert.equal(readFileSync(join(s.home, 'floors', floorFiles(s.home)[0]!), 'utf8').includes('harness'), false);
   await c.waitFor((m) => m.t === 'building' && m.building.floors[proj]?.rooms.length === 2);
   const file = join(s.home, 'floors', floorFiles(s.home)[0]!);
   const before = readFileSync(file, 'utf8');
@@ -694,8 +697,8 @@ test('POST /api/agents/:id/room: set, clear, invalid, unknown, subagent', async 
 
   // subagent ids can't be moved
   await postHook(s, { ...fixture('SubagentStart'), session_id: 'bs1', cwd: proj });
-  const sub = c.msgs.map((m) => (m.t === 'agent' ? m.agent : null)).find((x) => x && x.kind === 'subagent');
-  if (sub) assert.equal((await control(s, cookie, `/api/agents/${encodeURIComponent(sub.id)}/room`, { room: null })).status, 400);
+  const sub = (await c.waitFor(isAgent((x) => x.kind === 'subagent'))).agent;
+  assert.equal((await control(s, cookie, `/api/agents/${encodeURIComponent(sub.id)}/room`, { room: null })).status, 400);
 });
 
 test('external floor edit reaches the WS within 1 s; corrupt file raises a banner that clears', async () => {

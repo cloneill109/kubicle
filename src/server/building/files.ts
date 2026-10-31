@@ -154,7 +154,7 @@ export function writeFloor(file: string, f: FloorDef, baseRevision: number): Flo
   }));
   checkBase(file, baseRevision);
   writeAtomic(file, stringify({ revision: stored.revision, rooms }), FILE_MODE, DIR_MODE);
-  return stored;
+  return { ...stored, rooms };
 }
 
 export function seedDivisions(dir: string): boolean {
