@@ -271,7 +271,10 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       const stored = d.building.saveFloor(projectId, b.rooms as RoomDef[], b.baseRevision as number);
       send(res, 200, JSON.stringify(stored), JSON_HDR);
     } catch (err) {
-      if (err instanceof RevisionConflict) return send(res, 409, JSON.stringify({ error: 'conflict', current: err.current }), JSON_HDR);
+      if (err instanceof RevisionConflict) {
+        d.building.refresh(); // broadcast the floor on disk now, before the owner clicks Reload
+        return send(res, 409, JSON.stringify({ error: 'conflict', current: err.current }), JSON_HDR);
+      }
       if (err instanceof BuildingFileError) {
         const status = err.message.endsWith('unknown or archived project') ? 404 : 400;
         return send(res, status, JSON.stringify({ error: err.message }), JSON_HDR);
