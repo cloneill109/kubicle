@@ -408,7 +408,8 @@ function renderFloorUi(): void {
   floorBtn.title = editing ? 'Save or cancel your floor edits to take the elevator'
     : others > 0 ? `${others} waiting on you on another floor. Take the elevator (E).` : 'Take the elevator to another floor (E)';
   floorBtn.disabled = !!editing;
-  $('editBtn').hidden = id === LOBBY;
+  // Archived floors are view-only (an edit already open stays so its Save/Cancel still make sense).
+  $('editBtn').hidden = id === LOBBY || (!editing && !!state.project(id)?.archived);
   // The empty hint, only after the server has told us (not while connecting).
   const empty = $('emptyFloor');
   empty.hidden = !gotSnapshot || id === LOBBY || agentsOnFloor().length > 0;
@@ -581,14 +582,14 @@ function onMessage(m: ServerMsg): void {
 const editBtn = $<HTMLButtonElement>('editBtn');
 const CONFLICT_TEXT = 'This floor changed elsewhere. Reload to see the latest.';
 const NETWORK_TEXT = 'Couldn\'t reach the office server. Your edits are still here.';
-const GONE_TEXT = 'This floor no longer exists.';
+const GONE_TEXT = 'This floor is archived or no longer exists.';
 const sameRooms = (a: RoomDef[], b: RoomDef[]) => JSON.stringify(a) === JSON.stringify(b);
 const dirty = () => !!editing && !sameRooms(editing.rooms, editing.baseRooms);
 const cloneRooms = (rs: RoomDef[]): RoomDef[] => rs.map((r) => ({ ...r }));
 
 function startEdit(): void {
   const id = state.currentFloor;
-  if (editing || id === LOBBY) return;
+  if (editing || id === LOBBY || state.project(id)?.archived) return;
   closeMenu(); closePicker(false);
   const f = floorDef(id);
   editing = { floorId: id, baseRevision: f.revision, baseRooms: cloneRooms(f.rooms), rooms: cloneRooms(f.rooms), saving: false, elsewhere: false };

@@ -381,6 +381,11 @@ test('live office: state, floors, approvals, rooms, lobby, styles, narrow view, 
   await page.locator('#picker').waitFor({ state: 'visible', timeout: 3000 });
   assert.deepEqual(await pickerRows(page), ['Lobby|3 agents|', 'Alpha HQ|2 agents|']);
   await page.keyboard.press('Escape');
+  // an archived floor can still be visited from the Lobby, but not edited (M9)
+  await page.locator('#lobbyArchived li .go').click();
+  await page.waitForFunction((id) => window.__office.floor() === id, betaId, { timeout: 3000 });
+  assert.ok(await page.locator('#editBtn').isHidden(), 'no Edit floor on an archived floor');
+  await goFloor(page, 'Lobby');
   pr = projResp();
   await page.locator('#lobbyArchived button.restore').click();
   assert.equal((await pr).status(), 200);
@@ -707,7 +712,7 @@ test('floor edit mode: drag, resize, add, remove, save; conflict, 400, 404, netw
   await page.unroute('**/api/floors/**');
   await page.route('**/api/floors/**', (r) => r.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"unknown or archived project"}' }));
   await page.locator('#editSave').click();
-  await page.waitForFunction(() => document.getElementById('editMsg')!.textContent === 'This floor no longer exists.', null, { timeout: 3000 });
+  await page.waitForFunction(() => document.getElementById('editMsg')!.textContent === 'This floor is archived or no longer exists.', null, { timeout: 3000 });
   await page.unroute('**/api/floors/**');
   writeFileSync(file, 'revision: [oops');
   resp = page.waitForResponse((r) => r.url().includes('/api/floors/'));
