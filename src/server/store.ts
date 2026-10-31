@@ -7,6 +7,8 @@ import { slugFor } from './building/files.ts';
 export type { ProjectRow };
 
 export interface Store {
+  /** Underlying handle, for modules that own their own tables (the Bubbles log). */
+  readonly db: DatabaseSync;
   appendEvents(events: AgentEvent[]): void;
   recentEvents(limit: number): AgentEvent[];
   eventsSince(ts: number): AgentEvent[];
@@ -39,6 +41,10 @@ function initSchema(db: DatabaseSync, file: string): void {
       approvals TEXT NOT NULL, archived INTEGER NOT NULL, first_seen INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS session_settings (
       session_id TEXT PRIMARY KEY, approvals TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS bubbles_log (
+      seq INTEGER PRIMARY KEY, ts INTEGER NOT NULL, kind TEXT NOT NULL,
+      json TEXT NOT NULL, prev_hash TEXT NOT NULL, hash TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS bubbles_log_ts ON bubbles_log(ts);
   `);
   // Older databases lack the room column; add it in place.
   if (!(db.prepare('PRAGMA table_info(session_settings)').all() as { name: string }[]).some((c) => c.name === 'room')) {
@@ -81,6 +87,7 @@ function storeOn(db: DatabaseSync): Store {
     rows.map((r) => JSON.parse((r as { json: string }).json) as AgentEvent);
 
   return {
+    db,
     appendEvents(events) {
       if (events.length === 0) return;
       db.exec('BEGIN');
