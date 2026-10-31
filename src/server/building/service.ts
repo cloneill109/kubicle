@@ -1,10 +1,10 @@
-import { existsSync, mkdirSync, readdirSync, statSync, watch, type FSWatcher } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, statSync, watch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import {
   defaultFloor, type Building, type DivisionDef, type FloorDef, type RoomDef,
 } from '../../shared/building.ts';
 import type { ProjectRow } from '../../shared/protocol.ts';
-import { BuildingFileError, readDivision, readFloor, seedDivisions, slugFor, writeFloor } from './files.ts';
+import { BuildingFileError, RefusedFileError, readDivision, readFloor, seedDivisions, slugFor, writeFloor } from './files.ts';
 
 type Origin = 'home' | 'repo';
 
@@ -20,6 +20,7 @@ export class BuildingService {
   // last good versions, keyed by file path
   private divisions = new Map<string, DivisionDef>();
   private floors = new Map<string, FloorDef>();
+  private repoFloors = new Map<string, FloorDef>();
   private built: Building = { divisions: [], floors: {}, warnings: [] };
   private builtJson = JSON.stringify(this.built);
   private sig = '';
@@ -113,6 +114,7 @@ export class BuildingService {
 
     const floors: Record<string, FloorDef> = {};
     const seenHome = new Set<string>();
+    const seenRepo = new Set<string>();
     for (const p of this.projects()) {
       const home = this.homeFile(p.id);
       seenHome.add(home);
@@ -120,14 +122,23 @@ export class BuildingService {
         try { this.floors.set(home, readFloor(home, 'home')); } catch (e) { problem(home, e); }
       } else this.floors.delete(home);
 
-      let repoFloor: FloorDef | null = null;
+      // A broken repo floor keeps its last good version; a refused one (non-layout keys, symlink,
+      // not a regular file, too large) is dropped so the floor falls back to home/default.
       const repo = this.repoFile(p.id);
-      if (existsSync(repo)) {
-        try { repoFloor = readFloor(repo, 'repo'); } catch (e) { problem(repo, e); }
-      }
-      if (!p.archived) floors[p.id] = repoFloor ?? this.floors.get(home) ?? defaultFloor();
+      seenRepo.add(repo);
+      let present = existsSync(repo);
+      try { present = present || lstatSync(repo).isSymbolicLink(); } catch { /* absent */ }
+      if (present) {
+        try { this.repoFloors.set(repo, readFloor(repo, 'repo')); }
+        catch (e) {
+          problem(repo, e);
+          if (e instanceof RefusedFileError) this.repoFloors.delete(repo);
+        }
+      } else this.repoFloors.delete(repo);
+      if (!p.archived) floors[p.id] = this.repoFloors.get(repo) ?? this.floors.get(home) ?? defaultFloor();
     }
     for (const k of [...this.floors.keys()]) if (!seenHome.has(k)) this.floors.delete(k);
+    for (const k of [...this.repoFloors.keys()]) if (!seenRepo.has(k)) this.repoFloors.delete(k);
 
     this.sig = this.signature();
     const sortedFloors: Record<string, FloorDef> = {};

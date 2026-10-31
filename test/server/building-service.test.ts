@@ -253,3 +253,82 @@ test('unrelated files in home do not trigger reloads; floors yaml writes do', as
     await until(() => n > 0);
   } finally { s.cleanup(); }
 });
+
+// ---- final review I1 / M3 ----
+import { symlinkSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+
+test('I1: a repo floor that is a symlink, a FIFO or a directory is refused fast; the floor falls back with a warning', () => {
+  for (const kind of ['symlink', 'zero', 'fifo', 'dir'] as const) {
+    const s = setup();
+    try {
+      mkdirSync(join(s.home, 'floors'), { recursive: true });
+      writeFileSync(s.homeFile, floorYaml(1, ['bullpen', 'h']));
+      mkdirSync(join(s.root, '.kubicle'));
+      const rf = join(s.root, '.kubicle', 'floor.yaml');
+      const other = join(s.root, 'elsewhere.yaml');
+      writeFileSync(other, floorYaml(1, ['bullpen', 'r']));
+      if (kind === 'symlink') symlinkSync(other, rf);
+      else if (kind === 'zero') symlinkSync('/dev/zero', rf);
+      else if (kind === 'fifo') assert.equal(spawnSync('mkfifo', [rf]).status, 0);
+      else mkdirSync(rf);
+      const t = Date.now();
+      s.svc.refresh();
+      assert.ok(Date.now() - t < 1000, `${kind}: < 1 s`);
+      const b = s.svc.snapshot();
+      assert.deepEqual(b.floors[s.root]!.rooms.map((r) => r.id), ['bullpen', 'h'], kind);
+      assert.equal(b.warnings.length, 1, kind);
+      const msg = kind === 'symlink' || kind === 'zero' ? 'symbolic links are not allowed for repo floor files' : 'not a regular file';
+      assert.equal(b.warnings[0], `${rf}: ${msg}`, kind);
+    } finally { s.cleanup(); }
+  }
+});
+
+test('M3: a broken repo floor keeps its last good version (with a warning); a refused one falls back', () => {
+  const s = setup();
+  try {
+    mkdirSync(join(s.home, 'floors'), { recursive: true });
+    writeFileSync(s.homeFile, floorYaml(1, ['bullpen', 'h']));
+    mkdirSync(join(s.root, '.kubicle'));
+    const rf = join(s.root, '.kubicle', 'floor.yaml');
+    writeFileSync(rf, floorYaml(3, ['bullpen', 'r3']));
+    s.svc.refresh();
+    assert.equal(s.svc.snapshot().floors[s.root]!.revision, 3);
+    // syntax error: last good rev 3 stays
+    writeFileSync(rf, 'revision: [oops\n');
+    s.svc.refresh();
+    let b = s.svc.snapshot();
+    assert.deepEqual([b.floors[s.root]!.source, b.floors[s.root]!.revision, b.floors[s.root]!.rooms.map((r) => r.id)], ['repo', 3, ['bullpen', 'r3']]);
+    assert.equal(b.warnings.length, 1);
+    assert.ok(b.warnings[0]!.startsWith(`${rf}:`));
+    // validation error: still rev 3
+    writeFileSync(rf, floorYaml(4, ['x']));
+    s.svc.refresh();
+    b = s.svc.snapshot();
+    assert.equal(b.floors[s.root]!.revision, 3);
+    assert.match(b.warnings[0]!, /bullpen/);
+    // fixed: new floor, warning gone
+    writeFileSync(rf, floorYaml(5, ['bullpen', 'r5']));
+    s.svc.refresh();
+    b = s.svc.snapshot();
+    assert.deepEqual([b.floors[s.root]!.revision, b.warnings], [5, []]);
+    // refused (non-layout key): no last good; falls back to the home floor
+    writeFileSync(rf, `revision: 6\nhooks: {}\nrooms: []\n`);
+    s.svc.refresh();
+    b = s.svc.snapshot();
+    assert.deepEqual([b.floors[s.root]!.source, b.floors[s.root]!.rooms.map((r) => r.id)], ['home', ['bullpen', 'h']]);
+    assert.equal(b.warnings.length, 1);
+    // a later syntax error doesn't resurrect the refused-over repo floor
+    writeFileSync(rf, 'revision: [oops\n');
+    s.svc.refresh();
+    assert.equal(s.svc.snapshot().floors[s.root]!.source, 'home');
+    // deleting the repo file forgets it
+    writeFileSync(rf, floorYaml(7, ['bullpen', 'r7']));
+    s.svc.refresh();
+    unlinkSync(rf);
+    s.svc.refresh();
+    writeFileSync(rf, 'revision: [oops\n');
+    s.svc.refresh();
+    assert.equal(s.svc.snapshot().floors[s.root]!.source, 'home', 'deleted repo floor is not last good');
+  } finally { s.cleanup(); }
+});
