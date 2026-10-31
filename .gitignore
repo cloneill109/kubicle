@@ -5,3 +5,4 @@ node_modules/
 .office/
 dist/
 test-results/
+.worktrees/
