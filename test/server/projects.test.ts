@@ -96,13 +96,13 @@ test('wings 0,1,2 in first-seen order, stable across new Projects', () => {
     const dirs = ['p0', 'p1', 'p2'].map((n) => { const d = mk(t, n); mk(d, '.git'); return d; });
     const p = new Projects(store);
     const rows = dirs.map((d, i) => p.resolve(d, 100 + i));
-    assert.deepEqual(rows.map((r) => r.wing), [0, 1, 2]);
+    assert.deepEqual(rows.map((r) => r.order), [0, 1, 2]);
     assert.deepEqual(rows.map((r) => r.name), ['p0', 'p1', 'p2']);
     assert.equal(rows[0].approvals, 'off');
     assert.equal(rows[0].archived, false);
     assert.equal(rows[0].id, dirs[0]);
     const p2 = new Projects(store);
-    assert.equal(p2.resolve(mk(dirs[1], 'src'), 999).wing, 1);
+    assert.equal(p2.resolve(mk(dirs[1], 'src'), 999).order, 1);
     assert.equal(p2.resolve(dirs[0], 999).firstSeen, 100);
     assert.equal(p2.list().length, 3);
     assert.equal(store.listProjects().find((r) => r.id === dirs[1])!.firstSeen, 101);
@@ -132,7 +132,7 @@ test('setApprovals persists and preserves other fields', () => {
     const u = p.setApprovals(r.id, 'office');
     assert.equal(u.approvals, 'office');
     assert.equal(u.firstSeen, 42);
-    assert.equal(u.wing, 0);
+    assert.equal(u.order, 0);
     assert.equal(store.listProjects()[0].approvals, 'office');
     assert.equal(p.resolve(d, 50).approvals, 'office');
     assert.throws(() => p.setApprovals('/nope', 'off'));
@@ -147,25 +147,52 @@ test('update renames, archives, and swaps wings keeping them unique', () => {
     const a = p.resolve(mk(t, 'a'), 100);
     const b = p.resolve(mk(t, 'b'), 200);
     const c = p.resolve(mk(t, 'c'), 300);
-    assert.deepEqual([a.wing, b.wing, c.wing], [0, 1, 2]);
+    assert.deepEqual([a.order, b.order, c.order], [0, 1, 2]);
 
     const r = p.update(a.id, { name: 'Alpha' });
     assert.equal(r.name, 'Alpha');
     assert.equal(r.firstSeen, 100);
     assert.equal(p.update(b.id, { archived: true }).archived, true);
 
-    p.update(c.id, { wing: 0 }); // swap with a
+    p.update(c.id, { order: 0 }); // swap with a
     const byId = new Map(p.list().map((x) => [x.id, x]));
-    assert.equal(byId.get(c.id)!.wing, 0);
-    assert.equal(byId.get(a.id)!.wing, 2);
+    assert.equal(byId.get(c.id)!.order, 0);
+    assert.equal(byId.get(a.id)!.order, 2);
     assert.equal(byId.get(a.id)!.name, 'Alpha');
     assert.equal(byId.get(a.id)!.firstSeen, 100);
     assert.equal(byId.get(c.id)!.firstSeen, 300);
-    const wings = p.list().map((x) => x.wing);
+    const wings = p.list().map((x) => x.order);
     assert.equal(new Set(wings).size, wings.length);
 
-    p.update(b.id, { wing: 7 }); // free number: just moves
-    assert.equal(p.list().find((x) => x.id === b.id)!.wing, 7);
+    p.update(b.id, { order: 7 }); // free number: just moves
+    assert.equal(p.list().find((x) => x.id === b.id)!.order, 7);
     assert.throws(() => p.update('/nope', { name: 'x' }), /unknown project/);
+  } finally { rmSync(t, { recursive: true, force: true }); }
+});
+
+test('rows carry order and a computed slug; legacy wing column values become order', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { slugFor } = await import('../../src/server/building/files.ts');
+  const t = tmp();
+  try {
+    const file = join(t, 'old.db');
+    const old = new DatabaseSync(file);
+    old.exec(`CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, wing INTEGER NOT NULL,
+      approvals TEXT NOT NULL, archived INTEGER NOT NULL, first_seen INTEGER NOT NULL);
+      CREATE TABLE session_settings (session_id TEXT PRIMARY KEY, approvals TEXT NOT NULL);
+      INSERT INTO projects VALUES ('/r/alpha','alpha',3,'off',0,1),('/r/beta','beta',1,'office',0,2);
+      INSERT INTO session_settings VALUES ('s','office');`);
+    old.close();
+    const store = openStore(file);
+    const rows = new Projects(store).list();
+    assert.deepEqual(rows.map((r) => [r.id, r.order]), [['/r/alpha', 3], ['/r/beta', 1]]);
+    assert.equal(rows[0]!.slug, slugFor('/r/alpha'));
+    assert.match(rows[1]!.slug, /^beta-[0-9a-f]{6}$/);
+    assert.equal(store.getSessionApprovals('s'), 'office');
+    assert.equal(store.getSessionRoom('s'), null);
+    store.setSessionRoom('s', 'lab');
+    assert.equal(store.getSessionRoom('s'), 'lab');
+    assert.equal(store.getSessionApprovals('s'), 'office');
+    store.close();
   } finally { rmSync(t, { recursive: true, force: true }); }
 });

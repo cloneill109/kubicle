@@ -274,3 +274,28 @@ test('I2: real server, not opted in: perm shim returns at once with nothing', as
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('KUBICLE_DIVISION / KUBICLE_ROOM matching the id pattern are sent as headers', async () => {
+  const home = homeWithToken();
+  const s = await startServer(() => ({ status: 200 }));
+  try {
+    const r = await runShim({ KUBICLE_HOME: home, KUBICLE_PORT: String(s.port), KUBICLE_DIVISION: 'security', KUBICLE_ROOM: 'audit-2' });
+    assert.equal(r.code, 0);
+    assert.equal(s.hits[0]!.headers['x-kubicle-division'], 'security');
+    assert.equal(s.hits[0]!.headers['x-kubicle-room'], 'audit-2');
+  } finally { s.close(); }
+});
+
+test('KUBICLE_DIVISION / KUBICLE_ROOM with a bad pattern are not sent', async () => {
+  const home = homeWithToken();
+  for (const bad of ['x; rm', 'UPPER', '-lead', '', 'a'.repeat(33), 'a b']) {
+    const s = await startServer(() => ({ status: 200 }));
+    try {
+      const r = await runShim({ KUBICLE_HOME: home, KUBICLE_PORT: String(s.port), KUBICLE_DIVISION: bad, KUBICLE_ROOM: bad });
+      assert.equal(r.code, 0);
+      assert.equal(s.hits.length, 1, `still delivers for ${JSON.stringify(bad)}`);
+      assert.equal(s.hits[0]!.headers['x-kubicle-division'], undefined, bad);
+      assert.equal(s.hits[0]!.headers['x-kubicle-room'], undefined, bad);
+    } finally { s.close(); }
+  }
+});

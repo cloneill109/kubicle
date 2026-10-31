@@ -1,9 +1,12 @@
 // Browser-safe: no Node-only imports.
+import type { Building } from './building.ts';
 
 export interface ProjectRow {
   id: string;
   name: string;
-  wing: number;
+  order: number;
+  /** Computed from the project root (slugFor), names the floor file. Not stored. */
+  slug: string;
   approvals: 'off' | 'office';
   archived: boolean;
   firstSeen: number;
@@ -39,6 +42,11 @@ export interface AgentView {
   startedAt: number;
   lastSeen: number;
   pending?: PendingApproval;
+  /** Hints from KUBICLE_DIVISION / KUBICLE_ROOM; a session keeps the first non-empty ones. */
+  division?: string;
+  room?: string;
+  /** Owner-set room (id) for this session; subagents follow their parent. */
+  roomLabel?: string;
   approvals: 'off' | 'office'; // effective mode (session setting ?? project setting)
   log: string[]; // newest first, max 20
 }
@@ -51,9 +59,10 @@ export interface FeedItem {
 }
 
 export type ServerMsg =
-  | { t: 'snapshot'; agents: AgentView[]; projects: ProjectRow[]; feed: FeedItem[]; banner: string | null }
+  | { t: 'snapshot'; agents: AgentView[]; projects: ProjectRow[]; feed: FeedItem[]; banner: string | null; building: Building }
   | { t: 'agent'; agent: AgentView }
   | { t: 'agentRemoved'; id: string; reason: 'ended' | 'expired' }
   | { t: 'feed'; item: FeedItem }
   | { t: 'projects'; projects: ProjectRow[] }
-  | { t: 'banner'; text: string | null };
+  | { t: 'banner'; text: string | null }
+  | { t: 'building'; building: Building };

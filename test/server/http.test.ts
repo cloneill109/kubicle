@@ -360,10 +360,10 @@ test('projects API: rename, archive, reorder keeps wings unique', async () => {
   assert.equal((await r1.json()).name, 'Alpha');
   await c.waitFor((m) => m.t === 'projects' && m.projects.some((p) => p.id === a && p.name === 'Alpha'));
   assert.equal((await control(s, cookie, path(b), { archived: true })).status, 200);
-  assert.equal((await control(s, cookie, path(b), { wing: 0 })).status, 200);
-  const last = await c.waitFor((m) => m.t === 'projects' && m.projects.some((p) => p.id === b && p.wing === 0));
+  assert.equal((await control(s, cookie, path(b), { order: 0 })).status, 200);
+  const last = await c.waitFor((m) => m.t === 'projects' && m.projects.some((p) => p.id === b && p.order === 0));
   assert.ok(last.t === 'projects');
-  const wings = last.projects.map((p) => p.wing);
+  const wings = last.projects.map((p) => p.order);
   assert.equal(new Set(wings).size, wings.length);
 
   // Snapshot excludes nothing: archived project still present (UI filters).
@@ -377,7 +377,7 @@ test('projects API: rename, archive, reorder keeps wings unique', async () => {
   assert.equal((await control(s, cookie, path('/nope'), { name: 'x' })).status, 404);
   assert.equal((await control(s, cookie, path(a), {})).status, 400);
   assert.equal((await control(s, cookie, path(a), { name: '' })).status, 400);
-  assert.equal((await control(s, cookie, path(a), { wing: -1 })).status, 400);
+  assert.equal((await control(s, cookie, path(a), { order: -1 })).status, 400);
   assert.equal((await control(s, cookie, path(a), { archived: 'yes' })).status, 400);
 });
 
@@ -589,4 +589,24 @@ test('GET /api/debug/agents: 404 unless KUBICLE_DEBUG=1; owner-only; returns reg
   } finally {
     if (prev === undefined) delete process.env.KUBICLE_DEBUG; else process.env.KUBICLE_DEBUG = prev;
   }
+});
+
+test('ingest reads x-kubicle-division / x-kubicle-room into the agent, ignoring bad values', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  const hook = (sid: string, extra: Record<string, string>) => fetch(`${s.url}/hooks`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken, ...extra },
+    body: JSON.stringify({ ...fixture('SessionStart'), session_id: sid }),
+  });
+  assert.equal((await hook('hint-ok', { 'x-kubicle-division': 'security', 'x-kubicle-room': 'audit' })).status, 200);
+  const ok = await c.waitFor(isAgent((a) => a.id === 'hint-ok'));
+  assert.deepEqual([ok.agent.division, ok.agent.room], ['security', 'audit']);
+  assert.equal((await hook('hint-bad', { 'x-kubicle-division': 'Bad Value', 'x-kubicle-room': 'x; rm' })).status, 200);
+  const bad = await c.waitFor(isAgent((a) => a.id === 'hint-bad'));
+  assert.equal(bad.agent.division, undefined);
+  assert.equal(bad.agent.room, undefined);
+  const snap = await c.waitFor((m) => m.t === 'snapshot');
+  assert.ok(snap.t === 'snapshot' && snap.building && Array.isArray(snap.building.divisions));
 });

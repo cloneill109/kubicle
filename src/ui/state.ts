@@ -122,7 +122,7 @@ export function shouldAutoSelect(current: AgentView | undefined, incoming: Agent
 
 export function sameProjects(a: ProjectRow[], b: ProjectRow[]): boolean {
   if (a.length !== b.length) return false;
-  return a.every((p, i) => p.id === b[i].id && p.name === b[i].name && p.wing === b[i].wing && p.archived === b[i].archived && p.approvals === b[i].approvals);
+  return a.every((p, i) => p.id === b[i].id && p.name === b[i].name && p.order === b[i].order && p.archived === b[i].archived && p.approvals === b[i].approvals);
 }
 
 export function titleFor(needYou: number): string {
@@ -131,14 +131,14 @@ export function titleFor(needYou: number): string {
 
 /** Live (non-archived) wings in floor order, as buildWorld lays them out. */
 export function liveWings(projects: ProjectRow[]): ProjectRow[] {
-  return projects.filter((p) => !p.archived).sort((a, b) => a.wing - b.wing);
+  return projects.filter((p) => !p.archived).sort((a, b) => a.order - b.order);
 }
 
 /** Patch that moves a wing one place left (-1) or right (+1), or null at the end of the row. */
-export function moveWing(projects: ProjectRow[], id: string, delta: -1 | 1): { wing: number } | null {
+export function moveWing(projects: ProjectRow[], id: string, delta: -1 | 1): { order: number } | null {
   const live = liveWings(projects);
   const i = live.findIndex((p) => p.id === id);
   const j = i + delta;
   if (i < 0 || j < 0 || j >= live.length) return null;
-  return { wing: live[j].wing };
+  return { order: live[j].order };
 }

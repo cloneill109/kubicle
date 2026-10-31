@@ -9,7 +9,7 @@ import type { ProjectRow } from '../../src/shared/protocol.ts';
 import type { Building } from '../../src/shared/building.ts';
 
 const row = (id: string, archived = false): ProjectRow =>
-  ({ id, name: id, wing: 0, approvals: 'off', archived, firstSeen: 0 } as unknown as ProjectRow);
+  ({ id, name: id, order: 0, approvals: 'off', archived, firstSeen: 0 } as unknown as ProjectRow);
 
 function setup(projects?: (root: string) => ProjectRow[]) {
   const dir = mkdtempSync(join(tmpdir(), 'kubicle-svc-'));

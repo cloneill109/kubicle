@@ -349,7 +349,7 @@ scroller.addEventListener('scroll', () => { if (!menu.hidden) closeMenu(); });
 // ---------------------------------------------------------------- applying server messages
 let worldKey = '';
 function syncWorld(): void {
-  const key = JSON.stringify(liveWings(state.projects).map((p) => [p.id, p.name, p.wing]));
+  const key = JSON.stringify(liveWings(state.projects).map((p) => [p.id, p.name, p.order]));
   if (key === worldKey) return;
   worldKey = key;
   world = buildWorld(state.projects);

@@ -2,6 +2,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, join, resolve, sep } from 'node:path';
 import { normalizeHook, type AgentEvent } from '../shared/events.ts';
+import { ID_RE } from '../shared/building.ts';
 import type { AgentView, FeedItem, ServerMsg } from '../shared/protocol.ts';
 import { hookResponse, type Approvals } from './approvals.ts';
 import { checkIngest, type OwnerAuth } from './auth.ts';
@@ -17,7 +18,7 @@ export const BODY_TIMEOUT_MS = 10_000;
 export const HEARTBEAT_MS = 500;
 export const LOGIN_HINT = 'This login link was already used. Restart the server for a new one.';
 const NAME_MAX = 80;
-const WING_MAX = 999;
+const ORDER_MAX = 999;
 
 // connect-src names the bound port; frame-ancestors blocks clickjacking from other local ports
 // (SameSite ignores ports, so a page on localhost:5173 could otherwise frame the UI with the cookie).
@@ -112,6 +113,12 @@ function param(s: string): string {
   try { return decodeURIComponent(s); } catch { throw new HttpError(400, 'bad path'); }
 }
 
+/** A room/division hint header; ignored unless it is a valid building id. */
+function hint(req: IncomingMessage, name: string): string | undefined {
+  const v = req.headers[name];
+  return typeof v === 'string' && ID_RE.test(v) ? v : undefined;
+}
+
 export function agentKey(e: AgentEvent): string {
   return e.agentId !== undefined ? `${e.sessionId}:${e.agentId}` : e.sessionId;
 }
@@ -124,7 +131,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
   const pageCsp = csp(d.port);
   const debug = process.env.KUBICLE_DEBUG === '1'; // smoke-test aid; off by default
   // A new project appears during ingest (inside registry.apply): broadcast the list before the
-  // agent update that references it, so clients already have its wing.
+  // agent update that references it, so clients already have its floor.
   d.projects.onCreate = () => broadcast({ t: 'projects', projects: d.projects.list() });
 
   function ingest(e: AgentEvent): void {
@@ -153,6 +160,9 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     const raw = await readJson(req);
     const e = normalizeHook(raw, Date.now(), d.cfg.payloadCap);
     if (!e) return send(res, 400, 'not a hook event');
+    const division = hint(req, 'x-kubicle-division'), room = hint(req, 'x-kubicle-room');
+    if (division) e.division = division;
+    if (room) e.room = room;
     if (e.event !== 'PermissionRequest') {
       send(res, 200);
       try { ingest(e); } catch (err) { d.log(`ingest failed: ${String(err)}`); }
@@ -221,7 +231,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     if (!guard(req, res)) return;
     const b = await readJson(req);
     if (!isObj(b)) return send(res, 400, 'bad body');
-    const patch: { name?: string; archived?: boolean; wing?: number } = {};
+    const patch: { name?: string; archived?: boolean; order?: number } = {};
     if (b.name !== undefined) {
       if (typeof b.name !== 'string') return send(res, 400, 'bad name');
       const name = b.name.replace(/\s+/g, ' ').trim();
@@ -232,9 +242,9 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       if (typeof b.archived !== 'boolean') return send(res, 400, 'bad archived');
       patch.archived = b.archived;
     }
-    if (b.wing !== undefined) {
-      if (!Number.isInteger(b.wing) || (b.wing as number) < 0 || (b.wing as number) > WING_MAX) return send(res, 400, 'bad wing');
-      patch.wing = b.wing as number;
+    if (b.order !== undefined) {
+      if (!Number.isInteger(b.order) || (b.order as number) < 0 || (b.order as number) > ORDER_MAX) return send(res, 400, 'bad order');
+      patch.order = b.order as number;
     }
     if (Object.keys(patch).length === 0) return send(res, 400, 'empty patch');
     if (!d.projects.list().some((p) => p.id === id)) return send(res, 404, 'unknown project');

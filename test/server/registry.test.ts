@@ -334,3 +334,61 @@ test('C1: PermissionRequest pending carries the full input and truncated flag', 
   assert.equal(reg.get('s1')!.pending!.input, '{"command":"ls"}');
   assert.equal(reg.get('s1')!.pending!.inputTruncated, undefined);
 });
+
+test('a session keeps the first non-empty division/room hints it receives', () => {
+  const { reg } = mk();
+  reg.apply(ev('SessionStart', { ts: 1, cwd: '/tmp' }));
+  assert.equal(reg.get('s1')!.division, undefined);
+  reg.apply(ev('PreToolUse', { ts: 2, division: 'security', room: 'audit' }));
+  assert.equal(reg.get('s1')!.division, 'security');
+  assert.equal(reg.get('s1')!.room, 'audit');
+  reg.apply(ev('PreToolUse', { ts: 3, division: 'qa', room: 'other' }));
+  assert.equal(reg.get('s1')!.division, 'security', 'later different hint does not override');
+  assert.equal(reg.get('s1')!.room, 'audit');
+});
+
+test('a subagent copies its parent division, room and label, and follows later label changes', () => {
+  const { reg } = mk();
+  reg.apply(ev('SessionStart', { ts: 1, cwd: '/tmp', division: 'qa', room: 'r1' }));
+  assert.equal(reg.setRoomLabel('s1', 'lab')!.roomLabel, 'lab');
+  reg.apply(ev('SubagentStart', { ts: 2, agentId: 'a1', agentType: 'Explore' }));
+  const sub = reg.get('s1:a1')!;
+  assert.deepEqual([sub.division, sub.room, sub.roomLabel], ['qa', 'r1', 'lab']);
+  reg.setRoomLabel('s1', 'other');
+  assert.equal(reg.get('s1:a1')!.roomLabel, 'other');
+  reg.setRoomLabel('s1', null);
+  assert.equal(reg.get('s1:a1')!.roomLabel, undefined);
+  assert.equal(reg.get('s1')!.roomLabel, undefined);
+});
+
+test('setRoomLabel: sessions only, unknown agent undefined', () => {
+  const { reg } = mk();
+  reg.apply(ev('SessionStart', { ts: 1, cwd: '/tmp' }));
+  reg.apply(ev('SubagentStart', { ts: 2, agentId: 'a1' }));
+  assert.equal(reg.setRoomLabel('s1:a1', 'x'), undefined);
+  assert.equal(reg.setRoomLabel('nope', 'x'), undefined);
+});
+
+test('setRoomLabel persists across rebuild', () => {
+  const { reg, store } = mk();
+  const events = [ev('SessionStart', { ts: 1, cwd: '/tmp', division: 'qa' }), ev('SubagentStart', { ts: 2, agentId: 'a1' })];
+  for (const e of events) reg.apply(e);
+  reg.setRoomLabel('s1', 'lab');
+  assert.equal(store.getSessionRoom('s1'), 'lab');
+  reg.rebuild(events);
+  assert.equal(reg.get('s1')!.roomLabel, 'lab');
+  assert.equal(reg.get('s1')!.division, 'qa');
+  assert.equal(reg.get('s1:a1')!.roomLabel, 'lab');
+  reg.setRoomLabel('s1', null);
+  assert.equal(store.getSessionRoom('s1'), null);
+});
+
+test('room label and approvals settings do not clobber each other', () => {
+  const { reg, store } = mk();
+  reg.apply(ev('SessionStart', { ts: 1, cwd: '/tmp' }));
+  reg.setRoomLabel('s1', 'lab');
+  assert.equal(store.getSessionApprovals('s1'), null);
+  store.setSessionApprovals('s1', 'office');
+  assert.equal(store.getSessionRoom('s1'), 'lab');
+  assert.equal(store.getSessionApprovals('s1'), 'office');
+});

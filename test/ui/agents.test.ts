@@ -5,7 +5,7 @@ import { Sim } from '../../src/ui/sim/agents.ts';
 import type { AgentView } from '../../src/shared/protocol.ts';
 
 const A = '/Users/me/code/alpha', B = '/Users/me/code/beta';
-const PROJECTS = [{ id: A, name: 'alpha', wing: 0 }, { id: B, name: 'beta', wing: 1 }];
+const PROJECTS = [{ id: A, name: 'alpha', order: 0 }, { id: B, name: 'beta', order: 1 }];
 
 function view(o: Partial<AgentView> & { id: string }): AgentView {
   return {
@@ -225,7 +225,7 @@ test('setWorld keeps desks stable when a project is added, and re-seats agents o
   sim.upsert(view({ id: 'a1', projectId: A }), 0, { place: true });
   sim.upsert(view({ id: 'b1', projectId: B }), 0, { place: true });
   const before = { ...get(sim, 'a1')!.desk! };
-  const w2 = buildWorld([...PROJECTS, { id: '/c', name: 'c', wing: 2 }]);
+  const w2 = buildWorld([...PROJECTS, { id: '/c', name: 'c', order: 2 }]);
   sim.setWorld(w2);
   const d = get(sim, 'a1')!.desk!;
   assert.ok(w2.furn.includes(d), 'desk belongs to the new world');

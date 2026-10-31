@@ -111,6 +111,12 @@ export class Registry {
       a.agentId = e.agentId!;
       a.parentId = parent!.id;
       if (parent!.cwd) a.cwd = parent!.cwd;
+      if (parent!.division) a.division = parent!.division;
+      if (parent!.room) a.room = parent!.room;
+      if (parent!.roomLabel) a.roomLabel = parent!.roomLabel;
+    } else {
+      const label = this.#store.getSessionRoom(id);
+      if (label) a.roomLabel = label;
     }
     this.#agents.set(id, a);
     return a;
@@ -161,6 +167,11 @@ export class Registry {
       this.#quietMtime.delete(target.id);
       if (session && session !== target) session.lastSeen = Math.max(session.lastSeen, e.ts);
       if (e.model) target.model = e.model;
+      // A session keeps the first non-empty hints; a subagent's come from its parent.
+      if (target.kind === 'session') {
+        if (!target.division && e.division) target.division = e.division;
+        if (!target.room && e.room) target.room = e.room;
+      }
       if (e.transcriptPath) this.#transcripts.set(target.id, e.transcriptPath);
       if (e.cwd && (e.event === 'CwdChanged' || e.event === 'SessionStart' || !target.cwd || target.projectId === '')) {
         this.#setCwd(target, e.cwd, e.ts, touched);
@@ -335,6 +346,18 @@ export class Registry {
     if (!a) return undefined;
     a.pending = undefined;
     if (a.status === 'waiting') a.status = 'working';
+    return snap(a);
+  }
+
+  /** Owner moves a session to a room (or clears it). Sessions only; subagents follow their parent. */
+  setRoomLabel(agentId: string, roomId: string | null): AgentView | undefined {
+    const a = this.#agents.get(agentId);
+    if (!a || a.kind !== 'session') return undefined;
+    this.#store.setSessionRoom(a.sessionId, roomId);
+    for (const x of this.#agents.values()) {
+      if (x !== a && x.parentId !== a.id) continue;
+      if (roomId) x.roomLabel = roomId; else delete x.roomLabel;
+    }
     return snap(a);
   }
 

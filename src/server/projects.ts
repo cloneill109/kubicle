@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, resolve as resolvePath } from 'node:path';
 import type { Store, ProjectRow } from './store.ts';
+import { slugFor } from './building/files.ts';
 
 const rootCache = new Map<string, string>();
 
@@ -55,8 +56,8 @@ export class Projects {
     if (existing) return existing;
     let name = basename(root) || root;
     if (rows.some((r) => r.name === name)) name = `${name} (${basename(dirname(root))})`;
-    const wing = rows.reduce((m, r) => Math.max(m, r.wing), -1) + 1;
-    const row: ProjectRow = { id: root, name, wing, approvals: 'off', archived: false, firstSeen: now };
+    const order = rows.reduce((m, r) => Math.max(m, r.order), -1) + 1;
+    const row: ProjectRow = { id: root, name, order, slug: slugFor(root), approvals: 'off', archived: false, firstSeen: now };
     this.#store.upsertProject(row);
     this.onCreate?.(row);
     return row;
@@ -72,18 +73,18 @@ export class Projects {
     return next;
   }
 
-  /** Rename, archive, or move a wing. Moving onto a taken wing swaps numbers so they stay unique. */
-  update(id: string, patch: { name?: string; archived?: boolean; wing?: number }): ProjectRow {
+  /** Rename, archive, or move a floor. Moving onto a taken order swaps numbers so they stay unique. */
+  update(id: string, patch: { name?: string; archived?: boolean; order?: number }): ProjectRow {
     const rows = this.#store.listProjects();
     const cur = rows.find((r) => r.id === id);
     if (!cur) throw new Error(`unknown project: ${id}`);
     const next: ProjectRow = { ...cur };
     if (patch.name !== undefined) next.name = patch.name;
     if (patch.archived !== undefined) next.archived = patch.archived;
-    if (patch.wing !== undefined && patch.wing !== cur.wing) {
-      const other = rows.find((r) => r.id !== id && r.wing === patch.wing);
-      if (other) this.#store.upsertProject({ ...other, wing: cur.wing }); // carries original firstSeen
-      next.wing = patch.wing;
+    if (patch.order !== undefined && patch.order !== cur.order) {
+      const other = rows.find((r) => r.id !== id && r.order === patch.order);
+      if (other) this.#store.upsertProject({ ...other, order: cur.order }); // carries original firstSeen
+      next.order = patch.order;
     }
     this.#store.upsertProject(next);
     return next;

@@ -26,8 +26,8 @@ export function wallNear(w: World, x: number, y: number): boolean {
   return false;
 }
 
-export function buildWorld(projects: { id: string; name: string; wing: number; archived?: boolean }[]): World {
-  const live = projects.filter((p) => !p.archived).slice().sort((a, b) => a.wing - b.wing);
+export function buildWorld(projects: { id: string; name: string; order: number; archived?: boolean }[]): World {
+  const live = projects.filter((p) => !p.archived).slice().sort((a, b) => a.order - b.order);
   const slots = Math.max(MIN_SLOTS, live.length);
   const columns = Math.ceil(slots / 2);
   const cols = FIRST_WING_X - 1 + WING_PITCH * columns;

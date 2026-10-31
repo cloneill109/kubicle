@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { slugFor } from '../../src/server/building/files.ts';
 import assert from 'node:assert/strict';
 import { mkdtempSync, statSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -30,7 +31,7 @@ test('eventsSince is ts >= and oldest first', () => {
 
 test('project upsert round-trips and updates', () => {
   const s = openStore(':memory:');
-  const p = { id: '/r/a', name: 'a', wing: 2, approvals: 'office' as const, archived: false, firstSeen: 9 };
+  const p = { id: '/r/a', name: 'a', order: 2, slug: slugFor('/r/a'), approvals: 'office' as const, archived: false, firstSeen: 9 };
   s.upsertProject(p);
   assert.deepEqual(s.listProjects(), [p]);
   s.upsertProject({ ...p, archived: true, approvals: 'off' });

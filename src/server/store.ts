@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { chmodSync, existsSync } from 'node:fs';
 import type { AgentEvent } from '../shared/events.ts';
 import type { ProjectRow } from '../shared/protocol.ts';
+import { slugFor } from './building/files.ts';
 
 export type { ProjectRow };
 
@@ -13,6 +14,8 @@ export interface Store {
   listProjects(): ProjectRow[];
   getSessionApprovals(sessionId: string): 'off' | 'office' | null;
   setSessionApprovals(sessionId: string, mode: 'off' | 'office'): void;
+  getSessionRoom(sessionId: string): string | null;
+  setSessionRoom(sessionId: string, roomId: string | null): void;
   prune(olderThanTs: number): void;
   close(): void;
 }
@@ -31,6 +34,10 @@ export function openStore(file: string): Store {
     CREATE TABLE IF NOT EXISTS session_settings (
       session_id TEXT PRIMARY KEY, approvals TEXT NOT NULL);
   `);
+  // Older databases lack the room column; add it in place.
+  if (!(db.prepare('PRAGMA table_info(session_settings)').all() as { name: string }[]).some((c) => c.name === 'room')) {
+    db.exec('ALTER TABLE session_settings ADD COLUMN room TEXT');
+  }
   if (file !== ':memory:') {
     // Main file plus WAL/SHM sidecars must not be world-readable.
     for (const f of [file, file + '-wal', file + '-shm']) {
@@ -49,9 +56,14 @@ export function openStore(file: string): Store {
   const selProjects = db.prepare(
     'SELECT id, name, wing, approvals, archived, first_seen FROM projects ORDER BY first_seen, id');
   const selSession = db.prepare('SELECT approvals FROM session_settings WHERE session_id = ?');
+  // approvals is NOT NULL in older databases: a row that only carries a room stores '' (= unset).
   const upSession = db.prepare(
     `INSERT INTO session_settings (session_id, approvals) VALUES (?,?)
      ON CONFLICT(session_id) DO UPDATE SET approvals=excluded.approvals`);
+  const selRoom = db.prepare('SELECT room FROM session_settings WHERE session_id = ?');
+  const upRoom = db.prepare(
+    `INSERT INTO session_settings (session_id, approvals, room) VALUES (?,'',?)
+     ON CONFLICT(session_id) DO UPDATE SET room=excluded.room`);
   const delOld = db.prepare('DELETE FROM events WHERE ts < ?');
 
   const parse = (rows: unknown[]): AgentEvent[] =>
@@ -74,19 +86,24 @@ export function openStore(file: string): Store {
     recentEvents: (limit) => parse(selRecent.all(limit)),
     eventsSince: (ts) => parse(selSince.all(ts)),
     upsertProject(p) {
-      upProject.run(p.id, p.name, p.wing, p.approvals, p.archived ? 1 : 0, p.firstSeen);
+      upProject.run(p.id, p.name, p.order, p.approvals, p.archived ? 1 : 0, p.firstSeen);
     },
     listProjects() {
       return selProjects.all().map((r: any) => ({
-        id: r.id, name: r.name, wing: r.wing, approvals: r.approvals,
+        id: r.id, name: r.name, order: r.wing, slug: slugFor(r.id), approvals: r.approvals,
         archived: r.archived !== 0, firstSeen: r.first_seen,
       }));
     },
     getSessionApprovals(sessionId) {
       const r = selSession.get(sessionId) as { approvals: 'off' | 'office' } | undefined;
-      return r ? r.approvals : null;
+      return r && (r.approvals === 'off' || r.approvals === 'office') ? r.approvals : null;
     },
     setSessionApprovals(sessionId, mode) { upSession.run(sessionId, mode); },
+    getSessionRoom(sessionId) {
+      const r = selRoom.get(sessionId) as { room: string | null } | undefined;
+      return r?.room ?? null;
+    },
+    setSessionRoom(sessionId, roomId) { upRoom.run(sessionId, roomId); },
     prune(ts) { delOld.run(ts); },
     close() { db.close(); },
   };

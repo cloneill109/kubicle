@@ -69,6 +69,7 @@ export async function startServer(
 
   hub.onConnect((send) => send({
     t: 'snapshot', agents: registry.list(), projects: projects.list(), feed: [...feed].reverse(), banner,
+    building: { divisions: [], floors: {}, warnings: [] }, // Task 7 wires BuildingService
   }));
 
   const server = createServer();

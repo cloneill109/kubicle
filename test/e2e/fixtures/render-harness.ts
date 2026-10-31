@@ -29,9 +29,9 @@ function seated(w: World, v: AgentView, desk: Furn, extra: Partial<SimAgent> = {
 
 function threeProjects() {
   const projects = [
-    { id: '/Users/me/code/agent-manager', name: 'agent-manager', wing: 1 },
-    { id: '/Users/me/code/yt-pipeline', name: 'yt-pipeline', wing: 2 },
-    { id: '/Users/me/code/portfolio-site', name: 'portfolio-site', wing: 3 },
+    { id: '/Users/me/code/agent-manager', name: 'agent-manager', order: 1 },
+    { id: '/Users/me/code/yt-pipeline', name: 'yt-pipeline', order: 2 },
+    { id: '/Users/me/code/portfolio-site', name: 'portfolio-site', order: 3 },
   ];
   const w = buildWorld(projects);
   const [A, B, C] = projects.map((p) => p.id);
@@ -53,7 +53,7 @@ function threeProjects() {
 
 function twelveProjects() {
   const names = ['agent-manager', 'yt-pipeline', 'portfolio-site', 'infra', 'mobile-app', 'design-system', 'data-lake', 'docs', 'billing-service', 'marketing-landing-page-2026', 'ml-experiments', 'scratch'];
-  const projects = names.map((name, i) => ({ id: `/Users/me/code/${name}`, name, wing: i + 1 }));
+  const projects = names.map((name, i) => ({ id: `/Users/me/code/${name}`, name, order: i + 1 }));
   const w = buildWorld(projects);
   const statuses: AgentStatus[] = ['working', 'idle', 'waiting', 'working', 'quiet', 'lost'];
   const roles = ['frontend', 'backend', 'general', 'Explore', 'security', 'Plan', 'animation', 'publisher'];

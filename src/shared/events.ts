@@ -13,6 +13,9 @@ export interface AgentEvent {
   sessionId: string;
   agentId?: string;
   agentType?: string;
+  /** From the x-kubicle-division / x-kubicle-room ingest headers (ID_RE-valid only). */
+  division?: string;
+  room?: string;
   cwd?: string;
   transcriptPath?: string;
   toolName?: string;

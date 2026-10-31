@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { buildWorld, isWall, wallNear } from '../../src/ui/sim/world.ts';
 import { bfs, seatOf, assignDesk } from '../../src/ui/sim/path.ts';
 
-const mk = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `p${i}`, name: `proj-${i}`, wing: i + 1 }));
+const mk = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `p${i}`, name: `proj-${i}`, order: i + 1 }));
 const walk = (w: ReturnType<typeof buildWorld>, x: number, y: number) =>
   x >= 0 && y >= 0 && x < w.cols && y < w.rows && !w.grid[y][x].wall && !w.grid[y][x].block;
 
@@ -49,10 +49,10 @@ test('minimum two wing slots even when empty; cols grow with ceil(n/2)', () => {
 
 test('archived skipped; sorted by wing with gaps; alternate above/below hall', () => {
   const w = buildWorld([
-    { id: 'c', name: 'C', wing: 9 },
-    { id: 'a', name: 'A', wing: 2 },
-    { id: 'x', name: 'X', wing: 1, archived: true },
-    { id: 'b', name: 'B', wing: 5 },
+    { id: 'c', name: 'C', order: 9 },
+    { id: 'a', name: 'A', order: 2 },
+    { id: 'x', name: 'X', order: 1, archived: true },
+    { id: 'b', name: 'B', order: 5 },
   ]);
   const wings = w.rooms.filter((r) => r.kind === 'wing');
   assert.deepEqual(wings.map((r) => r.id), ['a', 'b', 'c']);

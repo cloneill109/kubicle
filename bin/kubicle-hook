@@ -26,12 +26,22 @@ fi
 hkind="event"
 [ "$kind" = "perm" ] && hkind="perm"
 
+# Optional placement hints; sent only when they look like a building id (never raw env text).
+extra=()
+if [[ "${KUBICLE_DIVISION:-}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]]; then
+  extra+=(-H "X-Kubicle-Division: $KUBICLE_DIVISION")
+fi
+if [[ "${KUBICLE_ROOM:-}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]]; then
+  extra+=(-H "X-Kubicle-Room: $KUBICLE_ROOM")
+fi
+
 # While the office waits it sends a space every 0.5 s; a frozen server sends nothing, so
 # --speed-limit/--speed-time give up after ~3 s instead of holding the session for the full max.
 out=$(curl -s -m "$max" --connect-timeout 1 --speed-limit 1 --speed-time 3 -X POST \
   -H 'Content-Type: application/json' \
   -H "X-Kubicle-Token: $token" \
   -H "X-Kubicle-Hook-Kind: $hkind" \
+  ${extra[@]+"${extra[@]}"} \
   --data-binary @- \
   -w $'\n%{http_code}' \
   "http://127.0.0.1:${KUBICLE_PORT:-4317}/hooks" 2>/dev/null)

@@ -7,11 +7,11 @@ const v = (id: string, o: Partial<AgentView> = {}): AgentView => ({
   id, sessionId: id, kind: 'session', name: id, role: 'general', projectId: '/p', status: 'working', activity: '',
   startedAt: 0, lastSeen: 0, approvals: 'off', log: [], ...o,
 });
-const proj = (id: string, wing: number, o: Partial<ProjectRow> = {}): ProjectRow => ({ id, name: id, wing, approvals: 'off', archived: false, firstSeen: 0, ...o });
+const proj = (id: string, order: number, o: Partial<ProjectRow> = {}): ProjectRow => ({ id, name: id, order, slug: id, approvals: 'off', archived: false, firstSeen: 0, ...o });
 
 test('needs-you fires only on the transition into waiting', () => {
   const s = new OfficeState();
-  const first = s.apply({ t: 'snapshot', agents: [v('a', { status: 'waiting' })], projects: [], feed: [], banner: null });
+  const first = s.apply({ t: 'snapshot', agents: [v('a', { status: 'waiting' })], projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, warnings: [] } });
   assert.equal(first.newlyWaiting.length, 0, 'no alert for what was already waiting at page load');
   assert.equal(first.firstSnapshot, true);
   assert.equal(s.apply({ t: 'agent', agent: v('b') }).newlyWaiting.length, 0);
@@ -21,7 +21,7 @@ test('needs-you fires only on the transition into waiting', () => {
   assert.equal(titleFor(s.counts().needYou), '(2) Kubicle');
   assert.equal(titleFor(0), 'Kubicle');
   // Reconnect snapshot: c newly waiting alerts, a (still waiting) does not; b vanished → expired.
-  const re = s.apply({ t: 'snapshot', agents: [v('a', { status: 'waiting' }), v('c', { status: 'waiting' })], projects: [], feed: [], banner: null });
+  const re = s.apply({ t: 'snapshot', agents: [v('a', { status: 'waiting' }), v('c', { status: 'waiting' })], projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, warnings: [] } });
   assert.deepEqual(re.newlyWaiting.map((x) => x.id), ['c']);
   assert.deepEqual(re.removed.map((r) => [r.view.id, r.reason]), [['b', 'expired']]);
   assert.equal(re.firstSnapshot, false);
@@ -29,7 +29,7 @@ test('needs-you fires only on the transition into waiting', () => {
 
 test('counts, removal and feed cap', () => {
   const s = new OfficeState();
-  s.apply({ t: 'snapshot', agents: [v('a'), v('a:x', { kind: 'subagent', parentId: 'a' })], projects: [], feed: [], banner: null });
+  s.apply({ t: 'snapshot', agents: [v('a'), v('a:x', { kind: 'subagent', parentId: 'a' })], projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, warnings: [] } });
   assert.deepEqual(s.counts(), { sessions: 1, subagents: 1, needYou: 0 });
   const r = s.apply({ t: 'agentRemoved', id: 'a:x', reason: 'ended' });
   assert.deepEqual(r.removed.map((x) => x.view.id), ['a:x']);
@@ -47,8 +47,8 @@ test('projects change detection and wing moves', () => {
   assert.equal(s.apply({ t: 'projects', projects: ps }).projects, true);
   assert.equal(s.apply({ t: 'projects', projects: ps.map((p) => ({ ...p })) }).projects, false);
   assert.deepEqual(moveWing(ps, '/a', -1), null);
-  assert.deepEqual(moveWing(ps, '/a', 1), { wing: 1 });
-  assert.deepEqual(moveWing(ps, '/b', 1), { wing: 5 }, 'skips archived wings');
+  assert.deepEqual(moveWing(ps, '/a', 1), { order: 1 });
+  assert.deepEqual(moveWing(ps, '/b', 1), { order: 5 }, 'skips archived wings');
   assert.deepEqual(moveWing(ps, '/d', 1), null);
 });
 
@@ -56,7 +56,7 @@ const pend = (id: string, since: number, answerable: boolean) => ({ id, toolName
 
 test('I5: pickNeedsYou -> oldest answerable waiting; fallback oldest waiting; none -> undefined', () => {
   const s = new OfficeState();
-  s.apply({ t: 'snapshot', projects: [], feed: [], banner: null, agents: [
+  s.apply({ t: 'snapshot', projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, warnings: [] }, agents: [
     v('w-old', { status: 'waiting', pending: pend('p1', 10, false) }),
     v('a-new', { status: 'waiting', pending: pend('p2', 50, true) }),
     v('a-old', { status: 'waiting', pending: pend('p3', 30, true) }),
@@ -64,7 +64,7 @@ test('I5: pickNeedsYou -> oldest answerable waiting; fallback oldest waiting; no
   ] });
   assert.equal(pickNeedsYou(s.agents.values())?.id, 'a-old');
   const t = new OfficeState();
-  t.apply({ t: 'snapshot', projects: [], feed: [], banner: null, agents: [
+  t.apply({ t: 'snapshot', projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, warnings: [] }, agents: [
     v('w2', { status: 'waiting', pending: pend('p1', 20, false) }),
     v('w1', { status: 'waiting', lastSeen: 5 }), // waiting with no pending: ordered by lastSeen
     v('idle', { status: 'idle' }),
@@ -75,7 +75,7 @@ test('I5: pickNeedsYou -> oldest answerable waiting; fallback oldest waiting; no
 
 test('I5: newlyAnswerable reports a new answerable approval once (not on first snapshot)', () => {
   const s = new OfficeState();
-  const first = s.apply({ t: 'snapshot', projects: [], feed: [], banner: null, agents: [v('a', { status: 'waiting', pending: pend('p0', 1, true) })] });
+  const first = s.apply({ t: 'snapshot', projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, warnings: [] }, agents: [v('a', { status: 'waiting', pending: pend('p0', 1, true) })] });
   assert.equal(first.newlyAnswerable.length, 0);
   assert.equal(s.apply({ t: 'agent', agent: v('b', { status: 'waiting', pending: pend('p1', 2, false) }) }).newlyAnswerable.length, 0, 'unanswerable');
   assert.deepEqual(s.apply({ t: 'agent', agent: v('b', { status: 'waiting', pending: pend('p1', 2, true) }) }).newlyAnswerable.map((x) => x.id), ['b'], 'upgraded to answerable');
