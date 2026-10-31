@@ -399,7 +399,7 @@ test('C1: with a grant, a push that is also self-administration is guard-granted
   const cookie = await login(s);
   await seen(s, 'c1g');
   assert.equal((await control(s, cookie, '/api/bubbles/grants', { projectId: s.cwd, action: 'push', branch: 'main', uses: 1, ttlMs: 60_000 })).status, 201);
-  const c = 'git push origin main # kubicle log';
+  const c = 'echo kubicle bubbles; git push origin main'; // one plain push (grantable) that is also self-administration
   assert.equal((await pre(s, 'c1g', c, { tool_use_id: 'tu-c1g' })).body, '');
   assert.equal((await perm(s, 'c1g', c, { tool_use_id: 'tu-c1g' })).body.trim(), '');
   assert.equal(s.fakeCalls(), 0);
@@ -451,4 +451,29 @@ test('I1: a grant for this project never covers a push that moves to another dir
   assert.ok(guards.every((e) => e.outcome === 'ask' && /not grantable/.test(e.detail ?? '')));
   // The same grant still covers a plain push in the project.
   assert.equal((await pre(s, 'i1', 'git push origin main')).body, '');
+});
+
+test('a single-use grant for main covers exactly one plain push: anything more asks and escalates as protected', async () => {
+  const s = await start(); // the fake would approve anything it is asked
+  const cookie = await login(s);
+  await seen(s, 'one');
+  assert.equal((await control(s, cookie, '/api/bubbles/grants', { projectId: s.cwd, action: 'push', branch: 'main', uses: 1, ttlMs: 60_000 })).status, 201);
+  const cmds = [
+    'git push origin main master', 'git push origin main && git push --force origin master', 'git push origin main; git push origin :master',
+    'git push origin main && git push origin --delete master', 'git push origin main && git push origin HEAD:master',
+    'git push origin main && git push --force origin main', 'printf "gitdir: /tmp/o/.git" > .git && git push origin main',
+    'cat /tmp/evilcfg > .git/config; git push origin main', 'git push evilremote main', 'git push origin main --tags',
+  ];
+  for (const c of cmds) {
+    const id = `tu-${c}`;
+    assert.equal((await pre(s, 'one', c, { tool_use_id: id })).body, GUARD_ASK, c);
+    assert.equal((await perm(s, 'one', c, { tool_use_id: id })).body.trim(), '', c);
+  }
+  assert.equal(s.fakeCalls(), 0);
+  const es = await logOf(s);
+  assert.ok(es.filter((e) => e.kind === 'guard').every((e) => e.outcome === 'ask'));
+  assert.deepEqual([...new Set(es.filter((e) => e.kind === 'triage').map((e) => e.outcome))], ['escalated:protected']);
+  // The grant was never spent: the one plain push still goes through once.
+  assert.equal((await pre(s, 'one', 'git push origin main')).body, '');
+  assert.equal((await pre(s, 'one', 'git push origin main')).body, GUARD_ASK);
 });

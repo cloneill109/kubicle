@@ -880,9 +880,10 @@ export function otherProtectedAction(toolName: string, input: unknown, ctx: Rule
 export interface PushMergeHit {
   hit: Extract<Protected, { kind: 'push' | 'merge' }>;
   /**
-   * True only when a grant for the session's project may cover this call: a plain git/gh command in the
-   * session's own cwd (no cd/pushd, no `git -C`/`--git-dir`/`--work-tree`, no GIT_* env, no `gh -R/--repo`, no
-   * wrapper, interpreter or unknown program). MCP tools name their repo in their arguments: never grantable.
+   * True only when a grant for the session's project may cover this call: exactly one plain push (`git push origin
+   * <one refspec>`, no force/delete/mirror/all/tags) or one plain merge, in the session's own cwd, with nothing else
+   * but harmless programs and local git subcommands (see grantableCmd). MCP tools name their repo in their
+   * arguments: never grantable.
    */
   grantable: boolean;
 }
@@ -898,7 +899,7 @@ export function pushMergeAction(toolName: string, input: unknown, ctx: RulesCtx)
       const cmd = typeof inp.command === 'string' ? inp.command : '';
       const p = classify(toolName, input, ctx, 'pm');
       if (!p || (p.kind !== 'push' && p.kind !== 'merge')) return null;
-      return { hit: p, grantable: cmd.length <= MAX_COMMAND_LEN && grantableSegs(segmentsOf(cmd)) };
+      return { hit: p, grantable: grantableCmd(cmd) };
     }
     const p = classify(toolName, input, ctx, 'pm');
     return p && (p.kind === 'push' || p.kind === 'merge') ? { hit: p, grantable: false } : null;
@@ -908,24 +909,80 @@ export function pushMergeAction(toolName: string, input: unknown, ctx: RulesCtx)
 }
 
 const REPO_MOVE_OPT = /^(-C|--git-dir|--work-tree|-R|--repo)(=|$)/;
+// Global git options that change nothing about which repo/config is used.
+const GRANT_GIT_GLOBAL = new Set(['--no-pager', '--paginate', '-p', '-P', '--no-optional-locks']);
+// Other git subcommands a granted command may also run: local or read-only, they cannot move refs on a remote.
+const GRANT_GIT_LOCAL = new Set(['status', 'log', 'diff', 'show', 'fetch', 'rev-parse', 'add', 'commit', 'ls-files', 'describe']);
+const GRANT_PUSH_FLAGS = new Set(['-u', '--set-upstream', '-v', '--verbose', '-q', '--quiet', '--no-verify', '--progress', '-n', '--dry-run']);
+const GRANT_MERGE_FLAGS = new Set(['--no-ff', '--ff-only', '--ff', '--no-edit', '--squash', '--no-squash', '-q', '--quiet', '-v', '--verbose']);
+const GRANT_GH_MERGE_FLAGS = new Set(['--squash', '--merge', '--rebase', '--auto', '-s', '-m', '-r']);
+const REF_PART = /^[A-Za-z0-9._\/-]+$/;
 
-/** Whitelist: every segment is git/hub/gh (without repo-moving options) or a harmless program; no sensitive env. */
-function grantableSegs(segs: Segment[]): boolean {
+/** `git push origin <one refspec>`: no force/delete/mirror/all/tags, no `+`, no empty source. */
+function plainPush(args: string[]): boolean {
+  const pos: string[] = [];
+  for (const a of args) {
+    if (a.startsWith('-')) { if (!GRANT_PUSH_FLAGS.has(a)) return false; } else pos.push(a);
+  }
+  if (pos.length !== 2 || pos[0] !== 'origin') return false;
+  const parts = pos[1].split(':');
+  return parts.length <= 2 && parts.every((x) => x !== '' && REF_PART.test(x) && !x.includes('..'));
+}
+
+/** `git merge <one branch>` with only harmless flags. */
+function plainMerge(args: string[]): boolean {
+  const pos = args.filter((a) => !a.startsWith('-'));
+  return args.every((a) => !a.startsWith('-') || GRANT_MERGE_FLAGS.has(a)) && pos.length === 1 && REF_PART.test(pos[0]);
+}
+
+/** `gh pr merge [<number|branch>] [--squash|--merge|--rebase|--auto]` on the cwd's repo (no -R, no --delete-branch). */
+function plainGhMerge(w: string[]): boolean {
+  if (w[1] !== 'pr' || w[2] !== 'merge') return false;
+  const args = w.slice(3);
+  const pos = args.filter((a) => !a.startsWith('-'));
+  return args.every((a) => !a.startsWith('-') || GRANT_GH_MERGE_FLAGS.has(a)) && pos.length <= 1 && pos.every((x) => REF_PART.test(x));
+}
+
+/**
+ * A grant may cover the call ONLY when the whole command is exactly one plain push (to origin, one destination) or
+ * one plain merge, in the session's own repo, alongside nothing but harmless programs and local git subcommands:
+ * no write redirects or process substitution, no cd/-C/--git-dir/--work-tree/-R, no sensitive env, no wrappers.
+ */
+function grantableCmd(cmd: string): boolean {
+  if (cmd.length > MAX_COMMAND_LEN) return false;
+  // same normalisation as classify(): fd duplication and /dev/null sinks are harmless
+  const segs = segmentsOf(cmd.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' '));
+  let invocations = 0;
   for (const s of segs) {
+    if (s.redirs.some((r) => /[>]/.test(r.op))) return false; // > >> >| &> <> and fd-prefixed forms
+    if (s.words.some((w) => /[<>]\(/.test(w))) return false;
     let i = 0;
     while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) { if (SENS_ENV.test(s.words[i])) return false; i++; }
-    const first = s.words[i];
-    if (first === undefined) continue;
-    if (/[$`*?\[{]/.test(first)) return false;
-    const base = lc(basename(first));
-    if (base === 'git' || base === 'hub' || base === 'gh' || /^git-[\w-]+$/.test(base)) {
-      if (s.words.slice(i + 1).some((w) => REPO_MOVE_OPT.test(w) || /^-C./.test(w))) return false;
+    const w = s.words.slice(i);
+    if (w.length === 0) continue;
+    if (/[$`*?\[{]/.test(w[0])) return false;
+    const base = lc(basename(w[0]));
+    if (w.slice(1).some((x) => REPO_MOVE_OPT.test(x) || /^-C./.test(x))) return false;
+    if (base === 'gh') {
+      if (!plainGhMerge(w)) return false;
+      invocations++;
+      continue;
+    }
+    if (base === 'git' || base === 'hub' || /^git-[\w-]+$/.test(base)) {
+      const gw = base.startsWith('git-') ? [base.slice(4), ...w.slice(1)] : w.slice(1);
+      let j = 0;
+      while (j < gw.length && gw[j].startsWith('-')) { if (!GRANT_GIT_GLOBAL.has(gw[j])) return false; j++; }
+      const sub = gw[j];
+      const args = gw.slice(j + 1);
+      if (sub === 'push') { if (!plainPush(args)) return false; invocations++; }
+      else if (sub === 'merge') { if (!plainMerge(args)) return false; invocations++; }
+      else if (sub === undefined || !GRANT_GIT_LOCAL.has(sub)) return false;
       continue;
     }
     if (HARMLESS.has(base)) continue;
     return false;
   }
-  return true;
+  return invocations === 1;
 }
 
 function classify(toolName: string, input: unknown, ctx: RulesCtx, mode: 'all' | 'pm' | 'rest'): Protected | null {
