@@ -191,3 +191,65 @@ test('non-BuildingFileError read failures become warnings and keep last good', (
     assert.ok(b.warnings[0]!.startsWith(s.homeFile));
   } finally { s.cleanup(); }
 });
+
+const BROKEN = 'revision: [oops\n';
+import { readFileSync } from 'node:fs';
+
+test('saveFloor refuses to write over an invalid floor file (repo+home, home only, repo only)', () => {
+  for (const scenario of ['A', 'B', 'C']) {
+    const s = setup();
+    try {
+      const repo = join(s.root, '.kubicle', 'floor.yaml');
+      mkdirSync(join(s.home, 'floors'), { recursive: true });
+      if (scenario === 'A') {
+        writeFileSync(s.homeFile, floorYaml(1, ['bullpen', 'h']));
+        mkdirSync(join(s.root, '.kubicle'));
+        writeFileSync(repo, BROKEN);
+      } else if (scenario === 'B') {
+        writeFileSync(s.homeFile, 'revision: 1\nrooms: nope\n');
+      } else {
+        mkdirSync(join(s.root, '.kubicle'));
+        writeFileSync(repo, BROKEN);
+      }
+      const before = [s.homeFile, repo].map((f) => (existsSync(f) ? readFileSync(f, 'utf8') : null));
+      const target = scenario === 'B' ? s.homeFile : repo;
+      for (const base of [0, 1]) {
+        assert.throws(() => s.svc.saveFloor(s.root, rooms(['bullpen']), base),
+          (e: Error) => !(e instanceof RevisionConflict) && e.message.includes(`fix or delete ${target}`));
+      }
+      const after = [s.homeFile, repo].map((f) => (existsSync(f) ? readFileSync(f, 'utf8') : null));
+      assert.deepEqual(after, before, scenario);
+    } finally { s.cleanup(); }
+  }
+});
+
+test('saveFloor and floorFile reject unknown or archived project ids', () => {
+  const s = setup((root) => [row(root), row(root + '-old', true)]);
+  try {
+    for (const id of ['/nope', s.list[1]!.id]) {
+      assert.throws(() => s.svc.saveFloor(id, rooms(['bullpen']), 0), /unknown or archived/);
+      assert.throws(() => s.svc.floorFile(id), /unknown or archived/);
+    }
+  } finally { s.cleanup(); }
+});
+
+test('unrelated files in home do not trigger reloads; floors yaml writes do', async () => {
+  const s = setup();
+  try {
+    await new Promise((r) => setTimeout(r, 150)); // let startup (seeding) fs events drain
+    let n = 0;
+    const orig = (s.svc as any).reload.bind(s.svc);
+    (s.svc as any).reload = () => { n++; orig(); };
+    for (let i = 0; i < 5; i++) {
+      writeFileSync(join(s.home, 'office.db'), String(i));
+      writeFileSync(join(s.home, 'office.db-wal'), String(i));
+      writeFileSync(join(s.home, 'other.txt'), String(i));
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(n, 0);
+    mkdirSync(join(s.home, 'floors'), { recursive: true });
+    writeFileSync(s.homeFile, floorYaml(1, ['bullpen', 'z']));
+    await until(() => n > 0);
+  } finally { s.cleanup(); }
+});

@@ -60,6 +60,9 @@ export class BuildingService {
   snapshot(): Building { return this.built; }
 
   floorFile(projectId: string): { file: string; origin: Origin } {
+    if (!this.projects().some((p) => p.id === projectId && !p.archived)) {
+      throw new BuildingFileError(projectId, 'unknown or archived project');
+    }
     const repo = this.repoFile(projectId);
     if (existsSync(repo)) return { file: repo, origin: 'repo' };
     return { file: this.homeFile(projectId), origin: 'home' };
@@ -67,6 +70,10 @@ export class BuildingService {
 
   saveFloor(projectId: string, rooms: RoomDef[], baseRevision: number): FloorDef {
     const { file, origin } = this.floorFile(projectId);
+    if (existsSync(file)) {
+      try { readFloor(file, origin); }
+      catch { throw new BuildingFileError(file, `fix or delete ${file} before editing this floor`); }
+    }
     const stored = writeFloor(file, { revision: 0, rooms, source: origin }, baseRevision);
     this.refresh();
     return stored;
@@ -156,6 +163,14 @@ export class BuildingService {
     this.debounce.unref();
   }
 
+  /** Ignore unrelated files in home (office.db, WAL, ...). A null filename means "unknown": schedule. */
+  private relevant(isHome: boolean, name: string | null): boolean {
+    if (name === null) return true;
+    const n = name.split('\\').join('/');
+    if (!isHome) return n === 'floor.yaml';
+    return n === 'divisions' || n === 'floors' || /^(divisions|floors)\/[^/]*\.yaml$/.test(n);
+  }
+
   private syncWatchers(): void {
     const want = new Map<string, boolean>([[this.home, true]]);
     for (const p of this.projects()) {
@@ -168,7 +183,9 @@ export class BuildingService {
     for (const [dir, recursive] of want) {
       if (this.watchers.has(dir)) continue;
       try {
-        const w = watch(dir, { recursive }, () => this.schedule());
+        const w = watch(dir, { recursive }, (_ev, name) => {
+          if (this.relevant(recursive, name === null ? null : String(name))) this.schedule();
+        });
         w.on('error', () => { try { w.close(); } catch { /* ignore */ } this.watchers.delete(dir); });
         w.unref();
         this.watchers.set(dir, w);
