@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { protectedAction, branchInfo, clearBranchCache, grantMatches } from '../../src/server/bubbles/rules.ts';
 import type { Protected, Grant, BranchInfo } from '../../src/server/bubbles/rules.ts';
@@ -132,14 +132,71 @@ test('branchInfo: plain, detached, worktree, origin/HEAD', () => {
   assert.equal(branchInfo(none, []).current, null);
 });
 
-test('branchInfo: caches 10 s per repo root', () => {
+test('branchInfo: current is never cached, origin/HEAD cached 10 s', () => {
   clearBranchCache();
   const d = realpathSync(mkdtempSync(join(tmpdir(), 'rules-c-')));
   git(d, 'ref: refs/heads/a\n');
+  mkdirSync(join(d, '.git/refs/remotes/origin'), { recursive: true });
+  writeFileSync(join(d, '.git/refs/remotes/origin/HEAD'), 'ref: refs/remotes/origin/t1\n');
   assert.equal(branchInfo(d, [], 1000).current, 'a');
   git(d, 'ref: refs/heads/b\n');
-  assert.equal(branchInfo(d, [], 5000).current, 'a');
-  assert.equal(branchInfo(d, [], 11001).current, 'b');
+  writeFileSync(join(d, '.git/refs/remotes/origin/HEAD'), 'ref: refs/remotes/origin/t2\n');
+  const b = branchInfo(d, [], 5000);
+  assert.equal(b.current, 'b');
+  assert.ok(b.protected.has('t1') && !b.protected.has('t2'));
+  assert.ok(branchInfo(d, [], 11001).protected.has('t2'));
+});
+
+const PROTECTED_BASH = [
+  'git checkout main && git push', 'git switch main; git push origin', 'git checkout main && git push origin HEAD',
+  'git checkout main && git merge dev', 'cd ../other && git push',
+  'if git push origin main; then echo ok; fi', 'if ! git push origin main; then echo no; fi', '{ git push origin main; }',
+  '! git push origin main', 'for r in origin; do git push $r main; done', 'if true; then kubicle grant push; fi',
+  '/usr/bin/git push origin main', '/opt/homebrew/bin/gh pr merge 3', '$(which git) push origin main',
+  'env -u FOO git push origin main', 'sudo -u me git push origin main', 'nice -n 5 git push origin main',
+  'timeout 60 git push origin main', 'echo main | xargs git push origin', 'bash -lc "git push origin main"',
+  'echo "git push origin main" | sh',
+  'B=main; git push origin $B', 'git push origin "$(git branch --show-current)"', 'git push origin main>/dev/null',
+  "git push origin $'main'",
+  'gh api -X PATCH repos/o/r/git/refs/heads/main -f sha=abc -F force=true', 'gh api -X PUT repos/o/r/contents/f -f branch=main -f content=x',
+  'git -c alias.p=push p origin main', 'git subtree push --prefix d origin main',
+  'bin/kubicle grant push', 'npx kubicle grant push', 'node bin/kubicle grant push', 'node src/cli/kubicle.ts grant push',
+  'npx tsx src/cli/kubicle.ts grant push',
+  'cd ~/.kubicle && rm bubbles.yaml', 'cd ~ && rm -rf .kubicle', 'rm -rf ~/.kub*',
+  `node -e "require('fs').writeFileSync('${home}/bubbles.yaml','x')"`, `python3 -c "open('${home}/x','w')"`,
+  `ln -sf /x ${home}/bubbles.yaml`, `truncate -s 0 ${home}/office.db`, `chmod 777 ${home}`, 'rm /tmp/OFFICE.DB',
+  'git push origin feature && git push --force origin feature', 'git push -fu origin feature',
+];
+
+test('fail-closed: reviewer bypasses are protected', () => {
+  for (const c of PROTECTED_BASH) assert.notEqual(bash(c, 'feature'), null, c);
+  for (const c of PROTECTED_BASH) assert.notEqual(bash(c, 'main'), null, c);
+});
+
+test('fail-closed: common safe commands stay null', () => {
+  for (const c of ['git push origin feature', 'git push -u origin feature', 'git status', 'git log --merges', 'echo hello', 'npm test',
+    'cat ~/.kubicle/bubbles.yaml', 'ls ~/.kubicle', 'git commit -m "merge notes"', 'git push origin feature 2>&1', 'echo "git push origin main"',
+    'git add -A && git commit -m "x" && git push -u origin feature']) {
+    assert.equal(bash(c, 'feature'), null, c);
+  }
+});
+
+test('fail-closed: file tools', () => {
+  const ctx = { cwd: '/work/app', branches: br('feature'), home, strictScripts: false };
+  assert.equal(protectedAction('Write', { file_path: '~/.kubicle/bubbles.yaml' }, { ...ctx, home: join(homedir(), '.kubicle') })?.kind, 'self');
+  assert.equal(protectedAction('Write', { file_path: '/tmp/OFFICE.DB' }, ctx)?.kind, 'self');
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    assert.equal(protectedAction('Write', { file_path: `${home.toUpperCase()}/bubbles.yaml` }, ctx)?.kind, 'self');
+  }
+  for (const n of ['mcp__github__create_or_update_file', 'mcp__github__update_ref', 'mcp__x__commit', 'mcp__github__push_files', 'mcp__GH__Merge_PR']) {
+    assert.equal(protectedAction(n, {}, ctx)?.kind, 'merge', n);
+  }
+});
+
+test('grantMatches prefers unlimited, then soonest expiry', () => {
+  const lim = G({ id: 'lim', usesLeft: 1 }); const unl = G({ id: 'unl', expiresAt: 5000 }); const soon = G({ id: 'soon', usesLeft: 2, expiresAt: 1500 });
+  assert.equal(grantMatches(P(), 'p', [lim, unl], 1000)?.id, 'unl');
+  assert.equal(grantMatches(P(), 'p', [lim, soon], 1000)?.id, 'soon');
 });
 
 const G = (o: Partial<Grant> = {}): Grant => ({ id: 'g', projectId: 'p', action: 'push', branch: null, usesLeft: null, expiresAt: 2000, createdAt: 0, confirmedAt: 0, revokedAt: null, ...o });
