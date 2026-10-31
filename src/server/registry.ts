@@ -349,16 +349,18 @@ export class Registry {
     return snap(a);
   }
 
-  /** Owner moves a session to a room (or clears it). Sessions only; subagents follow their parent. */
-  setRoomLabel(agentId: string, roomId: string | null): AgentView | undefined {
+  /** Owner moves a session to a room (or clears it). Sessions only; returns the session and every subagent changed ([] otherwise). */
+  setRoomLabel(agentId: string, roomId: string | null): AgentView[] {
     const a = this.#agents.get(agentId);
-    if (!a || a.kind !== 'session') return undefined;
+    if (!a || a.kind !== 'session') return [];
     this.#store.setSessionRoom(a.sessionId, roomId);
+    const out: AgentView[] = [];
     for (const x of this.#agents.values()) {
       if (x !== a && x.parentId !== a.id) continue;
       if (roomId) x.roomLabel = roomId; else delete x.roomLabel;
+      out.push(snap(x));
     }
-    return snap(a);
+    return out;
   }
 
   refreshApprovals(): AgentView[] {

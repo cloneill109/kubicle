@@ -350,7 +350,7 @@ test('a session keeps the first non-empty division/room hints it receives', () =
 test('a subagent copies its parent division, room and label, and follows later label changes', () => {
   const { reg } = mk();
   reg.apply(ev('SessionStart', { ts: 1, cwd: '/tmp', division: 'qa', room: 'r1' }));
-  assert.equal(reg.setRoomLabel('s1', 'lab')!.roomLabel, 'lab');
+  assert.equal(reg.setRoomLabel('s1', 'lab')[0]!.roomLabel, 'lab');
   reg.apply(ev('SubagentStart', { ts: 2, agentId: 'a1', agentType: 'Explore' }));
   const sub = reg.get('s1:a1')!;
   assert.deepEqual([sub.division, sub.room, sub.roomLabel], ['qa', 'r1', 'lab']);
@@ -365,8 +365,20 @@ test('setRoomLabel: sessions only, unknown agent undefined', () => {
   const { reg } = mk();
   reg.apply(ev('SessionStart', { ts: 1, cwd: '/tmp' }));
   reg.apply(ev('SubagentStart', { ts: 2, agentId: 'a1' }));
-  assert.equal(reg.setRoomLabel('s1:a1', 'x'), undefined);
-  assert.equal(reg.setRoomLabel('nope', 'x'), undefined);
+  assert.deepEqual(reg.setRoomLabel('s1:a1', 'x'), []);
+  assert.deepEqual(reg.setRoomLabel('nope', 'x'), []);
+});
+
+test('setRoomLabel returns the session and every subagent, all carrying the label', () => {
+  const { reg } = mk();
+  reg.apply(ev('SessionStart', { ts: 1, cwd: '/tmp' }));
+  reg.apply(ev('SubagentStart', { ts: 2, agentId: 'a1' }));
+  reg.apply(ev('SubagentStart', { ts: 3, agentId: 'a2' }));
+  const vs = reg.setRoomLabel('s1', 'lab');
+  assert.equal(vs.length, 3);
+  assert.deepEqual(vs.map((v) => v.id).sort(), ['s1', 's1:a1', 's1:a2']);
+  assert.ok(vs.every((v) => v.roomLabel === 'lab'));
+  assert.ok(reg.setRoomLabel('s1', null).every((v) => v.roomLabel === undefined));
 });
 
 test('setRoomLabel persists across rebuild', () => {
