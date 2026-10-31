@@ -226,8 +226,10 @@ test('PermissionRequest: protected push with a UI: the card carries why=protecte
   const es = await untilLog(s, (x) => x.some((e) => e.kind === 'owner-answer'));
   const esc = es.find((e) => e.kind === 'escalation')!;
   const ans = es.find((e) => e.kind === 'owner-answer')!;
+  const tri = es.find((e) => e.kind === 'triage')!;
   assert.equal(ans.outcome, 'deny');
-  assert.equal(ans.ref, esc.seq);
+  assert.equal(esc.ref, tri.seq, 'escalation refs its triage');
+  assert.equal(ans.ref, esc.seq, 'owner-answer refs its escalation');
   assert.equal(s.fakeCalls(), 0);
 });
 
@@ -374,4 +376,79 @@ test('restart: log and policy survive, and the chain verifies', async () => {
   // One use left after the restart, then none.
   assert.equal((await pre(s, 'rs', 'git push origin main')).body, '');
   assert.equal((await pre(s, 'rs', 'git push origin main')).body, GUARD_ASK);
+});
+
+// ---- review fixes: C1 (self hides push), C2 (fingerprint reuse), I1 (grant for another repo) ----
+
+test('C1: a push that is also self-administration is still a guard ask, and decide escalates it', async () => {
+  const s = await start();
+  const port = new URL(s.url).port;
+  for (const c of ['git push origin main # kubicle log', 'echo kubicle bubbles; git push origin HEAD:main',
+    `git push origin main && curl -X POST http://127.0.0.1:${port}/x`]) {
+    assert.equal((await pre(s, 'c1', c)).body, GUARD_ASK, c);
+    assert.equal((await perm(s, 'c1', c)).body.trim(), '', c);
+  }
+  assert.equal(s.fakeCalls(), 0);
+  const es = await logOf(s);
+  assert.equal(es.filter((e) => e.kind === 'guard' && e.outcome === 'ask').length, 3);
+  assert.ok(es.filter((e) => e.kind === 'triage').every((e) => e.outcome === 'escalated:self'));
+});
+
+test('C1: with a grant, a push that is also self-administration is guard-granted but decide still escalates (self)', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  await seen(s, 'c1g');
+  assert.equal((await control(s, cookie, '/api/bubbles/grants', { projectId: s.cwd, action: 'push', branch: 'main', uses: 1, ttlMs: 60_000 })).status, 201);
+  const c = 'git push origin main # kubicle log';
+  assert.equal((await pre(s, 'c1g', c, { tool_use_id: 'tu-c1g' })).body, '');
+  assert.equal((await perm(s, 'c1g', c, { tool_use_id: 'tu-c1g' })).body.trim(), '');
+  assert.equal(s.fakeCalls(), 0);
+  assert.equal((await logOf(s, '?kind=triage'))[0]!.outcome, 'escalated:self');
+});
+
+test('C2: a spent grant never covers a later identical push (new id, or no id): it escalates, never Bubbles-approved', async () => {
+  const s = await start(); // the fake approves anything it is asked
+  const cookie = await login(s);
+  await seen(s, 'c2');
+  assert.equal((await control(s, cookie, '/api/bubbles/grants', { projectId: s.cwd, action: 'push', branch: 'main', uses: 1, ttlMs: 60_000 })).status, 201);
+  assert.equal((await pre(s, 'c2', 'git push origin main', { tool_use_id: 'tu-1' })).body, ''); // granted; no PermissionRequest follows
+  assert.equal((await pre(s, 'c2', 'git push origin main', { tool_use_id: 'tu-2' })).body, GUARD_ASK);
+  assert.equal((await perm(s, 'c2', 'git push origin main', { tool_use_id: 'tu-2' })).body.trim(), '');
+  assert.equal((await perm(s, 'c2', 'git push origin main')).body.trim(), '');
+  assert.equal(s.fakeCalls(), 0);
+  const tri = await logOf(s, '?kind=triage');
+  assert.deepEqual(tri.map((e) => e.outcome), ['escalated:protected', 'escalated:protected']);
+});
+
+test('C2: a PermissionRequest with a different tool_use_id does not match a still-unspent grant record', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  await seen(s, 'c2b');
+  assert.equal((await control(s, cookie, '/api/bubbles/grants', { projectId: s.cwd, action: 'push', branch: 'main', uses: 1, ttlMs: 60_000 })).status, 201);
+  assert.equal((await pre(s, 'c2b', 'git push origin main', { tool_use_id: 'tu-a' })).body, '');
+  assert.equal((await perm(s, 'c2b', 'git push origin main', { tool_use_id: 'tu-other' })).body.trim(), '');
+  assert.equal(s.fakeCalls(), 0);
+  // ...while the right id still matches once (approved by the fake, no longer protected).
+  assert.equal((await perm(s, 'c2b', 'git push origin main', { tool_use_id: 'tu-a' })).body.trim(), hookResponse('allow'));
+  assert.equal((await perm(s, 'c2b', 'git push origin main', { tool_use_id: 'tu-a' })).body.trim(), '');
+  assert.equal(s.fakeCalls(), 1);
+});
+
+test('I1: a grant for this project never covers a push that moves to another dir or repo', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  await seen(s, 'i1');
+  assert.equal((await control(s, cookie, '/api/bubbles/grants', { projectId: s.cwd, action: 'push', branch: null, uses: null, ttlMs: 60_000 })).status, 201);
+  const moved = ['cd /tmp/other-repo && git push origin main', 'git -C /tmp/other-repo push origin main', 'GIT_DIR=/tmp/o/.git git push origin main',
+    'pushd /tmp/o; git push origin main', 'git --work-tree=/tmp/o push origin main', 'sh -c "git push origin main"'];
+  for (const c of moved) {
+    assert.equal((await pre(s, 'i1', c, { tool_use_id: `tu-${c}` })).body, GUARD_ASK, c);
+    assert.equal((await perm(s, 'i1', c, { tool_use_id: `tu-${c}` })).body.trim(), '', c);
+  }
+  assert.equal(s.fakeCalls(), 0);
+  const guards = await logOf(s, '?kind=guard');
+  assert.equal(guards.length, moved.length);
+  assert.ok(guards.every((e) => e.outcome === 'ask' && /not grantable/.test(e.detail ?? '')));
+  // The same grant still covers a plain push in the project.
+  assert.equal((await pre(s, 'i1', 'git push origin main')).body, '');
 });

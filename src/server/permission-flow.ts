@@ -11,7 +11,7 @@ import type { Approvals, BubblesNote, Decision } from './approvals.ts';
 import type { BubblesConfig } from './bubbles/config.ts';
 import type { BubblesLog, LogEntry } from './bubbles/log.ts';
 import type { Policy } from './bubbles/policy.ts';
-import { branchInfo, grantMatches, protectedAction, type BranchInfo, type Protected, type RulesCtx } from './bubbles/rules.ts';
+import { branchInfo, grantMatches, otherProtectedAction, protectedAction, pushMergeAction, type BranchInfo, type Protected, type RulesCtx } from './bubbles/rules.ts';
 import type { Bubbles, EscalateWhy, TriageOutcome, TriageRequest } from './bubbles/triage.ts';
 import { projectRoot } from './projects.ts';
 import type { Registry } from './registry.ts';
@@ -75,8 +75,12 @@ function inputOf(e: AgentEvent, raw: unknown): unknown {
 export class PermissionFlow {
   private d: FlowDeps;
   private now: () => number;
-  /** toolUseId (or a call fingerprint) -> expiry: tool calls the guard let through on a grant. */
-  private granted = new Map<string, number>();
+  /**
+   * Tool calls the guard let through on a grant, so their PermissionRequest is not re-treated as protected.
+   * Matched by toolUseId when the PermissionRequest has one; by fingerprint (agent + tool + exact input) only when
+   * it has none. A later guard ASK on the same fingerprint forgets it (that identical call was not granted).
+   */
+  private granted: { id?: string; fp: string; exp: number }[] = [];
 
   constructor(deps: FlowDeps) {
     this.d = deps;
@@ -96,30 +100,36 @@ export class PermissionFlow {
     return agent?.projectId ?? '';
   }
 
-  /** Keys a granted call by toolUseId and by a fingerprint (in case the PermissionRequest lacks the id). */
-  private grantKeys(e: AgentEvent, input: unknown): string[] {
-    const keys: string[] = [];
-    if (e.toolUseId) keys.push(`id\n${e.toolUseId}`);
+  private fingerprint(e: AgentEvent, input: unknown): string {
     let json = '';
-    try { json = JSON.stringify(input) ?? ''; } catch { /* unkeyable */ }
-    if (json) keys.push(`fp\n${keyOf(e)}\n${e.toolName ?? ''}\n${json}`);
-    return keys;
+    try { json = JSON.stringify(input) ?? ''; } catch { /* unkeyable: never matches */ }
+    return json ? `${keyOf(e)}\n${e.toolName ?? ''}\n${json}` : `unkeyable\n${e.id}`;
   }
 
   private rememberGranted(e: AgentEvent, input: unknown): void {
     const now = this.now();
-    for (const [k, exp] of this.granted) if (exp <= now) this.granted.delete(k);
-    while (this.granted.size >= GRANTED_MAX) this.granted.delete(this.granted.keys().next().value!);
-    for (const k of this.grantKeys(e, input)) this.granted.set(k, now + GRANTED_TTL_MS);
+    this.granted = this.granted.filter((r) => r.exp > now).slice(-(GRANTED_MAX - 1));
+    this.granted.push({ ...(e.toolUseId ? { id: e.toolUseId } : {}), fp: this.fingerprint(e, input), exp: now + GRANTED_TTL_MS });
+  }
+
+  /**
+   * The guard asked on this call: an earlier grant of an identical call must not cover it by fingerprint.
+   * Records that carry a toolUseId keep matching by that id only; id-less records are dropped.
+   */
+  private forgetFingerprint(e: AgentEvent, input: unknown): void {
+    const fp = this.fingerprint(e, input);
+    this.granted = this.granted.filter((r) => r.fp !== fp || r.id !== undefined);
+    for (const r of this.granted) if (r.fp === fp) r.fp = '';
   }
 
   /** True (and forgets it) when the guard already let this exact tool call through on a grant. */
   private takeGranted(e: AgentEvent, input: unknown): boolean {
     const now = this.now();
-    const keys = this.grantKeys(e, input);
-    const hit = keys.some((k) => (this.granted.get(k) ?? 0) > now);
-    if (hit) for (const k of keys) this.granted.delete(k);
-    return hit;
+    const fp = this.fingerprint(e, input);
+    const i = this.granted.findIndex((r) => r.exp > now && (e.toolUseId ? r.id === e.toolUseId : r.fp !== '' && r.fp === fp));
+    if (i < 0) return false;
+    this.granted.splice(i, 1);
+    return true;
   }
 
   private append(e: Omit<LogEntry, 'seq' | 'prevHash' | 'hash'>): LogEntry | null {
@@ -144,18 +154,22 @@ export class PermissionFlow {
       if (!tool || (tool !== 'Bash' && !tool.startsWith('mcp__'))) return false;
       const agent = this.d.registry.get(keyOf(e));
       const input = inputOf(e, rawInput);
-      const p = protectedAction(tool, input, this.ctx(e.cwd ?? agent?.cwd));
-      if (!p || (p.kind !== 'push' && p.kind !== 'merge')) return false;
+      // Push/merge on its own: a command that is ALSO self-administration must still be asked about.
+      const pm = pushMergeAction(tool, input, this.ctx(e.cwd ?? agent?.cwd));
+      if (!pm) return false;
+      const p = pm.hit;
       const projectId = this.projectOf(e, agent);
       const now = this.now();
-      const g = grantMatches(p, projectId, this.d.policy.grants(now), now);
+      // A grant covers the session's own repo only: never a command that moves to another dir/repo.
+      const g = pm.grantable ? grantMatches(p, projectId, this.d.policy.grants(now), now) : null;
       if (g) {
         this.d.policy.useGrant(g.id);
         this.rememberGranted(e, input);
         this.append({ ts: now, kind: 'guard', ...this.who(e, projectId), outcome: 'granted', reason: p.reason, detail: `grant ${g.id}` });
         return false;
       }
-      this.append({ ts: now, kind: 'guard', ...this.who(e, projectId), outcome: 'ask', reason: p.reason });
+      this.forgetFingerprint(e, input);
+      this.append({ ts: now, kind: 'guard', ...this.who(e, projectId), outcome: 'ask', reason: p.reason, ...(pm.grantable ? {} : { detail: 'not grantable (other dir/repo, wrapper or MCP)' }) });
       return true;
     } catch (err) {
       this.d.onError?.(`guard failed: ${String(err)}`);
@@ -172,8 +186,12 @@ export class PermissionFlow {
 
     const input = inputOf(e, opts.input);
     const cwd = e.cwd ?? agent.cwd;
-    let hit: Protected | null = protectedAction(e.toolName ?? '', input, this.ctx(cwd));
-    if (hit && (hit.kind === 'push' || hit.kind === 'merge') && this.takeGranted(e, input)) hit = null;
+    const ctx = this.ctx(cwd);
+    let hit: Protected | null = protectedAction(e.toolName ?? '', input, ctx);
+    // The guard granted this exact call's push: what remains is any self/script verdict (self wins over push).
+    if (hit && pushMergeAction(e.toolName ?? '', input, ctx)?.grantable && this.takeGranted(e, input)) {
+      hit = otherProtectedAction(e.toolName ?? '', input, ctx);
+    }
 
     const req: TriageRequest = {
       toolName: e.toolName ?? '',

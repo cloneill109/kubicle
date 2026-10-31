@@ -861,14 +861,74 @@ const MCP_RE = /merge|push|update_ref|create_or_update_file|commit|update_pull_r
 /** Classify a tool call that a coordinator must never approve on its own. Returns null when proven safe. */
 export function protectedAction(toolName: string, input: unknown, ctx: RulesCtx): Protected | null {
   try {
-    return classify(toolName, input, ctx);
+    return classify(toolName, input, ctx, 'all');
   } catch {
     // the guard never throws: odd tool names, throwing getters, analysis bugs all fail closed
     return { kind: 'push', branch: null, reason: 'tool call could not be analyzed' };
   }
 }
 
-function classify(toolName: string, input: unknown, ctx: RulesCtx): Protected | null {
+/** Only the self/script verdicts (push/merge ignored): what is left of a call once a grant covered its push. */
+export function otherProtectedAction(toolName: string, input: unknown, ctx: RulesCtx): Protected | null {
+  try {
+    return classify(toolName, input, ctx, 'rest');
+  } catch {
+    return { kind: 'self', reason: 'tool call could not be analyzed' };
+  }
+}
+
+export interface PushMergeHit {
+  hit: Extract<Protected, { kind: 'push' | 'merge' }>;
+  /**
+   * True only when a grant for the session's project may cover this call: a plain git/gh command in the
+   * session's own cwd (no cd/pushd, no `git -C`/`--git-dir`/`--work-tree`, no GIT_* env, no `gh -R/--repo`, no
+   * wrapper, interpreter or unknown program). MCP tools name their repo in their arguments: never grantable.
+   */
+  grantable: boolean;
+}
+
+/**
+ * The push/merge verdict on its own, independent of self/script (protectedAction reports only the first hit, so
+ * a command that is both self-administration and a protected push would hide the push). For the PreToolUse guard.
+ */
+export function pushMergeAction(toolName: string, input: unknown, ctx: RulesCtx): PushMergeHit | null {
+  try {
+    if (toolName === 'Bash') {
+      const inp = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+      const cmd = typeof inp.command === 'string' ? inp.command : '';
+      const p = classify(toolName, input, ctx, 'pm');
+      if (!p || (p.kind !== 'push' && p.kind !== 'merge')) return null;
+      return { hit: p, grantable: cmd.length <= MAX_COMMAND_LEN && grantableSegs(segmentsOf(cmd)) };
+    }
+    const p = classify(toolName, input, ctx, 'pm');
+    return p && (p.kind === 'push' || p.kind === 'merge') ? { hit: p, grantable: false } : null;
+  } catch {
+    return { hit: { kind: 'push', branch: null, reason: 'tool call could not be analyzed' }, grantable: false };
+  }
+}
+
+const REPO_MOVE_OPT = /^(-C|--git-dir|--work-tree|-R|--repo)(=|$)/;
+
+/** Whitelist: every segment is git/hub/gh (without repo-moving options) or a harmless program; no sensitive env. */
+function grantableSegs(segs: Segment[]): boolean {
+  for (const s of segs) {
+    let i = 0;
+    while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) { if (SENS_ENV.test(s.words[i])) return false; i++; }
+    const first = s.words[i];
+    if (first === undefined) continue;
+    if (/[$`*?\[{]/.test(first)) return false;
+    const base = lc(basename(first));
+    if (base === 'git' || base === 'hub' || base === 'gh' || /^git-[\w-]+$/.test(base)) {
+      if (s.words.slice(i + 1).some((w) => REPO_MOVE_OPT.test(w) || /^-C./.test(w))) return false;
+      continue;
+    }
+    if (HARMLESS.has(base)) continue;
+    return false;
+  }
+  return true;
+}
+
+function classify(toolName: string, input: unknown, ctx: RulesCtx, mode: 'all' | 'pm' | 'rest'): Protected | null {
   if (typeof toolName !== 'string') throw new TypeError('tool name is not a string');
   const inp = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
   if (toolName === 'Bash') {
@@ -877,9 +937,12 @@ function classify(toolName: string, input: unknown, ctx: RulesCtx): Protected | 
     const nm = lc(cmd.replace(/['"\\]/g, ''));
     // fd duplication and /dev/null redirects are harmless; every other redirect stays visible as a word
     const segs = segmentsOf(cmd.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' '));
+    if (mode === 'pm') return pushMergeVerdict(cmd, nm, segs, ctx);
+    if (mode === 'rest') return selfBash(cmd, nm, segs, ctx) ?? (ctx.strictScripts ? scriptBash(segs) : null);
     return selfBash(cmd, nm, segs, ctx) ?? pushMergeVerdict(cmd, nm, segs, ctx) ?? (ctx.strictScripts ? scriptBash(segs) : null);
   }
   if (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'NotebookEdit') {
+    if (mode === 'pm') return null;
     const raw = typeof inp.file_path === 'string' ? inp.file_path : typeof inp.notebook_path === 'string' ? inp.notebook_path : '';
     if (!raw) return null;
     const fp = expandTilde(raw);
@@ -889,7 +952,7 @@ function classify(toolName: string, input: unknown, ctx: RulesCtx): Protected | 
     }
     return null;
   }
-  if (toolName.startsWith('mcp__') && MCP_RE.test(toolName)) {
+  if (mode !== 'rest' && toolName.startsWith('mcp__') && MCP_RE.test(toolName)) {
     const kind = /update_pull_request_branch|delete_branch|create_branch|fork|sync/i.test(toolName) && !/merge|push/i.test(toolName) ? 'push' : 'merge';
     return { kind, branch: null, reason: `MCP tool ${toolName}` };
   }

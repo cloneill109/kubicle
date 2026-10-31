@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
-import { protectedAction, branchInfo, clearBranchCache, grantMatches } from '../../src/server/bubbles/rules.ts';
+import { protectedAction, branchInfo, clearBranchCache, grantMatches, pushMergeAction, otherProtectedAction } from '../../src/server/bubbles/rules.ts';
 import type { Protected, Grant, BranchInfo } from '../../src/server/bubbles/rules.ts';
 
 const home = '/home/u/.kubicle';
@@ -486,4 +486,34 @@ test('round 5: protectedAction never throws', () => {
   assert.equal(protectedAction(5 as unknown as string, {}, ctx)?.kind, 'push');
   assert.equal(protectedAction('Bash', { get command() { throw new Error('x'); } }, ctx)?.kind, 'push');
   assert.equal(protectedAction('Read', {}, ctx), null);
+});
+
+// ---- Task 7 review: push/merge evaluated independently of self (the guard), and grantability ----
+const pmCtx = { cwd: '/w/repo', branches: br('feature'), home, strictScripts: false, kubiclePort: 4317 };
+const pm = (command: string) => pushMergeAction('Bash', { command }, pmCtx);
+
+test('pushMergeAction: a push hidden behind a self verdict is still a push', () => {
+  for (const c of ['git push origin main # kubicle log', 'echo kubicle bubbles; git push origin HEAD:main',
+    'git push origin main && curl -X POST http://127.0.0.1:4317/x']) {
+    assert.equal(protectedAction('Bash', { command: c }, pmCtx)?.kind, 'self', `${c}: self wins in protectedAction`);
+    assert.equal(pm(c)?.hit.kind, 'push', c);
+  }
+  assert.equal(pm('git push origin feat'), null);
+  assert.equal(pm('ls'), null);
+  assert.equal(pushMergeAction('Write', { file_path: '/home/u/.kubicle/x' }, pmCtx), null);
+  assert.equal(otherProtectedAction('Bash', { command: 'git push origin main' }, pmCtx), null);
+  assert.equal(otherProtectedAction('Bash', { command: 'git push origin main # kubicle log' }, pmCtx)?.kind, 'self');
+});
+
+test('pushMergeAction: only a plain push in the session repo is grantable', () => {
+  assert.equal(pm('git push origin main')?.grantable, true);
+  assert.equal(pm('git status && git push origin main')?.grantable, true);
+  assert.equal(pm('gh pr merge 12 --squash')?.grantable, true);
+  for (const c of ['cd /tmp/other && git push origin main', 'pushd /tmp/other; git push origin main', '(cd ../x && git push origin main)',
+    'git -C /tmp/other push origin main', 'git --git-dir=/x/.git push origin main', 'GIT_DIR=/x/.git git push origin main',
+    'export GIT_WORK_TREE=/x; git push origin main', 'gh pr merge 3 -R other/repo', 'gh pr merge 3 --repo=other/repo',
+    'sh -c "git push origin main"', 'env git push origin main', 'git push origin main && curl -X POST http://127.0.0.1:4317/x']) {
+    assert.equal(pm(c)?.grantable, false, c);
+  }
+  assert.equal(pushMergeAction('mcp__github__merge_pull_request', {}, pmCtx)?.grantable, false);
 });
