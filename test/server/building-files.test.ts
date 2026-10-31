@@ -1,0 +1,160 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, writeFileSync, statSync, readdirSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  BuildingFileError, RevisionConflict, slugFor, readDivision, readFloor, writeDivision, writeFloor, seedDivisions,
+} from '../../src/server/building/files.ts';
+import { defaultFloor, type DivisionDef } from '../../src/shared/building.ts';
+
+const tmp = () => mkdtempSync(join(tmpdir(), 'kub-bf-'));
+const div = (o: Partial<DivisionDef> = {}): DivisionDef => ({ id: 'qa', name: 'QA', color: '#62c4a0', harness: {}, revision: 1, ...o });
+
+test('division round-trip; stored revision is base+1', () => {
+  const dir = join(tmp(), 'divisions');
+  const stored = writeDivision(dir, div({ revision: 0 }), 0);
+  assert.equal(stored.revision, 1);
+  assert.deepEqual(readDivision(join(dir, 'qa.yaml')), stored);
+  const s2 = writeDivision(dir, { ...stored, name: 'Quality' }, 1);
+  assert.equal(s2.revision, 2);
+  assert.equal(readDivision(join(dir, 'qa.yaml')).name, 'Quality');
+});
+
+test('floor round-trip, source from origin', () => {
+  const file = join(tmp(), 'floors', 'p.yaml');
+  const stored = writeFloor(file, { ...defaultFloor(), source: 'home' }, 0);
+  assert.equal(stored.revision, 1);
+  const back = readFloor(file, 'home');
+  assert.deepEqual(back, stored);
+  assert.equal(readFloor(file, 'repo').source, 'repo');
+});
+
+test('slugFor format and stability', () => {
+  const s = slugFor('/Users/x/My Site!');
+  assert.match(s, /^my-site-[0-9a-f]{6}$/);
+  assert.equal(slugFor('/Users/x/My Site!'), s);
+  assert.notEqual(slugFor('/Users/y/My Site!'), s);
+  assert.match(slugFor('/a/' + 'x'.repeat(60)), /^x{24}-[0-9a-f]{6}$/);
+  assert.match(slugFor('/a/!!!'), /^[0-9a-f]{6}$|^[a-z0-9-]+-[0-9a-f]{6}$/);
+});
+
+test('YAML syntax error reports file:line', () => {
+  const d = tmp();
+  const f = join(d, 'f.yaml');
+  writeFileSync(f, 'revision: 1\nrooms:\n\t- a\n'); // tab indentation: yaml reports line 3
+  assert.throws(() => readFloor(f, 'home'), (e: any) => e instanceof BuildingFileError && e.message.includes(`${f}:3:`) && e.line === 3);
+});
+
+test('missing file and non-mapping documents throw BuildingFileError', () => {
+  const d = tmp();
+  assert.throws(() => readFloor(join(d, 'nope.yaml'), 'home'), BuildingFileError);
+  writeFileSync(join(d, 'l.yaml'), '- a\n- b\n');
+  assert.throws(() => readFloor(join(d, 'l.yaml'), 'home'), BuildingFileError);
+  writeFileSync(join(d, 'e.yaml'), '');
+  assert.throws(() => readFloor(join(d, 'e.yaml'), 'home'), BuildingFileError);
+  assert.throws(() => readDivision(join(d, 'l.yaml')), BuildingFileError);
+});
+
+test('bad room id and malformed rooms are named', () => {
+  const d = tmp();
+  const f = join(d, 'f.yaml');
+  writeFileSync(f, 'revision: 1\nrooms:\n  - {id: BAD!, name: x, band: top, width: 12}\n  - {id: bullpen, name: B, band: bottom, width: 14}\n');
+  assert.throws(() => readFloor(f, 'home'), (e: any) => e instanceof BuildingFileError && e.message.includes('BAD!') && e.message.includes(f));
+  writeFileSync(f, 'revision: 1\nrooms: 5\n');
+  assert.throws(() => readFloor(f, 'home'), BuildingFileError);
+  writeFileSync(f, 'revision: 0\nrooms: []\n');
+  assert.throws(() => readFloor(f, 'home'), BuildingFileError);
+  writeFileSync(f, 'revision: 1\nrooms:\n  - hello\n');
+  assert.throws(() => readFloor(f, 'home'), BuildingFileError);
+});
+
+test('repo origin rejects non-layout keys with the exact message', () => {
+  const d = tmp();
+  const f = join(d, 'floor.yaml');
+  const rooms = '  - {id: bullpen, name: B, band: bottom, width: 14}\n';
+  writeFileSync(f, `revision: 1\nharness: {x: 1}\nrooms:\n${rooms}`);
+  assert.throws(() => readFloor(f, 'repo'), (e: any) => e instanceof BuildingFileError && e.message.includes('Repo floor files may only set layout: harness is not allowed (harness)'));
+  writeFileSync(f, `revision: 1\nhooks: []\nrooms:\n${rooms}`);
+  assert.throws(() => readFloor(f, 'repo'), (e: any) => e.message.includes('Repo floor files may only set layout: hooks is not allowed (hooks)'));
+  writeFileSync(f, `revision: 1\nrooms:\n  - {id: bullpen, name: B, band: bottom, width: 14, mcp: {}}\n`);
+  assert.throws(() => readFloor(f, 'repo'), (e: any) => e.message.includes('Repo floor files may only set layout: mcp is not allowed (rooms[0].mcp)'));
+  // same file is fine as home? extra keys ignored there, but layout-only is clean in repo
+  writeFileSync(f, `revision: 1\nrooms:\n${rooms}`);
+  assert.equal(readFloor(f, 'repo').rooms.length, 1);
+});
+
+test('division validation', () => {
+  const d = tmp();
+  const f = join(d, 'qa.yaml');
+  const base = { id: 'qa', name: 'QA', color: '#62c4a0', harness: {}, revision: 1 };
+  const w = (o: object) => writeFileSync(f, Object.entries({ ...base, ...o }).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join('\n') + '\n');
+  w({}); assert.equal(readDivision(f).id, 'qa');
+  w({ id: 'Q A' }); assert.throws(() => readDivision(f), BuildingFileError);
+  w({ name: '' }); assert.throws(() => readDivision(f), BuildingFileError);
+  w({ name: 'x'.repeat(41) }); assert.throws(() => readDivision(f), BuildingFileError);
+  w({ name: 5 }); assert.throws(() => readDivision(f), BuildingFileError);
+  w({ color: 'red' }); assert.throws(() => readDivision(f), BuildingFileError);
+  w({ color: '#62C4A0' }); assert.throws(() => readDivision(f), BuildingFileError);
+  w({ harness: [] }); assert.throws(() => readDivision(f), BuildingFileError);
+  w({ harness: 'x' }); assert.throws(() => readDivision(f), BuildingFileError);
+  w({ revision: 0 }); assert.throws(() => readDivision(f), BuildingFileError);
+  w({ revision: 1.5 }); assert.throws(() => readDivision(f), BuildingFileError);
+  w({ id: 'other' }); assert.throws(() => readDivision(f), (e: any) => e.message.includes('qa.yaml') && /file name/.test(e.message));
+});
+
+test('writeFloor stale base -> RevisionConflict, bytes unchanged; base 0 on existing -> conflict', () => {
+  const file = join(tmp(), 'floors', 'p.yaml');
+  const v1 = writeFloor(file, defaultFloor(), 0);
+  const v2 = writeFloor(file, v1, 1);
+  const before = readFileSync(file);
+  assert.throws(() => writeFloor(file, { ...v1, rooms: v1.rooms.slice(0, 5) }, 1), (e: any) => e instanceof RevisionConflict && e.current === 2 && e.file === file);
+  assert.throws(() => writeFloor(file, v2, 0), (e: any) => e instanceof RevisionConflict && e.current === 2);
+  assert.deepEqual(readFileSync(file), before);
+  assert.deepEqual(readdirSync(join(file, '..')), ['p.yaml']);
+  // nonzero base on missing file conflicts too
+  assert.throws(() => writeFloor(join(tmp(), 'x.yaml'), defaultFloor(), 3), RevisionConflict);
+});
+
+test('write rejects invalid content and leaves the file alone', () => {
+  const file = join(tmp(), 'p.yaml');
+  writeFloor(file, defaultFloor(), 0);
+  const before = readFileSync(file);
+  assert.throws(() => writeFloor(file, { revision: 1, source: 'home', rooms: [] }, 1), BuildingFileError);
+  assert.throws(() => writeDivision(join(tmp(), 'd'), div({ color: 'x' }), 0), BuildingFileError);
+  assert.deepEqual(readFileSync(file), before);
+});
+
+test('write on a hand-broken existing file is rejected, not clobbered', () => {
+  const file = join(tmp(), 'p.yaml');
+  writeFileSync(file, 'revision: [\n');
+  assert.throws(() => writeFloor(file, defaultFloor(), 1), BuildingFileError);
+  assert.equal(readFileSync(file, 'utf8'), 'revision: [\n');
+});
+
+test('successful write sets modes 0600 / 0700', () => {
+  const root = tmp();
+  const file = join(root, 'new', 'floors', 'p.yaml');
+  writeFloor(file, defaultFloor(), 0);
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  assert.equal(statSync(join(root, 'new', 'floors')).mode & 0o777, 0o700);
+  const dd = join(root, 'divs');
+  writeDivision(dd, div(), 0);
+  assert.equal(statSync(join(dd, 'qa.yaml')).mode & 0o777, 0o600);
+  assert.equal(statSync(dd).mode & 0o777, 0o700);
+});
+
+test('seedDivisions: 7 files on empty/missing dir, then false and no writes', () => {
+  const dir = join(tmp(), 'divisions');
+  assert.equal(seedDivisions(dir), true);
+  const files = readdirSync(dir).sort();
+  assert.equal(files.length, 7);
+  assert.ok(files.includes('uxui.yaml'));
+  assert.equal(readDivision(join(dir, 'imagegen.yaml')).color, '#f38b3d');
+  const mt = statSync(join(dir, 'qa.yaml')).mtimeMs;
+  assert.equal(seedDivisions(dir), false);
+  assert.equal(statSync(join(dir, 'qa.yaml')).mtimeMs, mt);
+  const empty = join(tmp(), 'e'); mkdirSync(empty);
+  assert.equal(seedDivisions(empty), true);
+  assert.equal(readdirSync(empty).length, 7);
+});

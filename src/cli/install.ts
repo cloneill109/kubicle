@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import type { HookEventName } from '../shared/events.ts';
 import { ensureIngestToken } from '../server/auth.ts';
 import { loadConfig } from '../server/config.ts';
+import { writeAtomic } from '../server/fsutil.ts';
 
 export const HOOK_EVENTS: HookEventName[] = [
   'SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse',
@@ -81,19 +82,6 @@ export function planUninstall(settings: any): any {
   }
   if (Object.keys(next.hooks).length === 0) delete next.hooks;
   return next;
-}
-
-function writeAtomic(file: string, text: string, mode: number): void {
-  mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  try {
-    writeFileSync(tmp, text, { mode });
-    chmodSync(tmp, mode);
-    renameSync(tmp, file);
-  } catch (e) {
-    try { unlinkSync(tmp); } catch { /* ignore */ }
-    throw e;
-  }
 }
 
 function countOurs(s: any): number {
