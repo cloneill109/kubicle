@@ -9,7 +9,7 @@ import { openStore, type ProjectRow } from '../server/store.ts';
 import { CliError, UsageError, expectPositionals, parseArgs, table } from './args.ts';
 import { loadDivisions } from './division.ts';
 
-// KUBICLE_TEST_BUMP=1 is a test-only hook: it makes `edit` write the file between its read and its write.
+// KUBICLE_TEST_BUMP=1 with NODE_ENV=test is a test-only hook: it makes `edit` write the file between its read and its write.
 const CONFLICT = 'This floor changed elsewhere. Reload to see the latest.';
 
 interface Target { root: string; file: string; origin: 'home' | 'repo' }
@@ -105,7 +105,7 @@ function edit(home: string, root: string, change: (rooms: RoomDef[], f: FloorDef
   }
   const rooms = change(floor.rooms, floor);
   if (isDeepStrictEqual(rooms, floor.rooms)) { console.log('No change.'); return 0; }
-  if (process.env.KUBICLE_TEST_BUMP === '1') writeFloor(t.file, floor, floor.revision); // test hook: someone else wrote first
+  if (process.env.KUBICLE_TEST_BUMP === '1' && process.env.NODE_ENV === 'test') writeFloor(t.file, floor, floor.revision); // test hook: someone else wrote first
   try {
     const stored = writeFloor(t.file, { revision: 0, rooms, source: t.origin }, floor.revision);
     console.log(`Saved ${t.file} (revision ${stored.revision})`);

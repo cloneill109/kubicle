@@ -101,7 +101,7 @@ test('a stale write exits 3 with the conflict copy and writes nothing', () => {
   const { run, file } = setup();
   assert.equal(run(['floor', 'add-room', 'qa']).status, 0); // revision 1
   const before = readFileSync(file, 'utf8');
-  const r = run(['floor', 'resize-room', 'qa', '16'], { KUBICLE_TEST_BUMP: '1' });
+  const r = run(['floor', 'resize-room', 'qa', '16'], { KUBICLE_TEST_BUMP: '1', NODE_ENV: 'test' });
   assert.equal(r.status, 3);
   assert.ok(r.stderr.includes(CONFLICT), r.stderr);
   assert.equal(onDisk(file).revision, 2, 'the other writer survives');
@@ -109,7 +109,7 @@ test('a stale write exits 3 with the conflict copy and writes nothing', () => {
   assert.notEqual(readFileSync(file, 'utf8'), before);
   // and on a default (never written) floor
   const s = setup();
-  const r2 = s.run(['floor', 'add-room', 'qa'], { KUBICLE_TEST_BUMP: '1' });
+  const r2 = s.run(['floor', 'add-room', 'qa'], { KUBICLE_TEST_BUMP: '1', NODE_ENV: 'test' });
   assert.equal(r2.status, 3);
   assert.equal(onDisk(s.file).revision, 1);
   assert.equal(onDisk(s.file).rooms.length, 8);
@@ -262,4 +262,65 @@ test('project validation: non-git unknown dir, archived project, unknown git rep
   assert.equal(run(['floor', 'show'], {}, arch).status, 0);
   // an unknown git repo (the default setup repo is not in the store) stays allowed
   assert.equal(run(['floor', 'show']).status, 0);
+});
+
+// ---- final review fixes ----
+import { DatabaseSync } from 'node:sqlite';
+
+test('I2: a known non-git project in an un-migrated stage-1 office.db is known (read-only, nothing written)', () => {
+  const { run, home, base } = setup();
+  const plain = join(base, 'plain');
+  mkdirSync(plain);
+  mkdirSync(home, { recursive: true });
+  const dbFile = join(home, 'office.db');
+  const db = new DatabaseSync(dbFile);
+  db.exec(`
+    CREATE TABLE events (id TEXT PRIMARY KEY, ts INTEGER NOT NULL, session_id TEXT NOT NULL,
+      agent_id TEXT, event TEXT NOT NULL, json TEXT NOT NULL);
+    CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, wing INTEGER NOT NULL,
+      approvals TEXT NOT NULL, archived INTEGER NOT NULL, first_seen INTEGER NOT NULL);
+    CREATE TABLE session_settings (session_id TEXT PRIMARY KEY, approvals TEXT NOT NULL);
+  `);
+  db.prepare('INSERT INTO projects VALUES (?,?,?,?,?,?)').run(plain, 'plain', 0, 'off', 0, 1);
+  db.close();
+  const before = readFileSync(dbFile);
+  const r = run(['floor', 'show', '--project', plain]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stderr, '');
+  assert.match(r.stdout, /bottom\s+bullpen\s+Bullpen/);
+  assert.deepEqual(readFileSync(dbFile), before, 'office.db untouched');
+  assert.deepEqual(readdirSync(home).sort(), ['office.db'], 'no sidecars or floor files');
+});
+
+test('M4/M5: floor show on a malformed room (division 5, 41-char name, non-string name) exits 1 with <file>:, no stack', () => {
+  const { run, home, file } = setup();
+  mkdirSync(join(home, 'floors'), { recursive: true });
+  const bp = '  - {id: bullpen, name: Bullpen, band: bottom, width: 14}\n';
+  for (const [room, msg] of [
+    ['{id: a, name: A, division: 5, band: top, width: 12}', 'division of "a" is invalid'],
+    [`{id: a, name: ${'n'.repeat(41)}, band: top, width: 12}`, 'name of "a" must be 1–40 characters'],
+    ['{id: a, name: {x: 1}, band: top, width: 12}', 'name of "a" must be 1–40 characters'],
+  ] as const) {
+    writeFileSync(file, `revision: 1\nrooms:\n${bp}  - ${room}\n`);
+    for (const args of [['floor', 'show'], ['floor', 'list']]) {
+      const r = run(args);
+      if (args[1] === 'show') {
+        assert.equal(r.status, 1, `${room}: ${r.stdout}`);
+      } else assert.equal(r.status, 0);
+      assert.ok(r.stderr.includes(`${file}:`), r.stderr);
+      assert.ok(r.stderr.includes(msg), r.stderr);
+      assert.doesNotMatch(r.stderr, /\n\s+at /, 'no stack trace');
+    }
+  }
+});
+
+test('M7: KUBICLE_TEST_BUMP is ignored unless NODE_ENV=test', () => {
+  const { run, file, home, repo } = setup();
+  assert.equal(run(['floor', 'add-room', 'qa']).status, 0); // revision 1
+  const env = { ...process.env };
+  delete env.NODE_ENV;
+  const r = spawnSync(BIN, ['floor', 'resize-room', 'qa', '16'], { cwd: repo, encoding: 'utf8', env: { ...env, KUBICLE_HOME: home, KUBICLE_TEST_BUMP: '1' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(onDisk(file).revision, 2, 'one write: revision +1 only');
+  assert.equal(onDisk(file).rooms.find((x) => x.id === 'qa')!.width, 16);
 });

@@ -789,7 +789,7 @@ test('CLI parity: kubicle edits show up live in the office, and UI saves show in
   assert.match(shown.stdout, /top\s+security-2\s+Cybersecurity\s+security\s+12/);
 
   // and a stale CLI write is the CLI's conflict
-  const stale = kubicle(['floor', 'remove-room', 'docs'], { KUBICLE_TEST_BUMP: '1' });
+  const stale = kubicle(['floor', 'remove-room', 'docs'], { KUBICLE_TEST_BUMP: '1', NODE_ENV: 'test' });
   assert.equal(stale.status, 3);
   assert.ok(stale.stderr.includes(CONFLICT));
   await page.close();
