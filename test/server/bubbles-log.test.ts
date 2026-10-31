@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, statSync, readFileSync, writeFileSync, readdirSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, statSync, readFileSync, writeFileSync, readdirSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../../src/server/store.ts';
@@ -145,4 +145,24 @@ test('read-only: no UPDATE/DELETE on bubbles_log anywhere in src', () => {
   for (const f of walk(join(import.meta.dirname, '../../src'))) {
     assert.doesNotMatch(readFileSync(f, 'utf8'), /UPDATE\s+bubbles_log|DELETE\s+FROM\s+bubbles_log/i, f);
   }
+});
+
+test('verify detects tampered ts / kind columns', () => {
+  for (const sql of ["ts = ts + 1", "kind = 'guard'"]) {
+    const { log, store, done } = setup();
+    log.append(e(1)); log.append(e(2));
+    store.db.exec(`UPDATE bubbles_log SET ${sql} WHERE seq = 2`);
+    assert.deepEqual(log.verify(), { ok: false, badSeq: 2, why: 'column/json mismatch' });
+    done();
+  }
+});
+
+test('redacts nested strings in usage; fixes pre-existing log dir mode', () => {
+  const { log, home, done } = setup();
+  mkdirSync(join(home, 'log'), { mode: 0o755 });
+  chmodSync(join(home, 'log'), 0o755);
+  const r = log.append(e(1, { usage: { note: ['ghp_abcdefghijklmnopqrstuvwxyz'], n: 3 } }));
+  assert.deepEqual(r.usage, { n: 3, note: ['‹redacted›'] });
+  assert.equal(statSync(join(home, 'log')).mode & 0o777, 0o700);
+  done();
 });

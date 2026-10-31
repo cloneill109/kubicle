@@ -63,6 +63,8 @@ export class BubblesLog {
   append(e: Omit<LogEntry, 'seq' | 'prevHash' | 'hash'>): LogEntry {
     const body: Record<string, unknown> = { ...e };
     for (const f of REDACTED_FIELDS) if (typeof body[f] === 'string') body[f] = this.redact(body[f] as string);
+    // Object-valued fields (usage, …) may carry strings too: redact every nested string.
+    for (const k of Object.keys(body)) if (body[k] && typeof body[k] === 'object') body[k] = this.deep(body[k]);
     for (const k of Object.keys(body)) if (body[k] === undefined) delete body[k];
     const json = canonical(body);
 
@@ -87,10 +89,18 @@ export class BubblesLog {
     return entry;
   }
 
+  private deep(v: unknown): unknown {
+    if (typeof v === 'string') return this.redact(v);
+    if (Array.isArray(v)) return v.map((x) => this.deep(x));
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, this.deep(x)]));
+    return v;
+  }
+
   private mirror(ts: number, line: string): void {
     try {
       const dir = join(this.home, 'log');
       mkdirSync(dir, { recursive: true, mode: 0o700 });
+      chmodSync(dir, 0o700); // recursive mkdir leaves a pre-existing dir's mode alone
       const file = join(dir, `bubbles-${monthOf(ts)}.jsonl`);
       appendFileSync(file, line + '\n', { mode: 0o600 });
       chmodSync(file, 0o600);
@@ -120,6 +130,9 @@ export class BubblesLog {
       if (expectSeq !== 0 && r.seq !== expectSeq) return { ok: false, badSeq: r.seq, why: `seq gap: expected ${expectSeq}` };
       if (r.prev_hash !== prev) return { ok: false, badSeq: r.seq, why: 'prev_hash does not match previous row' };
       if (sha(r.prev_hash + '\n' + r.json) !== r.hash) return { ok: false, badSeq: r.seq, why: 'hash does not match content' };
+      let j: { ts?: unknown; kind?: unknown };
+      try { j = JSON.parse(r.json); } catch { return { ok: false, badSeq: r.seq, why: 'json is not parseable' }; }
+      if (j.ts !== r.ts || j.kind !== r.kind) return { ok: false, badSeq: r.seq, why: 'column/json mismatch' };
       prev = r.hash; expectSeq = r.seq + 1; count++;
     }
     return { ok: true, count };
