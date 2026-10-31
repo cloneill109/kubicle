@@ -158,7 +158,17 @@ test('C1: MCP tool input is shown in full', () => {
 test('C1: over 8192 chars -> capped and flagged truncated', () => {
   const e = normalizeHook({ ...fx('PermissionRequest'), tool_name: 'Write', tool_input: { file_path: '/tmp/a', content: 'y'.repeat(9 * 1024) } }, 1)!;
   assert.equal(e.toolInputTruncated, true);
-  assert.equal(Array.from(e.toolInput!).length, 8192);
+  assert.equal(e.toolInput!.length, 8192);
+});
+
+test('C1: truncation never splits a surrogate pair; a 2 MB input stays fast', () => {
+  const emoji = normalizeHook({ ...fx('PermissionRequest'), tool_input: { content: '😀'.repeat(5000) } }, 1)!;
+  assert.equal(emoji.toolInputTruncated, true);
+  assert.ok(!/[\uD800-\uDBFF]$/.test(emoji.toolInput!), 'no dangling high surrogate');
+  const t0 = performance.now();
+  const big = normalizeHook({ ...fx('PermissionRequest'), tool_name: 'Write', tool_input: { content: 'x'.repeat(2 * 1024 * 1024) } }, 1)!;
+  assert.equal(big.toolInput!.length, 8192);
+  assert.ok(performance.now() - t0 < 500, `took ${performance.now() - t0}ms`);
 });
 
 test('C1: only PermissionRequest carries tool input', () => {

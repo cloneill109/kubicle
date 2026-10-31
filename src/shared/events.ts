@@ -191,9 +191,11 @@ export function normalizeHook(raw: unknown, now: number, cap: number = DEFAULT_C
     let json: string | undefined;
     try { json = JSON.stringify(raw.tool_input, null, 2); } catch { json = undefined; }
     if (json !== undefined) {
-      const chars = Array.from(json);
-      if (chars.length > TOOL_INPUT_MAX) {
-        e.toolInput = chars.slice(0, TOOL_INPUT_MAX).join('');
+      if (json.length > TOOL_INPUT_MAX) {
+        // Cut by UTF-16 units (cheap on a 2 MB input); never leave half a surrogate pair.
+        let cut = json.slice(0, TOOL_INPUT_MAX);
+        if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1);
+        e.toolInput = cut;
         e.toolInputTruncated = true;
       } else e.toolInput = json;
     }
