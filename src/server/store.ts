@@ -45,6 +45,16 @@ function initSchema(db: DatabaseSync, file: string): void {
       seq INTEGER PRIMARY KEY, ts INTEGER NOT NULL, kind TEXT NOT NULL,
       json TEXT NOT NULL, prev_hash TEXT NOT NULL, hash TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS bubbles_log_ts ON bubbles_log(ts);
+    CREATE TABLE IF NOT EXISTS bubbles_grants (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, action TEXT NOT NULL, branch TEXT,
+      uses_left INTEGER, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL,
+      confirmed_at INTEGER NOT NULL, revoked_at INTEGER);
+    CREATE TABLE IF NOT EXISTS bubbles_instructions (
+      id TEXT NOT NULL, version INTEGER NOT NULL, project_id TEXT, text TEXT NOT NULL,
+      created_at INTEGER NOT NULL, revoked_at INTEGER, PRIMARY KEY (id, version));
+    CREATE TABLE IF NOT EXISTS bubbles_pending (
+      id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, json TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS bubbles_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `);
   // Older databases lack the room column; add it in place.
   if (!(db.prepare('PRAGMA table_info(session_settings)').all() as { name: string }[]).some((c) => c.name === 'room')) {
