@@ -5,11 +5,12 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium, type Browser, type Page } from 'playwright-core';
+import { parse as parseYaml, stringify as yamlText } from 'yaml';
 import { startServer, type RunningServer } from '../../src/server/main.ts';
 import { loadConfig } from '../../src/server/config.ts';
 
@@ -39,7 +40,7 @@ after(async () => {
 type Office = {
   renderer(): { center(a: unknown): { x: number; y: number } };
   sim: { agents(): { view: { id: string; name: string; status: string; roomLabel?: string }; anim: string; x: number; y: number }[] };
-  state: { projects: { id: string; name: string; order: number; archived: boolean }[] };
+  state: { projects: { id: string; name: string; order: number; archived: boolean }[]; building: { floors: Record<string, { revision: number } | undefined> } };
   floor(): string;
   glow(): boolean;
   elevator(): { x: number; y: number; w: number; h: number };
@@ -47,6 +48,10 @@ type Office = {
   style(): string;
   signs(): { roomId: string; x: number; y: number; w: number; h: number; text: string }[];
   world(): { rooms: { id: string; name: string; kind: string; x0: number; x1: number; y0: number; y1: number }[]; grid: { room: string | null }[][] };
+  /** Rooms being edited (null outside edit mode). */
+  editRooms(): { id: string; name: string; division?: string; band: 'top' | 'bottom'; width: number }[] | null;
+  /** Client coordinates of a room's body (its center) or its resize handle, scrolling the map box to it. */
+  editPoint(id: string, part: 'body' | 'resize'): { x: number; y: number; unit: number };
 };
 declare global { interface Window { __office: Office } }
 
@@ -459,5 +464,226 @@ test('live office: state, floors, approvals, rooms, lobby, styles, narrow view, 
   await page.waitForFunction(() => /The office server restarted\. Open the login link it printed to sign in again\./.test(document.getElementById('disconnected')!.innerText), null, { timeout: 10000 });
   assert.ok(await page.locator('#disconnected').isVisible());
   await page.screenshot({ path: join(outDir, 'live-relogin.png') });
+  await page.close();
+});
+
+// ---------------------------------------------------------------- floor edit mode (Task 8)
+type Room = { id: string; name: string; division?: string; band: 'top' | 'bottom'; width: number };
+const editRooms = (page: Page) => page.evaluate(() => window.__office.editRooms());
+const roomIds = (rs: Room[] | null, band: 'top' | 'bottom') => (rs ?? []).filter((r) => r.band === band).map((r) => r.id);
+const CONFLICT = 'This floor changed elsewhere. Reload to see the latest.';
+
+/** A room part's client point, after the next frame (the renderer's mapping follows the last drawn layout). */
+const editPoint = (page: Page, id: string, part: 'body' | 'resize') => page.evaluate(([i, p]) => new Promise<{ x: number; y: number; unit: number }>((res) =>
+  requestAnimationFrame(() => requestAnimationFrame(() => res(window.__office.editPoint(i, p as 'body' | 'resize'))))), [id, part]);
+
+async function drag(page: Page, from: { x: number; y: number }, to: { x: number; y: number }): Promise<void> {
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  for (let i = 1; i <= 8; i++) await page.mouse.move(from.x + ((to.x - from.x) * i) / 8, from.y + ((to.y - from.y) * i) / 8);
+  await page.mouse.up();
+}
+
+test('floor edit mode: drag, resize, add, remove, save; conflict, 400, 404, network failure, cancel, keyboard, 400px', async () => {
+  await srv?.close();
+  const home = join(tmp, 'home-edit');
+  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, { openBrowser: false });
+  const gamma = repo('gamma');
+  const S = 'cccccccc-0000-4000-8000-000000000003';
+  await postOk({ session_id: S, hook_event_name: 'SessionStart', cwd: gamma, source: 'startup' });
+
+  const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } });
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+  page.on('console', (m) => { if (m.type() === 'error' && !/fonts\.(googleapis|gstatic)|Failed to load resource/.test(m.text())) errors.push(m.text()); });
+  await page.goto(srv.loginUrl);
+  await page.waitForFunction(() => !!window.__office && document.body.dataset.conn === 'open' && window.__office.floor() !== 'lobby', null, { timeout: 10000 });
+  const gid = await projectId(page, 'gamma');
+  // Put the session in Animation, the room we are about to remove.
+  const moved = await page.evaluate((id) => fetch(`/api/agents/${id}/room`, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'X-Kubicle-CSRF': '1' }, body: JSON.stringify({ room: 'animation' }) }).then((r) => r.status), S);
+  assert.equal(moved, 204);
+  await page.waitForFunction((id) => window.__office.sim.agents().find((a) => a.view.id === id)?.view.roomLabel === 'animation', S, { timeout: 3000 });
+  await settle(page);
+  assert.equal(await roomAt(page, S), 'animation');
+
+  // ---- the toggle: not in the Lobby; on a floor it opens the sheet ----
+  const editBtn = page.locator('#editBtn');
+  assert.ok(await editBtn.isVisible(), 'Edit floor on a floor');
+  assert.equal(await editBtn.innerText(), 'Edit floor');
+  await goFloor(page, 'Lobby');
+  assert.ok(await editBtn.isHidden(), 'no Edit floor in the Lobby');
+  await goFloor(page, 'gamma');
+  assert.equal(await editRooms(page), null);
+  await editBtn.click();
+  await page.locator('#editSheet').waitFor({ state: 'visible', timeout: 3000 });
+  assert.equal(await editBtn.getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.evaluate(() => document.body.classList.contains('editing')), true);
+  assert.deepEqual(await page.$$eval('#editRooms li', (lis) => lis.map((li) => (li as HTMLElement).dataset.room)),
+    ['qa', 'security', 'uxui', 'frontend', 'bullpen', 'backend', 'animation', 'imagegen']);
+  assert.ok(await page.locator('#editRooms li[data-room="bullpen"] button.remove').isDisabled(), 'the Bullpen cannot be removed');
+  assert.ok(await page.locator('#editSave').isDisabled(), 'nothing to save yet');
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: join(outDir, 'live-edit.png') });
+  // The outlines and handles follow every style's projection; drags work in the isometric one too.
+  for (const st of ['iso', 'blueprint', 'cozy'] as const) {
+    await page.locator(`#styleTabs button[data-style="${st}"]`).click();
+    await page.waitForTimeout(250);
+    await page.locator('#mapWrap').screenshot({ path: join(outDir, `live-edit-${st}.png`) });
+  }
+  await page.locator('#editRooms li[data-room="bullpen"] button.pick').click();
+  const iso1 = await editPoint(page, 'frontend', 'body'), iso2 = await editPoint(page, 'security', 'body');
+  await page.locator('#styleTabs button[data-style="iso"]').click();
+  const isoA = await editPoint(page, 'frontend', 'body'), isoB = await editPoint(page, 'security', 'body');
+  assert.ok(iso1.x !== isoA.x || iso2.y !== isoB.y, 'iso maps rooms differently');
+  await drag(page, isoA, isoB);
+  assert.deepEqual(roomIds(await editRooms(page), 'top'), ['qa', 'frontend', 'security', 'uxui'], 'iso drag lands where the bar shows');
+  await page.locator('#editCancel').click();
+  await page.locator('#styleTabs button[data-style="pixel"]').click();
+  await editBtn.click();
+
+  // ---- drag uxui to the front of the top band (pointer events) ----
+  let a = await editPoint(page, 'uxui', 'body');
+  let b = await editPoint(page, 'qa', 'body');
+  await drag(page, a, { x: b.x - b.unit * 4, y: b.y });
+  assert.deepEqual(roomIds(await editRooms(page), 'top'), ['uxui', 'qa', 'security', 'frontend']);
+  assert.deepEqual(await page.evaluate(() => window.__office.world().rooms.filter((r) => r.y0 < 12).map((r) => r.id)), ['uxui', 'qa', 'security', 'frontend'], 'the world shows the edit live');
+  // ---- drag imagegen up into the top band, between qa and security; then back down to the end ----
+  a = await editPoint(page, 'imagegen', 'body');
+  b = await editPoint(page, 'security', 'body');
+  await drag(page, a, { x: b.x - b.unit * 4, y: b.y });
+  assert.deepEqual(roomIds(await editRooms(page), 'top'), ['uxui', 'qa', 'imagegen', 'security', 'frontend']);
+  a = await editPoint(page, 'imagegen', 'body');
+  b = await editPoint(page, 'animation', 'body');
+  await drag(page, a, { x: b.x + b.unit * 5, y: b.y });
+  assert.deepEqual(roomIds(await editRooms(page), 'bottom'), ['bullpen', 'backend', 'animation', 'imagegen']);
+
+  // ---- resize qa to 16 by dragging its right edge ----
+  a = await editPoint(page, 'qa', 'resize');
+  await drag(page, a, { x: a.x + a.unit * 4, y: a.y });
+  assert.equal((await editRooms(page))!.find((r) => r.id === 'qa')!.width, 16);
+  assert.equal(await page.evaluate(() => { const r = window.__office.world().rooms.find((x) => x.id === 'qa')!; return r.x1 - r.x0 + 1; }), 16);
+
+  // ---- remove animation, add a custom room "Docs" ----
+  await page.locator('#editRooms li[data-room="animation"] button.remove').click();
+  assert.equal((await editRooms(page))!.some((r) => r.id === 'animation'), false);
+  await page.locator('#editAddKind').selectOption({ label: 'Custom room' });
+  await page.locator('#editAddName').fill('Docs');
+  await page.locator('#editAddBand').selectOption('bottom');
+  await page.locator('#editAdd').click();
+  assert.deepEqual((await editRooms(page))!.find((r) => r.id === 'docs'), { id: 'docs', name: 'Docs', band: 'bottom', width: 12 });
+  assert.ok(await page.locator('#editSave').isEnabled());
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: join(outDir, 'live-edit-changed.png') });
+
+  // ---- save: 200 → building arrives, the world shows Docs, the file has revision 1 and these rooms ----
+  const expected = await editRooms(page);
+  let resp = page.waitForResponse((r) => r.url().includes('/api/floors/'));
+  await page.locator('#editSave').click();
+  assert.equal((await resp).status(), 200);
+  await page.locator('#editSheet').waitFor({ state: 'hidden', timeout: 3000 });
+  assert.equal(await editRooms(page), null, 'edit mode ends after a save');
+  await page.waitForFunction((id) => window.__office.state.building.floors[id]?.revision === 1, gid, { timeout: 3000 });
+  await page.waitForFunction(() => window.__office.world().rooms.some((r) => r.id === 'docs' && r.name === 'Docs'), null, { timeout: 3000 });
+  await page.waitForFunction(() => window.__office.signs().some((s) => s.text === 'Docs · 0'), null, { timeout: 3000 });
+  const files = readdirSync(join(home, 'floors'));
+  assert.equal(files.length, 1);
+  const file = join(home, 'floors', files[0]!);
+  const onDisk = parseYaml(readFileSync(file, 'utf8')) as { revision: number; rooms: Room[] };
+  assert.equal(onDisk.revision, 1);
+  assert.deepEqual(onDisk.rooms, expected);
+  assert.equal(onDisk.rooms.some((r) => r.id === 'animation'), false);
+  assert.equal(onDisk.rooms.find((r) => r.id === 'qa')!.width, 16);
+  // the agent whose room was removed walks to the Bullpen
+  await settle(page);
+  assert.equal(await roomAt(page, S), 'bullpen');
+
+  // ---- conflict: edit, the file changes elsewhere (note, edit kept), save → 409 copy, file unchanged ----
+  await editBtn.click();
+  await page.locator('#editSheet').waitFor({ state: 'visible', timeout: 3000 });
+  await page.locator('#editRooms li[data-room="docs"] button.pick').focus();
+  await page.keyboard.press('+');
+  assert.equal((await editRooms(page))!.find((r) => r.id === 'docs')!.width, 13);
+  const external = { revision: 2, rooms: onDisk.rooms.map((r) => (r.id === 'qa' ? { ...r, name: 'Quality' } : r)) };
+  writeFileSync(file, yamlText(external));
+  const externalText = readFileSync(file, 'utf8');
+  await page.waitForFunction((id) => window.__office.state.building.floors[id]?.revision === 2, gid, { timeout: 5000 });
+  await page.locator('#editNote').waitFor({ state: 'visible', timeout: 3000 });
+  assert.equal(await page.locator('#editNote').innerText(), 'This floor was changed elsewhere');
+  assert.equal((await editRooms(page))!.find((r) => r.id === 'docs')!.width, 13, 'the in-progress edit was not overwritten');
+  assert.equal(await page.evaluate(() => window.__office.world().rooms.find((r) => r.id === 'qa')!.name), 'QA', 'the canvas still shows the edit');
+  resp = page.waitForResponse((r) => r.url().includes('/api/floors/'));
+  await page.locator('#editSave').click();
+  assert.equal((await resp).status(), 409);
+  await page.waitForFunction((t) => document.getElementById('editMsg')!.textContent === t, CONFLICT, { timeout: 3000 });
+  assert.ok(await page.locator('#editReload').isVisible(), 'Reload offered');
+  assert.equal((await editRooms(page))!.find((r) => r.id === 'docs')!.width, 13, 'edits kept after a conflict');
+  assert.equal(readFileSync(file, 'utf8'), externalText, 'the file is unchanged');
+  await page.screenshot({ path: join(outDir, 'live-edit-conflict.png') });
+  await page.locator('#editReload').click();
+  assert.equal((await editRooms(page))!.find((r) => r.id === 'qa')!.name, 'Quality', 'Reload takes the latest floor');
+  assert.equal((await editRooms(page))!.find((r) => r.id === 'docs')!.width, 12);
+  assert.ok(await page.locator('#editMsg').isHidden());
+  assert.ok(await page.locator('#editNote').isHidden());
+
+  // ---- keyboard on a focused room: Left moves, Up switches band, - resizes, Delete removes; Cancel restores ----
+  await page.locator('#editRooms li[data-room="docs"] button.pick').focus();
+  await page.keyboard.press('ArrowLeft');
+  assert.deepEqual(roomIds(await editRooms(page), 'bottom'), ['bullpen', 'backend', 'docs', 'imagegen']);
+  assert.equal(await page.evaluate(() => (document.activeElement as HTMLElement).closest('li')?.dataset.room), 'docs', 'focus follows the room');
+  await page.keyboard.press('ArrowUp');
+  assert.deepEqual(roomIds(await editRooms(page), 'top'), ['uxui', 'qa', 'docs', 'security', 'frontend']);
+  await page.keyboard.press('-');
+  assert.equal((await editRooms(page))!.find((r) => r.id === 'docs')!.width, 11);
+  await page.keyboard.press('Delete');
+  assert.equal((await editRooms(page))!.some((r) => r.id === 'docs'), false);
+  await page.locator('#editRooms li[data-room="bullpen"] button.pick').focus();
+  await page.keyboard.press('Delete');
+  assert.ok((await editRooms(page))!.some((r) => r.id === 'bullpen'), 'Delete does not remove the Bullpen');
+  await page.locator('#editCancel').click();
+  await page.locator('#editSheet').waitFor({ state: 'hidden', timeout: 3000 });
+  assert.deepEqual(await page.evaluate(() => window.__office.world().rooms.map((r) => r.id)), external.rooms.map((r) => r.id), 'Cancel restores the floor');
+  assert.equal(await page.evaluate(() => window.__office.world().rooms.find((r) => r.id === 'qa')!.name), 'Quality');
+
+  // ---- add a division room from the select ----
+  await editBtn.click();
+  await page.locator('#editAddKind').selectOption('animation');
+  assert.ok(await page.locator('#editAddName').isHidden(), 'no name field for a division room');
+  await page.locator('#editAdd').click();
+  assert.deepEqual((await editRooms(page))!.find((r) => r.id === 'animation'), { id: 'animation', name: 'Animation', division: 'animation', band: 'top', width: 12 });
+
+  // ---- error paths: network failure, 404, 400 (verbatim) — edits stay ----
+  await page.route('**/api/floors/**', (r) => r.abort());
+  await page.locator('#editSave').click();
+  await page.waitForFunction(() => document.getElementById('editMsg')!.textContent === 'Couldn\'t reach the office server. Your edits are still here.', null, { timeout: 3000 });
+  assert.ok((await editRooms(page))!.some((r) => r.id === 'animation'));
+  await page.unroute('**/api/floors/**');
+  await page.route('**/api/floors/**', (r) => r.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"unknown or archived project"}' }));
+  await page.locator('#editSave').click();
+  await page.waitForFunction(() => document.getElementById('editMsg')!.textContent === 'This floor no longer exists.', null, { timeout: 3000 });
+  await page.unroute('**/api/floors/**');
+  writeFileSync(file, 'revision: [oops');
+  resp = page.waitForResponse((r) => r.url().includes('/api/floors/'));
+  await page.locator('#editSave').click();
+  assert.equal((await resp).status(), 400);
+  await page.waitForFunction(() => /fix or delete /.test(document.getElementById('editMsg')!.textContent ?? ''), null, { timeout: 3000 });
+  // the server's message, verbatim
+  const m400 = await page.locator('#editMsg').innerText();
+  assert.ok(m400.includes(`fix or delete ${file} before editing this floor`), m400);
+  assert.equal(readFileSync(file, 'utf8'), 'revision: [oops', 'a broken file is left alone');
+  assert.ok((await editRooms(page))!.some((r) => r.id === 'animation'), 'edits kept after a 400');
+  writeFileSync(file, externalText);
+
+  // ---- 400px: the sheet fits, no horizontal page scroll ----
+  await page.setViewportSize({ width: 400, height: 900 });
+  await page.waitForTimeout(400);
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'no horizontal page scroll at 400px in edit mode');
+  const sheet = await page.locator('#editSheet').boundingBox();
+  assert.ok(sheet && sheet.x >= 0 && sheet.x + sheet.width <= 400, `sheet inside the viewport ${JSON.stringify(sheet)}`);
+  await page.screenshot({ path: join(outDir, 'live-edit-400.png'), fullPage: true });
+  await page.setViewportSize({ width: 1400, height: 1000 });
+  await page.locator('#editCancel').click();
+  assert.equal(await editRooms(page), null);
+
+  assert.deepEqual(errors, [], 'no page errors');
   await page.close();
 });

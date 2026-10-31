@@ -48,7 +48,8 @@ export function drawOverlays(ctx: CanvasRenderingContext2D, R: Renderer, style: 
     const topRoom = isTopRoom(r) || front;
     const p = front ? R.pt(dx + 1, r.y1 + 1.6) : R.pt(dx + 1, topRoom ? dy + 1.15 : dy - 0.15);
     const extra = ` · ${counts.get(r.id) ?? 0}`;
-    const sub = r.kind === 'division' && !r.color ? (style === 'blueprint' ? UNKNOWN_DIVISION.toUpperCase() : UNKNOWN_DIVISION) : '';
+    // Only a room that names a division we don't have (or whose color is unusable) is "unknown"; a custom room has no division.
+    const sub = r.kind === 'division' && r.division && !r.color ? (style === 'blueprint' ? UNKNOWN_DIVISION.toUpperCase() : UNKNOWN_DIVISION) : '';
     // A two-line sign is at least as wide as "Unknown division", so the name may use that width too.
     const maxW = Math.max(60, (r.x1 - r.x0 - 1) * u - PAD * 2, sub ? ctx.measureText(sub).width : 0) - ctx.measureText(extra).width;
     const label = ellipsize(ctx, style === 'blueprint' ? r.name.toUpperCase() : r.name, maxW);

@@ -98,7 +98,7 @@ for (const style of STYLES) {
       sign(def, 'security', 'Cybersecurity', 2, false, 'a subagent walking in counts for its room');
       sign(def, 'uxui', 'UX/UI', 1, false);
       sign(custom, 'lab', 'Mystery lab', 3, true);
-      sign(custom, 'ops', 'Ops', 2, true, 'no division reads as unknown too');
+      sign(custom, 'ops', 'Ops', 2, false, 'a custom room (no division) is not "Unknown division"');
       sign(custom, 'bullpen', 'Bullpen', 1, false, 'the Bullpen is never "unknown"');
       if (vp.width === 1400 && style !== 'iso') assert.ok(def.signs.every((s) => !s.text.includes('…')), `no ellipsized signs on the default floor at 1400 ${JSON.stringify(def.signs.map((s) => s.text))}`);
       if (vp.width === 1400) assert.ok(def.cssW <= def.wrapW, `default floor fits at 1400 without scrolling (${def.cssW} > ${def.wrapW})`);

@@ -18,6 +18,7 @@
   <button class="floor-btn" id="floorBtn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-keyshortcuts="E" title="Take the elevator to another floor (E)">
     <span class="lbl">Floor</span><span class="name">Lobby</span><span class="glow" hidden></span><span class="caret" aria-hidden="true">▾</span>
   </button>
+  <button class="btn edit-btn" id="editBtn" type="button" aria-pressed="false" aria-controls="editSheet" title="Rearrange this floor's rooms" hidden>Edit floor</button>
   <div class="counts" id="counts" aria-live="polite"></div>
   <div class="tools">
     <button class="btn chime" id="chime" type="button" aria-pressed="false" title="Play a sound when an agent starts waiting on you">Chime off</button>
@@ -43,6 +44,28 @@
     </section>
   </section>
 
+  <div class="side">
+  <section class="edit-sheet" id="editSheet" aria-labelledby="editTitle" hidden>
+    <header>
+      <h2 id="editTitle">Edit floor</h2>
+      <p class="sub" id="editFloorName"></p>
+    </header>
+    <p class="edit-help" id="editHelp">Drag a room to move it; drag its right edge to resize. With a room focused: ← → move it, ↑ ↓ switch side, + − change width, Delete removes it.</p>
+    <p class="edit-note" id="editNote" role="status" hidden>This floor was changed elsewhere</p>
+    <div class="edit-rooms" id="editRooms"></div>
+    <form class="edit-add" id="editAddForm">
+      <h3>Add room</h3>
+      <div class="field"><label for="editAddKind">Room</label><select id="editAddKind"></select></div>
+      <div class="field"><label for="editAddBand">Side</label><select id="editAddBand"><option value="top">Top</option><option value="bottom">Bottom</option></select></div>
+      <div class="field" id="editAddNameRow"><label for="editAddName">Name</label><input id="editAddName" maxlength="40" autocomplete="off" placeholder="e.g. Docs"></div>
+      <button class="btn" id="editAdd" type="submit">Add room</button>
+    </form>
+    <div class="edit-msg" id="editMsgBox" role="alert" hidden><p id="editMsg" hidden></p><button class="btn" id="editReload" type="button" hidden>Reload</button></div>
+    <div class="edit-actions">
+      <button class="btn primary" id="editSave" type="button">Save</button>
+      <button class="btn" id="editCancel" type="button">Cancel</button>
+    </div>
+  </section>
   <aside class="inspector insp" id="inspector" aria-live="polite">
     <div class="insp-empty" id="iEmpty">
       <h2 id="iEmptyTitle">Nobody selected</h2>
@@ -88,6 +111,7 @@
       <div><h3>Recent activity</h3><ol class="log" id="iLog"></ol></div>
     </div>
   </aside>
+  </div>
 </div>
 
 <div class="floor-menu" id="floorMenu" role="menu" hidden></div>

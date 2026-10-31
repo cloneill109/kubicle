@@ -1,9 +1,13 @@
 // Browser entry: WebSocket → OfficeState → Sim → renderer, plus the header, feed, legend,
-// inspector, needs-you alerts, and building navigation (elevator picker, Lobby, one floor at a time).
+// inspector, needs-you alerts, building navigation (elevator picker, Lobby, one floor at a time),
+// and floor edit mode (drag/resize rooms on the canvas, the side sheet, revision-checked save).
 // Bundled by esbuild into dist/ui/main.js.
 import type { ServerMsg, FeedItem, AgentView } from '../shared/protocol.ts';
 import { buildFloor, type World } from './sim/world.ts';
-import { defaultFloor, type FloorDef } from '../shared/building.ts';
+import { BULLPEN, defaultFloor, type FloorDef, type RoomDef } from '../shared/building.ts';
+import { addRoom, bandRooms, moveRoom, removeRoom, resizeRoom } from './floor-edit.ts';
+import { drawEdit, dropTarget, hitRoom, partPoint, screenToWorld, type EditPart, type EditView } from './render/edit-overlay.ts';
+import { CUSTOM, keyAction, renderAddKinds, renderRoomList, type RoomAction } from './floor-sheet.ts';
 import { Sim } from './sim/agents.ts';
 import { STYLES, preferredSize, type Renderer, type StyleId, type SimAgent } from './render/types.ts';
 import { drawOverlays, type SignRect } from './render/overlays.ts';
@@ -34,6 +38,25 @@ let world: World = buildFloor(defaultFloor(), []);
 let sim = new Sim(world, { ambient: !reducedMotion?.matches });
 reducedMotion?.addEventListener?.('change', () => { sim.ambient = !reducedMotion.matches; });
 const floorDef = (id: string): FloorDef => state.building.floors[id] ?? defaultFloor();
+
+/**
+ * Floor edit mode. Entering snapshots the floor's {rooms, revision}; Save sends that revision as the
+ * base. While editing, the canvas shows the edited rooms (layoutFor), and building messages for this
+ * floor don't replace them: they only raise the "changed elsewhere" note.
+ */
+interface Editing {
+  floorId: string;
+  baseRevision: number;
+  baseRooms: RoomDef[];
+  rooms: RoomDef[];
+  selected?: string;
+  saving: boolean;
+  elsewhere: boolean;
+  msg?: { text: string; conflict: boolean };
+}
+let editing: Editing | null = null;
+/** The layout on the canvas for a floor: the edit in progress, else the server's floor. */
+const layoutFor = (id: string): FloorDef => (editing?.floorId === id ? { ...floorDef(id), rooms: editing.rooms } : floorDef(id));
 const inspector = new Inspector(state, () => sim.agents(), (projectId) => floorDef(projectId).rooms.map((r) => ({ id: r.id, name: r.name })));
 
 // ---------------------------------------------------------------- style + canvas
@@ -94,6 +117,7 @@ function loop(ts: number): void {
     // Reduced motion: freeze the overlay clock so status marks and the selection ring don't bob.
     signs = drawOverlays(ctx, R, style, world, agents, roomOf, inspector.selectedId, hovered, reducedMotion?.matches ? 0 : now, cw);
     if (glowOn) drawGlow(now);
+    if (editing) drawEdit(ctx, R, world, editView());
   }
   panelClock += dt;
   if (panelClock > 0.25) { panelClock = 0; inspector.render(now); }
@@ -154,6 +178,7 @@ function drawGlow(now: number): void {
 
 // Door signs are not clickable in 1b (stage 2 uses them for room settings). The elevator opens the picker.
 canvas.addEventListener('mousemove', (e) => {
+  if (editing) return; // edit mode sets its own cursor (pointer handlers below)
   const [x, y] = rel(e);
   const a = hitAgent(x, y);
   hovered = a?.view.id;
@@ -163,6 +188,7 @@ canvas.addEventListener('mousemove', (e) => {
 });
 canvas.addEventListener('mouseleave', () => { hovered = undefined; });
 canvas.addEventListener('click', (e) => {
+  if (editing) return; // in edit mode a click selects a room (pointerdown)
   const [x, y] = rel(e);
   const a = hitAgent(x, y);
   closeMenu();
@@ -211,8 +237,10 @@ function jumpToNeedsYou(): void {
   if (!a) return;
   closeMenu();
   inspector.select(a.id);
-  // On another floor: take the elevator there first. Reveal after a frame, once the renderer has laid out the new floor.
+  // On another floor: take the elevator there first (not while editing this one: the inspector still
+  // shows them). Reveal after a frame, once the renderer has laid out the new floor.
   if (a.projectId && a.projectId !== state.currentFloor && state.project(a.projectId)) {
+    if (editing) return;
     goFloor(a.projectId);
     requestAnimationFrame(() => requestAnimationFrame(() => revealAgent(a.id)));
   } else revealAgent(a.id);
@@ -309,10 +337,10 @@ function showPicker(): void {
   closeMenu();
   openPicker(floorBtn, state.floorItems(), goFloor, state.currentFloor);
 }
-floorBtn.addEventListener('click', () => (pickerOpen() ? closePicker() : showPicker()));
+floorBtn.addEventListener('click', () => { if (editing) return; pickerOpen() ? closePicker() : showPicker(); });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'e' && e.key !== 'E') return;
-  if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || pickerOpen() || !menu.hidden) return;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || pickerOpen() || !menu.hidden || editing) return;
   const t = document.activeElement as HTMLElement | null;
   if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
   e.preventDefault();
@@ -328,11 +356,12 @@ function goFloor(id: string): void {
 }
 
 let worldKey = '';
-const keyFor = (id: string) => JSON.stringify([id, floorDef(id).rooms, state.building.divisions.map((d) => [d.id, d.color])]);
+const keyFor = (id: string) => JSON.stringify([id, layoutFor(id).rooms, state.building.divisions.map((d) => [d.id, d.color])]);
 
 /** Puts state.currentFloor on screen: a fresh world and Sim with that floor's agents placed, or the Lobby. */
 function showFloor(): void {
   const id = state.currentFloor, lobby = id === LOBBY;
+  if (editing && editing.floorId !== id) endEdit(false); // the floor went away (archived) under the edit
   document.body.dataset.floor = lobby ? 'lobby' : id;
   scroller.hidden = lobby;
   $('lobby').hidden = !lobby;
@@ -340,7 +369,7 @@ function showFloor(): void {
   $('legend').hidden = lobby;
   if (!lobby) {
     worldKey = keyFor(id);
-    world = buildFloor(floorDef(id), state.building.divisions);
+    world = buildFloor(layoutFor(id), state.building.divisions);
     sim = new Sim(world, { ambient: !reducedMotion?.matches });
     hovered = undefined;
     const now = performance.now() / 1000;
@@ -359,7 +388,7 @@ function syncWorld(): void {
   const key = keyFor(state.currentFloor);
   if (key === worldKey) return;
   worldKey = key;
-  world = buildFloor(floorDef(state.currentFloor), state.building.divisions);
+  world = buildFloor(layoutFor(state.currentFloor), state.building.divisions);
   sim.setWorld(world);
   R.invalidate();
   cw = 0; resize();
@@ -376,7 +405,10 @@ function renderFloorUi(): void {
   floorBtn.dataset.glow = String(others > 0);
   badge.hidden = others === 0;
   badge.textContent = String(others);
-  floorBtn.title = others > 0 ? `${others} waiting on you on another floor. Take the elevator (E).` : 'Take the elevator to another floor (E)';
+  floorBtn.title = editing ? 'Save or cancel your floor edits to take the elevator'
+    : others > 0 ? `${others} waiting on you on another floor. Take the elevator (E).` : 'Take the elevator to another floor (E)';
+  floorBtn.disabled = !!editing;
+  $('editBtn').hidden = id === LOBBY;
   // The empty hint, only after the server has told us (not while connecting).
   const empty = $('emptyFloor');
   empty.hidden = !gotSnapshot || id === LOBBY || agentsOnFloor().length > 0;
@@ -510,6 +542,12 @@ function onMessage(m: ServerMsg): void {
   if (c.firstSnapshot || c.floor) {
     showFloor(); // places the new floor's agents itself
   } else {
+    if (c.building && editing && !editing.saving) {
+      // Another writer (CLI, a file edit, another tab) changed the floor being edited: say so, keep editing.
+      const cur = state.building.floors[editing.floorId]?.revision ?? 0;
+      if (cur !== editing.baseRevision && !editing.elsewhere) { editing.elsewhere = true; renderSheet(); }
+    }
+    if (c.building && editing) renderAddKinds($<HTMLSelectElement>('editAddKind'), state.building.divisions, editing.rooms);
     if (c.building || c.projects) syncWorld();
     const floor = state.currentFloor;
     for (const r of c.removed) sim.remove(r.view.id, r.reason, now);
@@ -538,6 +576,279 @@ function onMessage(m: ServerMsg): void {
   }
   inspector.render(now);
 }
+
+// ---------------------------------------------------------------- floor edit mode
+const editBtn = $<HTMLButtonElement>('editBtn');
+const CONFLICT_TEXT = 'This floor changed elsewhere. Reload to see the latest.';
+const NETWORK_TEXT = 'Couldn\'t reach the office server. Your edits are still here.';
+const GONE_TEXT = 'This floor no longer exists.';
+const sameRooms = (a: RoomDef[], b: RoomDef[]) => JSON.stringify(a) === JSON.stringify(b);
+const dirty = () => !!editing && !sameRooms(editing.rooms, editing.baseRooms);
+const cloneRooms = (rs: RoomDef[]): RoomDef[] => rs.map((r) => ({ ...r }));
+
+function startEdit(): void {
+  const id = state.currentFloor;
+  if (editing || id === LOBBY) return;
+  closeMenu(); closePicker(false);
+  const f = floorDef(id);
+  editing = { floorId: id, baseRevision: f.revision, baseRooms: cloneRooms(f.rooms), rooms: cloneRooms(f.rooms), saving: false, elsewhere: false };
+  hovered = undefined;
+  canvas.tabIndex = 0;
+  renderAddKinds($<HTMLSelectElement>('editAddKind'), state.building.divisions, editing.rooms);
+  ($<HTMLSelectElement>('editAddBand')).value = 'top';
+  ($<HTMLInputElement>('editAddName')).value = '';
+  renderEditUi();
+  syncWorld();
+  $('editSheet').scrollIntoView({ block: 'nearest' });
+}
+
+/** Leaves edit mode; the canvas goes back to the server's floor (Cancel restores, Save shows the stored one). */
+function endEdit(sync = true): void {
+  if (!editing) return;
+  editing = null;
+  gesture = null;
+  editHover = undefined;
+  canvas.tabIndex = -1;
+  canvas.style.cursor = 'default';
+  renderEditUi();
+  if (sync) syncWorld();
+}
+
+function renderEditUi(): void {
+  const on = !!editing;
+  document.body.classList.toggle('editing', on);
+  editBtn.setAttribute('aria-pressed', String(on));
+  $('editSheet').hidden = !on;
+  renderFloorUi();
+  if (on) renderSheet();
+}
+
+function renderSheet(): void {
+  const e = editing;
+  if (!e) return;
+  $('editFloorName').textContent = floorName(e.floorId);
+  $('editNote').hidden = !e.elsewhere;
+  const list = $('editRooms');
+  const focused = list.contains(document.activeElement) ? (document.activeElement as HTMLElement).closest('li')?.dataset.room : undefined;
+  renderRoomList(list, e.rooms, state.building.divisions, e.selected, onRoomAction);
+  if (focused) list.querySelector<HTMLElement>(`li[data-room="${CSS.escape(focused)}"] .pick`)?.focus();
+  const box = $('editMsgBox'), msg = $('editMsg');
+  box.hidden = msg.hidden = !e.msg;
+  msg.textContent = e.msg?.text ?? '';
+  $('editReload').hidden = !e.msg?.conflict;
+  const save = $<HTMLButtonElement>('editSave');
+  save.disabled = e.saving || !dirty();
+  save.textContent = e.saving ? 'Saving…' : 'Save';
+  $<HTMLInputElement>('editAddName').closest<HTMLElement>('.field')!.hidden = $<HTMLSelectElement>('editAddKind').value !== CUSTOM;
+}
+
+/** Applies an edit to the rooms and shows the result: the canvas world is rebuilt from the edited rooms. */
+function setRooms(rooms: RoomDef[]): void {
+  const e = editing;
+  if (!e || rooms === e.rooms) return;
+  e.rooms = rooms;
+  if (e.selected && !rooms.some((r) => r.id === e.selected)) e.selected = undefined;
+  renderSheet();
+  syncWorld();
+}
+
+function onRoomAction(id: string, a: RoomAction): void {
+  const e = editing;
+  if (!e) return;
+  const r = e.rooms.find((x) => x.id === id);
+  if (!r) return;
+  const band = r.band, idx = bandRooms(e.rooms, band).findIndex((x) => x.id === id);
+  switch (a.k) {
+    case 'select': e.selected = id; renderSheet(); return;
+    case 'move': e.selected = id; setRooms(moveRoom(e.rooms, id, band, idx + a.dir)); break;
+    case 'band': e.selected = id; setRooms(moveRoom(e.rooms, id, a.band, idx)); break;
+    case 'width': e.selected = id; setRooms(resizeRoom(e.rooms, id, r.width + a.by)); break;
+    case 'remove': {
+      if (id === BULLPEN) return;
+      const order = [...bandRooms(e.rooms, 'top'), ...bandRooms(e.rooms, 'bottom')];
+      const next = order[order.findIndex((x) => x.id === id) + 1] ?? order[order.findIndex((x) => x.id === id) - 1];
+      const hadFocus = $('editRooms').contains(document.activeElement) || document.activeElement === canvas;
+      setRooms(removeRoom(e.rooms, id));
+      if (next) e.selected = next.id;
+      renderSheet();
+      if (hadFocus && document.activeElement !== canvas) $('editRooms').querySelector<HTMLElement>(`li[data-room="${CSS.escape(next?.id ?? '')}"] .pick`)?.focus();
+      return;
+    }
+  }
+  renderSheet();
+}
+
+editBtn.addEventListener('click', () => {
+  if (!editing) return startEdit();
+  // Pressing the toggle again leaves only when nothing would be lost; otherwise point at Save/Cancel.
+  if (!dirty()) return endEdit();
+  $('editSave').focus();
+});
+$('editCancel').addEventListener('click', () => { endEdit(); editBtn.focus(); });
+$('editReload').addEventListener('click', () => {
+  const e = editing;
+  if (!e) return;
+  const f = floorDef(e.floorId);
+  e.baseRevision = f.revision; e.baseRooms = cloneRooms(f.rooms); e.rooms = cloneRooms(f.rooms);
+  e.elsewhere = false; e.msg = undefined;
+  if (e.selected && !e.rooms.some((r) => r.id === e.selected)) e.selected = undefined;
+  renderSheet();
+  syncWorld();
+});
+$('editAddKind').addEventListener('change', () => renderSheet());
+$('editAddForm').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const e = editing;
+  if (!e) return;
+  const kind = $<HTMLSelectElement>('editAddKind').value, band = $<HTMLSelectElement>('editAddBand').value === 'bottom' ? 'bottom' : 'top';
+  const nameInput = $<HTMLInputElement>('editAddName');
+  let next: RoomDef[];
+  if (kind === CUSTOM) {
+    const name = nameInput.value.trim();
+    if (!name) { nameInput.focus(); return; }
+    next = addRoom(e.rooms, { name, band });
+  } else {
+    const d = state.building.divisions.find((x) => x.id === kind);
+    if (!d) return;
+    next = addRoom(e.rooms, { division: d.id, name: d.name, band });
+  }
+  const added = next.find((r) => !e.rooms.some((x) => x.id === r.id));
+  e.selected = added?.id;
+  nameInput.value = '';
+  $<HTMLSelectElement>('editAddBand').value = 'top';
+  setRooms(next);
+  renderAddKinds($<HTMLSelectElement>('editAddKind'), state.building.divisions, e.rooms);
+  renderSheet();
+});
+
+$('editSave').addEventListener('click', () => void saveEdit());
+async function saveEdit(): Promise<void> {
+  const e = editing;
+  if (!e || e.saving) return;
+  e.saving = true; e.msg = undefined;
+  renderSheet();
+  const rooms = e.rooms.map((r) => ({ id: r.id, name: r.name, ...(r.division ? { division: r.division } : {}), band: r.band, width: r.width }));
+  let res: Response;
+  try {
+    res = await post(`/api/floors/${encodeURIComponent(e.floorId)}`, { baseRevision: e.baseRevision, rooms });
+  } catch {
+    e.saving = false;
+    e.msg = { text: NETWORK_TEXT, conflict: false };
+    renderSheet();
+    return showMsg();
+  }
+  const body = await res.json().catch(() => null) as Record<string, unknown> | null;
+  e.saving = false;
+  if (editing !== e) return; // cancelled or the floor went away meanwhile
+  if (res.ok) {
+    // The building broadcast may land before or after this response: take the stored floor now if it is newer.
+    const stored = body as unknown as FloorDef | null;
+    const cur = state.building.floors[e.floorId];
+    if (stored && Array.isArray(stored.rooms) && Number.isInteger(stored.revision) && (cur?.revision ?? -1) < stored.revision) {
+      state.building.floors[e.floorId] = { revision: stored.revision, rooms: stored.rooms, source: stored.source ?? cur?.source ?? 'home' };
+    }
+    endEdit();
+    editBtn.focus();
+    return;
+  }
+  if (res.status === 409) e.msg = { text: CONFLICT_TEXT, conflict: true };
+  else if (res.status === 404) e.msg = { text: GONE_TEXT, conflict: false };
+  else if (res.status === 400) e.msg = { text: typeof body?.error === 'string' ? body.error : 'The server refused this floor.', conflict: false };
+  else e.msg = { text: `Couldn't save the floor (HTTP ${res.status}). Your edits are still here.`, conflict: false };
+  renderSheet();
+  showMsg();
+}
+/** Brings a save message into view (it sits by the Save button, which may be below the fold). */
+function showMsg(): void { $('editMsgBox').scrollIntoView({ block: 'nearest' }); }
+window.addEventListener('beforeunload', (e) => { if (dirty()) e.preventDefault(); });
+
+// Canvas gestures in edit mode (pointer events: mouse, pen and touch). Press a room to select it;
+// drag it to reorder or switch sides (dropped where the insertion bar shows); drag its right edge to resize.
+interface Gesture {
+  kind: 'move' | 'resize'; id: string; pointerId: number;
+  sx: number; sy: number; startWidth: number;
+  /** Screen → world for the layout at the start (the world changes under a resize). */
+  inv: (x: number, y: number) => { x: number; y: number };
+  dragging: boolean; dx: number; dy: number;
+  target?: { band: 'top' | 'bottom'; index: number };
+}
+let gesture: Gesture | null = null;
+let editHover: { id: string; part: EditPart } | undefined;
+const DRAG_PX = 4;
+
+function editView(): EditView {
+  const v: EditView = { selected: editing?.selected, hover: editHover };
+  if (gesture?.kind === 'move' && gesture.dragging && gesture.target) v.drag = { id: gesture.id, dx: gesture.dx, dy: gesture.dy, target: gesture.target };
+  if (gesture?.kind === 'resize') v.resizing = gesture.id;
+  return v;
+}
+
+function hitAt(x: number, y: number): { id: string; part: EditPart } | undefined {
+  const w = screenToWorld(R)(x, y);
+  return hitRoom(world, w.x, w.y);
+}
+
+canvas.addEventListener('pointerdown', (ev) => {
+  if (!editing || ev.button !== 0) return;
+  const [x, y] = rel(ev);
+  const h = hitAt(x, y);
+  if (!h) return;
+  ev.preventDefault();
+  const r = editing.rooms.find((q) => q.id === h.id);
+  if (!r) return;
+  editing.selected = h.id;
+  renderSheet();
+  canvas.focus({ preventScroll: true });
+  gesture = { kind: h.part === 'resize' ? 'resize' : 'move', id: h.id, pointerId: ev.pointerId, sx: x, sy: y, startWidth: r.width, inv: screenToWorld(R), dragging: false, dx: 0, dy: 0 };
+  canvas.setPointerCapture(ev.pointerId);
+});
+canvas.addEventListener('pointermove', (ev) => {
+  if (!editing) return;
+  const [x, y] = rel(ev);
+  const g = gesture;
+  if (!g || g.pointerId !== ev.pointerId) {
+    editHover = hitAt(x, y);
+    canvas.style.cursor = editHover ? (editHover.part === 'resize' ? 'ew-resize' : 'grab') : 'default';
+    return;
+  }
+  g.dx = x - g.sx; g.dy = y - g.sy;
+  if (!g.dragging && Math.hypot(g.dx, g.dy) < DRAG_PX) return;
+  g.dragging = true;
+  if (g.kind === 'move') {
+    canvas.style.cursor = 'grabbing';
+    const w = g.inv(x, y);
+    g.target = dropTarget(world, g.id, w.x, w.y);
+  } else {
+    // Width from the pointer's travel along the world x axis, measured in the layout the drag began in.
+    const o = g.inv(g.sx, g.sy), p = g.inv(x, y);
+    const width = g.startWidth + Math.round(p.x - o.x);
+    const r = editing.rooms.find((q) => q.id === g.id);
+    if (r && r.width !== Math.min(24, Math.max(8, width))) setRooms(resizeRoom(editing.rooms, g.id, width));
+  }
+});
+function endGesture(ev: PointerEvent, commit: boolean): void {
+  const g = gesture;
+  if (!g || g.pointerId !== ev.pointerId) return;
+  gesture = null;
+  if (canvas.hasPointerCapture(ev.pointerId)) canvas.releasePointerCapture(ev.pointerId);
+  canvas.style.cursor = 'default';
+  if (commit && editing && g.kind === 'move' && g.dragging && g.target) setRooms(moveRoom(editing.rooms, g.id, g.target.band, g.target.index));
+}
+canvas.addEventListener('pointerup', (ev) => endGesture(ev, true));
+canvas.addEventListener('pointercancel', (ev) => endGesture(ev, false));
+canvas.addEventListener('pointerleave', () => { if (!gesture) editHover = undefined; });
+// Keyboard on the canvas acts on the selected room (the same keys as the sheet's room list).
+canvas.addEventListener('keydown', (ev) => {
+  const e = editing;
+  if (!e?.selected) return;
+  const r = e.rooms.find((q) => q.id === e.selected);
+  if (!r) return;
+  if (ev.key === 'Escape' && gesture) { gesture = null; ev.preventDefault(); return; }
+  const a = keyAction(ev, r.band);
+  if (!a) return;
+  ev.preventDefault();
+  onRoomAction(r.id, a);
+});
 
 // ---------------------------------------------------------------- WebSocket with backoff
 let attempt = 0;
@@ -599,6 +910,19 @@ connect();
   style: () => style,
   signs: () => signs,
   world: () => world,
+  editRooms: () => (editing ? cloneRooms(editing.rooms) : null),
+  /** Client coordinates of a room's body center or resize handle (edit mode), scrolling the map box to it. */
+  editPoint(id: string, part: EditPart): { x: number; y: number; unit: number } {
+    const r = world.rooms.find((x) => x.id === id);
+    if (!r) throw new Error(`no room ${id}`);
+    document.getElementById('map')!.scrollIntoView({ block: 'nearest' });
+    let p = partPoint(R, r, part);
+    const vis = scroller.clientWidth;
+    if (p.x < scroller.scrollLeft + 40 || p.x > scroller.scrollLeft + vis - 40) scroller.scrollLeft = Math.max(0, p.x - vis / 2);
+    p = partPoint(R, r, part);
+    const c = canvas.getBoundingClientRect();
+    return { x: c.left + p.x, y: c.top + p.y, unit: R.unit() };
+  },
   /** Viewport (client) coordinates of an agent's center, scrolling the map box to it if needed. */
   center(id: string): { x: number; y: number } {
     const a = sim.agents().find((x) => x.view.id === id);
