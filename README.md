@@ -14,6 +14,8 @@ The server listens on `127.0.0.1:4317` (override with `AGENT_OFFICE_PORT`). It p
 
 Existing sessions pick up new hooks only after they restart.
 
+The installer writes the current `AGENT_OFFICE_PORT` and `AGENT_OFFICE_HOME` into each hook command, so sessions reach the same office however their shell is set up. Re-run `npm run install-hooks` after changing either, and after updating Agent Office (older hook command lines still report events but never get office approvals). If hooks arrive with the wrong token, the office shows "Hooks are sending the wrong token. Re-run npm run install-hooks."
+
 ## Uninstall
 
 ```
@@ -21,7 +23,7 @@ npm run uninstall-hooks  # removes only the entries pointing at bin/office-hook
 rm -rf ~/.agent-office   # optional: deletes the token and history
 ```
 
-If the server is not running, the hooks do nothing and sessions are unaffected.
+If the server is not running, the hooks do nothing and sessions are unaffected. If something else is listening on the port, or the server hangs, the hooks print nothing: a hook gives up after 1 s, and a permission prompt after about 9 s (the terminal prompt then appears as usual).
 
 ## What is stored where
 
@@ -40,7 +42,13 @@ If the server is not running, the hooks do nothing and sessions are unaffected.
 
 ## Approval routing
 
-Off by default. Opt a session or a whole project in from the inspector. For an opted-in session, a permission prompt appears in the office with Allow / Deny. If you do not answer within 2 minutes, no browser is connected, or the server is down, the hook returns no decision and the normal prompt appears in the terminal. Answering at the terminal first also clears the office prompt.
+Off by default. Opt a session or a whole project in from the inspector. For an opted-in session, a permission prompt appears in the office with the tool's full input (up to 8192 characters) and Approve / Deny. Click the "need you" count in the header to jump to the agent that has waited longest.
+
+While the office waits for your answer (up to 2 minutes), the terminal prompt does not appear. If you do not answer in that time, the hook returns no decision and the normal prompt appears in the terminal. With no browser connected, or the server down, the terminal prompt appears at once.
+
+An input longer than 8192 characters cannot be approved from the office. Deny it there, or let the 2-minute wait run out and answer the terminal prompt.
+
+Sessions that are not opted in still show their permission prompts in the office (full input included), marked "Answer this in the terminal".
 
 ## Tests
 
@@ -58,6 +66,9 @@ The smoke test uses a temp home, a temp git repo with hooks in its `.claude/sett
 - [ ] `npm run install-hooks`, then `npm start`.
 - [ ] Open two terminal sessions in two different repos; both appear, in separate wings.
 - [ ] Opt one session in to approvals; trigger a Bash permission prompt; approve it from the office; the command runs.
+- [ ] Deny a request from the office and confirm Claude reports it was denied.
+- [ ] Let an opted-in prompt time out (2 min) and confirm the terminal prompt appears.
+- [ ] Close a terminal at a permission prompt and confirm the ! clears within ~30 min.
 - [ ] Stop the server (Ctrl-C). Both sessions keep working with no visible errors.
 
 ### Verified
