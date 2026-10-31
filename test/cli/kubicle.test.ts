@@ -233,3 +233,33 @@ test('install-hooks / uninstall-hooks go through the same installer', () => {
   assert.equal(run(['install-hooks', '--bogus']).status, 2);
   void home;
 });
+
+test('project validation: non-git unknown dir, archived project, unknown git repo', async () => {
+  const { run, home, base } = setup();
+  const { openStore } = await import('../../src/server/store.ts');
+  const plain = join(base, 'plain');
+  mkdirSync(plain);
+  const NOT = /Not a known project and not inside a git repository\. Run this inside a project, or pass --project <dir>\./;
+  for (const args of [['floor', 'add-room', 'qa'], ['floor', 'show']]) {
+    const r = run(args, {}, plain);
+    assert.equal(r.status, 1, args.join(' '));
+    assert.match(r.stderr, NOT);
+  }
+  assert.equal(existsSync(home), false, 'nothing written');
+  // known non-git project and archived project, via the store
+  const arch = join(base, 'arch');
+  mkdirSync(join(arch, '.git'), { recursive: true });
+  mkdirSync(home, { recursive: true });
+  const st = openStore(join(home, 'office.db'));
+  st.upsertProject({ id: plain, name: 'plain', order: 0, slug: slugFor(plain), approvals: 'off', archived: false, firstSeen: 1 });
+  st.upsertProject({ id: arch, name: 'arch', order: 1, slug: slugFor(arch), approvals: 'off', archived: true, firstSeen: 2 });
+  st.close();
+  assert.equal(run(['floor', 'add-room', 'qa'], {}, plain).status, 0, 'known non-git project is allowed');
+  const e = run(['floor', 'add-room', 'qa'], {}, arch);
+  assert.equal(e.status, 1);
+  assert.ok(e.stderr.includes('Floor "arch" is archived. Restore it in the Lobby first.'), e.stderr);
+  assert.equal(existsSync(join(home, 'floors', `${slugFor(arch)}.yaml`)), false);
+  assert.equal(run(['floor', 'show'], {}, arch).status, 0);
+  // an unknown git repo (the default setup repo is not in the store) stays allowed
+  assert.equal(run(['floor', 'show']).status, 0);
+});

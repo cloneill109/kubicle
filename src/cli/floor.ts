@@ -5,10 +5,11 @@ import { BULLPEN, defaultFloor, type FloorDef, type RoomDef } from '../shared/bu
 import { MAX_WIDTH, MIN_WIDTH, addRoom, moveRoom, removeRoom, resizeRoom } from '../ui/floor-edit.ts';
 import { BuildingFileError, RevisionConflict, readFloor, slugFor, writeFloor } from '../server/building/files.ts';
 import { projectRoot } from '../server/projects.ts';
-import { openStore } from '../server/store.ts';
+import { openStore, type ProjectRow } from '../server/store.ts';
 import { CliError, UsageError, expectPositionals, parseArgs, table } from './args.ts';
 import { loadDivisions } from './division.ts';
 
+// KUBICLE_TEST_BUMP=1 is a test-only hook: it makes `edit` write the file between its read and its write.
 const CONFLICT = 'This floor changed elsewhere. Reload to see the latest.';
 
 interface Target { root: string; file: string; origin: 'home' | 'repo' }
@@ -25,10 +26,33 @@ function current(t: Target): FloorDef {
   return existsSync(t.file) ? readFloor(t.file, t.origin) : defaultFloor();
 }
 
-function projectOf(flags: Map<string, string>): string {
+/** Projects the office has seen. Opens office.db without modifying it; an unreadable store counts as empty (with a warning). */
+function storeProjects(home: string): ProjectRow[] {
+  const db = join(home, 'office.db');
+  if (!existsSync(db)) return [];
+  try {
+    const store = openStore(db, { readOnly: true });
+    try { return store.listProjects(); } finally { store.close(); }
+  } catch (e) {
+    console.error(`warning: could not read ${db} (${(e as Error).message}); treating no projects as known`);
+    return [];
+  }
+}
+
+/**
+ * The project root for a command. Rejected: a root that is neither a git repository nor a project
+ * the office knows (typos must not write or show a default floor), and, for edits, archived projects.
+ */
+function projectOf(flags: Map<string, string>, home: string, forEdit: boolean): string {
   const dir = flags.get('project');
   if (dir !== undefined && !(existsSync(dir) && statSync(dir).isDirectory())) throw new CliError(`--project ${dir} is not a directory`);
-  return projectRoot(dir ?? process.cwd());
+  const root = projectRoot(dir ?? process.cwd());
+  const known = storeProjects(home).find((p) => p.id === root);
+  if (!known && !existsSync(join(root, '.git'))) {
+    throw new CliError('Not a known project and not inside a git repository. Run this inside a project, or pass --project <dir>.');
+  }
+  if (known?.archived && forEdit) throw new CliError(`Floor "${known.name}" is archived. Restore it in the Lobby first.`);
+  return root;
 }
 
 const bandOf = (v: string | undefined, fallback?: 'top' | 'bottom'): 'top' | 'bottom' => {
@@ -50,15 +74,7 @@ function show(home: string, root: string): number {
 
 function list(home: string, cwdRoot: string): number {
   const projects = new Map<string, { root: string; name: string; order: number }>();
-  const db = join(home, 'office.db');
-  if (existsSync(db)) {
-    try {
-      const store = openStore(db, { readOnly: true });
-      try {
-        for (const p of store.listProjects()) if (!p.archived) projects.set(p.id, { root: p.id, name: p.name, order: p.order });
-      } finally { store.close(); }
-    } catch (e) { console.error(`warning: could not read ${db} (${(e as Error).message}); listing only this project`); }
-  }
+  for (const p of storeProjects(home)) if (!p.archived) projects.set(p.id, { root: p.id, name: p.name, order: p.order });
   if (!projects.has(cwdRoot)) projects.set(cwdRoot, { root: cwdRoot, name: cwdRoot.split('/').filter(Boolean).pop() ?? cwdRoot, order: Number.MAX_SAFE_INTEGER });
   const rows = [['SLUG', 'NAME', 'SOURCE', 'REVISION', 'ROOMS']];
   for (const p of [...projects.values()].sort((a, b) => a.order - b.order || (a.root < b.root ? -1 : 1))) {
@@ -116,7 +132,7 @@ export function floorCommand(argv: string[], home: string): number {
     case 'show': {
       const p = parseArgs(rest, ['project']);
       expectPositionals(p, 0, 'no arguments after `floor show` (use --project <dir>)');
-      return show(home, projectOf(p.flags));
+      return show(home, projectOf(p.flags, home, false));
     }
     case 'add-room': {
       const p = parseArgs(rest, ['project', 'band', 'custom']);
@@ -125,20 +141,20 @@ export function floorCommand(argv: string[], home: string): number {
       if (custom !== undefined) {
         expectPositionals(p, 0, 'either a division id or --custom <name>, not both');
         if (custom.trim() === '') throw new UsageError('--custom needs a name');
-        return edit(home, projectOf(p.flags), (rooms) => addRoom(rooms, { name: custom, band }));
+        return edit(home, projectOf(p.flags, home, true), (rooms) => addRoom(rooms, { name: custom, band }));
       }
       expectPositionals(p, 1, '`floor add-room <division>` or `--custom <name>`');
       const id = p.positionals[0]!;
       const div = loadDivisions(home).divisions.find((d) => d.id === id);
       if (!div) throw new CliError(`unknown division ${id} (see \`kubicle division list\`)`);
-      return edit(home, projectOf(p.flags), (rooms) => addRoom(rooms, { division: div.id, name: div.name, band }));
+      return edit(home, projectOf(p.flags, home, true), (rooms) => addRoom(rooms, { division: div.id, name: div.name, band }));
     }
     case 'remove-room': {
       const p = parseArgs(rest, ['project']);
       expectPositionals(p, 1, '`floor remove-room <room-id>`');
       const id = p.positionals[0]!;
       if (id === BULLPEN) throw new CliError('The Bullpen cannot be removed.');
-      return edit(home, projectOf(p.flags), (rooms) => { needRoom(rooms, id); return removeRoom(rooms, id); });
+      return edit(home, projectOf(p.flags, home, true), (rooms) => { needRoom(rooms, id); return removeRoom(rooms, id); });
     }
     case 'move-room': {
       const p = parseArgs(rest, ['project', 'band', 'index']);
@@ -149,7 +165,7 @@ export function floorCommand(argv: string[], home: string): number {
       if (raw !== undefined && !/^\d+$/.test(raw)) throw new UsageError('--index must be a non-negative integer');
       const index = raw === undefined ? Number.POSITIVE_INFINITY : Number(raw);
       const id = p.positionals[0]!;
-      return edit(home, projectOf(p.flags), (rooms) => { needRoom(rooms, id); return moveRoom(rooms, id, band, index); });
+      return edit(home, projectOf(p.flags, home, true), (rooms) => { needRoom(rooms, id); return moveRoom(rooms, id, band, index); });
     }
     case 'resize-room': {
       const p = parseArgs(rest, ['project']);
@@ -157,7 +173,7 @@ export function floorCommand(argv: string[], home: string): number {
       const [id, raw] = p.positionals as [string, string];
       if (!/^\d+$/.test(raw)) throw new UsageError('width must be a whole number');
       const width = Number(raw);
-      return edit(home, projectOf(p.flags), (rooms) => {
+      return edit(home, projectOf(p.flags, home, true), (rooms) => {
         needRoom(rooms, id);
         if (width < MIN_WIDTH || width > MAX_WIDTH) {
           console.error(`Width clamped to ${Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, width))} (allowed ${MIN_WIDTH}–${MAX_WIDTH}).`);

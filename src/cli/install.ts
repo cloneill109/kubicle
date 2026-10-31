@@ -174,7 +174,7 @@ export function main(argv: string[]): number {
     console.log(`Settings: ${file}`);
     console.log(`Added ${HOOK_EVENTS.length} hook events -> ${shimPath}`);
     console.log(backup ? `Backup: ${backup}` : 'Backup: none (file did not exist)');
-    console.log('Run `npm start` to open the office.');
+    console.log('Run `kubicle start` (or `npm start`) to open the office.');
   } else {
     console.log(`Settings: ${file}`);
     console.log(`Removed ${countOurs(current)} Kubicle hook entries.`);

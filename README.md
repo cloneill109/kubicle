@@ -31,7 +31,7 @@ If the server is not running, the hooks do nothing and sessions are unaffected. 
 
 `~/.kubicle/` (mode 0700; override with `KUBICLE_HOME`):
 
-- `divisions/`, `floors/`: building files (see above).
+- `divisions/`, `floors/`: building files (see below).
 - `ingest-token`: the shared secret the hook shim sends.
 - `office.db`: SQLite. Hook events (payload fields truncated to 4096 characters), project names, per-session/project approval settings. Events older than 7 days are pruned (checked hourly and at start).
 
@@ -82,8 +82,9 @@ kubicle division show <id>
 - `add-room <division>` names the room after the division; a second one gets id `<division>-2`. `--custom` makes a room with no division. The default band is `top`.
 - `resize-room` clamps to 8–24 and says so on stderr (`Width clamped to 24 (allowed 8–24).`), still exiting 0.
 - `remove-room bullpen` is refused (exit 1).
-- `floor list` knows the projects the office has seen (it reads `office.db` read-only) plus the current directory's project.
-- `kubicle start` builds the UI with the same command as `npm run build:ui`, then runs `node src/server/main.ts` as a child process with inherited output.
+- Floor commands refuse a directory that is neither a git repository nor a project the office knows (exit 1), and edits refuse archived floors (restore them in the Lobby first). `floor show` still works on archived floors.
+- `floor list` knows the projects the office has seen (it reads `office.db` without modifying it; opening it may create empty `-wal`/`-shm` files) plus the current directory's project.
+- `kubicle start` builds the UI (same command as `npm run build:ui`) only when `dist/` is missing; run `npm run build:ui` after pulling changes. It then runs `node src/server/main.ts` as a child process with inherited output.
 
 ## Token model
 
