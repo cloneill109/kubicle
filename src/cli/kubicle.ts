@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../server/config.ts';
 import { BuildingFileError } from '../server/building/files.ts';
 import { CliError, USAGE, UsageError } from './args.ts';
+import { bubblesCommand } from './bubbles.ts';
 import { divisionCommand } from './division.ts';
 import { floorCommand } from './floor.ts';
 import { main as installMain } from './install.ts';
@@ -33,7 +34,8 @@ function start(): Promise<number> {
 export async function main(argv: string[]): Promise<number> {
   try {
     const [cmd, ...rest] = argv;
-    const home = loadConfig(process.env).home;
+    const cfg = loadConfig(process.env);
+    const home = cfg.home;
     switch (cmd) {
       case 'start':
         if (rest.length > 0) throw new UsageError(`unknown argument: ${rest[0]}`);
@@ -43,6 +45,8 @@ export async function main(argv: string[]): Promise<number> {
         return installMain([cmd === 'install-hooks' ? 'install' : 'uninstall', ...rest]);
       case 'floor': return floorCommand(rest, home);
       case 'division': return divisionCommand(rest, home);
+      case 'grant': case 'instruct': case 'revoke': case 'bubbles': case 'log':
+        return await bubblesCommand(cmd, rest, cfg);
       default:
         throw new UsageError(cmd === undefined ? 'a command is required' : `unknown command: ${cmd}`);
     }

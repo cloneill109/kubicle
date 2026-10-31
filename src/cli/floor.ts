@@ -43,7 +43,7 @@ function storeProjects(home: string): ProjectRow[] {
  * The project root for a command. Rejected: a root that is neither a git repository nor a project
  * the office knows (typos must not write or show a default floor), and, for edits, archived projects.
  */
-function projectOf(flags: Map<string, string>, home: string, forEdit: boolean): string {
+export function projectOf(flags: Map<string, string>, home: string, forEdit: boolean): string {
   const dir = flags.get('project');
   if (dir !== undefined && !(existsSync(dir) && statSync(dir).isDirectory())) throw new CliError(`--project ${dir} is not a directory`);
   const root = projectRoot(dir ?? process.cwd());

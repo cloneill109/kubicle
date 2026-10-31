@@ -19,7 +19,15 @@ export const USAGE = `usage: kubicle <command>
   floor move-room <room-id> --band top|bottom [--index <n>] [--project <dir>]
   floor resize-room <room-id> <width> [--project <dir>]
   division list
-  division show <id>`;
+  division show <id>
+  grant push|merge [--branch <b>] [--uses <n>|--unlimited] [--for <30m|2h|1d, max 7d>] [--project <dir>]
+                                          ask for a Bubbles grant (you confirm it in the office)
+  instruct "<text>" [--project <dir>]     ask for a Bubbles instruction (all projects if no --project)
+  revoke grant|instruction <id>           ask to revoke one
+  bubbles status [--json]                 state, calls today, active grants and instructions
+  bubbles on|off                          ask to switch Bubbles on or off
+  log [--project <dir>] [--session <id>] [--kind <k>] [--since <ISO|30m|2h|1d>] [--grep <text>] [--limit <n>] [--json]
+  log verify                              check the log's hash chain`;
 
 export interface Parsed { positionals: string[]; flags: Map<string, string> }
 
