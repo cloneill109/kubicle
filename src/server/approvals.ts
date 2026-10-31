@@ -91,7 +91,14 @@ export class Approvals {
       since: agent.pending?.since ?? e.ts,
     };
     if (e.toolInput !== undefined) base.input = e.toolInput;
-    if (e.toolInputTruncated) base.inputTruncated = true;
+    if (e.toolInputTruncated) {
+      // The owner could not review all of it here, so never wait: the terminal prompt appears at once.
+      // The panel still shows the (capped) input, marked "Answer this in the terminal".
+      base.inputTruncated = true;
+      const v = this.#registry.setPending(agentId, { ...base, answerable: false });
+      if (v) this.#onChange(v);
+      return Promise.resolve(null);
+    }
     return new Promise<Decision | null>((resolve) => {
       const w: Waiter = {
         id,

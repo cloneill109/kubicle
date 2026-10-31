@@ -443,14 +443,16 @@ test('C1: the approval card gets the full tool input (padded Bash, MCP, truncate
   await postHook(s, { ...perm('cM', 'mcp__github__delete_repository'), tool_input: { repo: 'owner/prod' } });
   m = await c.waitFor(isAgent((a) => a.id === 'cM' && !!a.pending));
   assert.ok(m.agent.pending!.input!.includes('owner/prod'));
-  // opted in + truncated: allow refused (422), deny answers
+  // opted in + truncated: the hook returns at once (terminal prompt), the card shows the input, unanswerable
   await control(s, cookie, '/api/approvals-mode', { scope: 'session', id: 'cW', mode: 'office' });
-  const hook = postHook(s, { ...perm('cW', 'Write'), tool_input: { file_path: '/tmp/a', content: 'z'.repeat(9 * 1024) } }).then((r) => r.text());
-  m = await c.waitFor(isAgent((a) => a.id === 'cW' && a.pending?.answerable === true));
+  const t0 = performance.now();
+  const r = await postHook(s, { ...perm('cW', 'Write'), tool_input: { file_path: '/tmp/a', content: 'z'.repeat(9 * 1024) } });
+  assert.equal(await r.text(), '');
+  assert.ok(performance.now() - t0 < 500, 'hook returned quickly');
+  m = await c.waitFor(isAgent((a) => a.id === 'cW' && a.pending?.answerable === false && !!a.pending.input));
   assert.equal(m.agent.pending!.inputTruncated, true);
-  assert.equal((await control(s, cookie, `/api/approvals/${m.agent.pending!.id}`, { decision: 'allow' })).status, 422);
-  assert.equal((await control(s, cookie, `/api/approvals/${m.agent.pending!.id}`, { decision: 'deny' })).status, 204);
-  assert.equal((await hook).trim(), hookResponse('deny'));
+  // nothing waits, so an answer is 404 (not-found): the 422 path stays only as a backstop
+  assert.equal((await control(s, cookie, `/api/approvals/${m.agent.pending!.id}`, { decision: 'allow' })).status, 404);
 });
 
 test('I1/I2: PermissionRequest without the perm kind header never waits, even opted in with UI', async () => {

@@ -46,7 +46,7 @@ Off by default. Opt a session or a whole project in from the inspector. For an o
 
 While the office waits for your answer (up to 2 minutes), the terminal prompt does not appear. If you do not answer in that time, the hook returns no decision and the normal prompt appears in the terminal. With no browser connected, or the server down, the terminal prompt appears at once.
 
-An input longer than 8192 characters cannot be approved from the office. Deny it there, or let the 2-minute wait run out and answer the terminal prompt.
+An input longer than 8192 characters cannot be approved from the office. For those the terminal prompt appears immediately (the office does not wait), and the office shows the input with "Answer this in the terminal".
 
 Sessions that are not opted in still show their permission prompts in the office (full input included), marked "Answer this in the terminal".
 

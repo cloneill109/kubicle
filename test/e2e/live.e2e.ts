@@ -165,19 +165,16 @@ test('live office: state, approvals, wings, styles, narrow view, disconnect', as
   await page.waitForFunction(() => /0 need you/.test(document.getElementById('counts')!.innerText), null, { timeout: 5000 });
   await page.waitForFunction(() => document.title === 'Agent Office', null, { timeout: 3000 });
 
-  // C1: an input too long to review here: Approve disabled, Deny still works.
-  const long = hook({
+  // C1: an input too long to review here: the hook returns at once (terminal prompt), the card shows it unanswerable.
+  const long = await hook({
     session_id: S2, hook_event_name: 'PermissionRequest', cwd: beta, tool_name: 'Write',
     tool_input: { file_path: join(beta, 'big.txt'), content: 'q'.repeat(9 * 1024) },
   });
-  await page.waitForFunction(() => /Too long to review here/.test(document.getElementById('iPending')!.innerText), null, { timeout: 5000 });
-  assert.ok(await page.locator('#approve').isVisible());
-  assert.ok(await page.locator('#approve').isDisabled(), 'Approve disabled for a truncated input');
-  assert.equal(await page.locator('#deny').isDisabled(), false, 'Deny stays enabled');
+  assert.equal((await long.text()).trim(), '', 'no decision: the terminal prompt appears at once');
+  await page.waitForFunction(() => /Answer this in the terminal/.test(document.getElementById('iPending')!.innerText), null, { timeout: 5000 });
+  assert.ok(await page.locator('#approve').isHidden(), 'no Approve for a truncated input');
   await page.screenshot({ path: join(outDir, 'live-approval-too-long.png') });
-  await page.locator('#deny').click();
-  const longBody = JSON.parse((await (await long).text()).trim()) as { hookSpecificOutput: { decision: { behavior: string } } };
-  assert.equal(longBody.hookSpecificOutput.decision.behavior, 'deny');
+  await postOk({ session_id: S2, hook_event_name: 'PostToolUse', cwd: beta, tool_name: 'Write', tool_input: { file_path: join(beta, 'big.txt'), content: 'q' }, tool_use_id: 'tbig' });
   await page.waitForFunction(() => /0 need you/.test(document.getElementById('counts')!.innerText), null, { timeout: 5000 });
 
   // A PermissionRequest for a session without routing: shown, but answered in the terminal.
