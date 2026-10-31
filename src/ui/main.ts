@@ -605,8 +605,8 @@ function startEdit(): void {
 /** Leaves edit mode; the canvas goes back to the server's floor (Cancel restores, Save shows the stored one). */
 function endEdit(sync = true): void {
   if (!editing) return;
+  cancelGesture(false);
   editing = null;
-  gesture = null;
   editHover = undefined;
   canvas.tabIndex = -1;
   canvas.style.cursor = 'default';
@@ -618,6 +618,7 @@ function renderEditUi(): void {
   const on = !!editing;
   document.body.classList.toggle('editing', on);
   editBtn.setAttribute('aria-pressed', String(on));
+  editBtn.disabled = !!editing?.saving;
   $('editSheet').hidden = !on;
   renderFloorUi();
   if (on) renderSheet();
@@ -639,13 +640,17 @@ function renderSheet(): void {
   const save = $<HTMLButtonElement>('editSave');
   save.disabled = e.saving || !dirty();
   save.textContent = e.saving ? 'Saving…' : 'Save';
+  // While a save is in flight nothing may change it or leave edit mode under it.
+  $<HTMLButtonElement>('editCancel').disabled = e.saving;
+  editBtn.disabled = e.saving;
+  $('editSheet').classList.toggle('saving', e.saving);
   $<HTMLInputElement>('editAddName').closest<HTMLElement>('.field')!.hidden = $<HTMLSelectElement>('editAddKind').value !== CUSTOM;
 }
 
 /** Applies an edit to the rooms and shows the result: the canvas world is rebuilt from the edited rooms. */
 function setRooms(rooms: RoomDef[]): void {
   const e = editing;
-  if (!e || rooms === e.rooms) return;
+  if (!e || e.saving || rooms === e.rooms) return; // the layout is frozen while a save is in flight
   e.rooms = rooms;
   if (e.selected && !rooms.some((r) => r.id === e.selected)) e.selected = undefined;
   renderSheet();
@@ -654,7 +659,7 @@ function setRooms(rooms: RoomDef[]): void {
 
 function onRoomAction(id: string, a: RoomAction): void {
   const e = editing;
-  if (!e) return;
+  if (!e || (e.saving && a.k !== 'select')) return;
   const r = e.rooms.find((x) => x.id === id);
   if (!r) return;
   const band = r.band, idx = bandRooms(e.rooms, band).findIndex((x) => x.id === id);
@@ -680,11 +685,12 @@ function onRoomAction(id: string, a: RoomAction): void {
 
 editBtn.addEventListener('click', () => {
   if (!editing) return startEdit();
+  if (editing.saving) return;
   // Pressing the toggle again leaves only when nothing would be lost; otherwise point at Save/Cancel.
   if (!dirty()) return endEdit();
   $('editSave').focus();
 });
-$('editCancel').addEventListener('click', () => { endEdit(); editBtn.focus(); });
+$('editCancel').addEventListener('click', () => { if (editing?.saving) return; endEdit(); editBtn.focus(); });
 $('editReload').addEventListener('click', () => {
   const e = editing;
   if (!e) return;
@@ -699,7 +705,7 @@ $('editAddKind').addEventListener('change', () => renderSheet());
 $('editAddForm').addEventListener('submit', (ev) => {
   ev.preventDefault();
   const e = editing;
-  if (!e) return;
+  if (!e || e.saving) return;
   const kind = $<HTMLSelectElement>('editAddKind').value, band = $<HTMLSelectElement>('editAddBand').value === 'bottom' ? 'bottom' : 'top';
   const nameInput = $<HTMLInputElement>('editAddName');
   let next: RoomDef[];
@@ -725,6 +731,7 @@ $('editSave').addEventListener('click', () => void saveEdit());
 async function saveEdit(): Promise<void> {
   const e = editing;
   if (!e || e.saving) return;
+  cancelGesture();
   e.saving = true; e.msg = undefined;
   renderSheet();
   const rooms = e.rooms.map((r) => ({ id: r.id, name: r.name, ...(r.division ? { division: r.division } : {}), band: r.band, width: r.width }));
@@ -771,6 +778,8 @@ interface Gesture {
   inv: (x: number, y: number) => { x: number; y: number };
   dragging: boolean; dx: number; dy: number;
   target?: { band: 'top' | 'bottom'; index: number };
+  /** The rooms when the gesture began: a cancelled gesture (Escape, pointercancel) goes back to them. */
+  startRooms: RoomDef[];
 }
 let gesture: Gesture | null = null;
 let editHover: { id: string; part: EditPart } | undefined;
@@ -789,7 +798,7 @@ function hitAt(x: number, y: number): { id: string; part: EditPart } | undefined
 }
 
 canvas.addEventListener('pointerdown', (ev) => {
-  if (!editing || ev.button !== 0) return;
+  if (!editing || editing.saving || gesture || ev.button !== 0) return;
   const [x, y] = rel(ev);
   const h = hitAt(x, y);
   if (!h) return;
@@ -799,7 +808,7 @@ canvas.addEventListener('pointerdown', (ev) => {
   editing.selected = h.id;
   renderSheet();
   canvas.focus({ preventScroll: true });
-  gesture = { kind: h.part === 'resize' ? 'resize' : 'move', id: h.id, pointerId: ev.pointerId, sx: x, sy: y, startWidth: r.width, inv: screenToWorld(R), dragging: false, dx: 0, dy: 0 };
+  gesture = { kind: h.part === 'resize' ? 'resize' : 'move', id: h.id, pointerId: ev.pointerId, sx: x, sy: y, startWidth: r.width, inv: screenToWorld(R), dragging: false, dx: 0, dy: 0, startRooms: editing.rooms };
   canvas.setPointerCapture(ev.pointerId);
 });
 canvas.addEventListener('pointermove', (ev) => {
@@ -826,24 +835,35 @@ canvas.addEventListener('pointermove', (ev) => {
     if (r && r.width !== Math.min(24, Math.max(8, width))) setRooms(resizeRoom(editing.rooms, g.id, width));
   }
 });
-function endGesture(ev: PointerEvent, commit: boolean): void {
+/** Ends the gesture: pointer capture released, cursor reset. */
+function releaseGesture(g: Gesture): void {
+  gesture = null;
+  try { if (canvas.hasPointerCapture(g.pointerId)) canvas.releasePointerCapture(g.pointerId); } catch { /* pointer already gone */ }
+  canvas.style.cursor = 'default';
+}
+/** Abandons the gesture in progress (Escape, pointercancel, lost capture, leaving edit mode), undoing a live resize. */
+function cancelGesture(restore = true): void {
+  const g = gesture;
+  if (!g) return;
+  releaseGesture(g);
+  if (restore && editing && editing.rooms !== g.startRooms) setRooms(g.startRooms);
+}
+canvas.addEventListener('pointerup', (ev) => {
   const g = gesture;
   if (!g || g.pointerId !== ev.pointerId) return;
-  gesture = null;
-  if (canvas.hasPointerCapture(ev.pointerId)) canvas.releasePointerCapture(ev.pointerId);
-  canvas.style.cursor = 'default';
-  if (commit && editing && g.kind === 'move' && g.dragging && g.target) setRooms(moveRoom(editing.rooms, g.id, g.target.band, g.target.index));
-}
-canvas.addEventListener('pointerup', (ev) => endGesture(ev, true));
-canvas.addEventListener('pointercancel', (ev) => endGesture(ev, false));
+  releaseGesture(g);
+  if (editing && g.kind === 'move' && g.dragging && g.target) setRooms(moveRoom(editing.rooms, g.id, g.target.band, g.target.index));
+});
+canvas.addEventListener('pointercancel', (ev) => { if (gesture?.pointerId === ev.pointerId) cancelGesture(); });
+canvas.addEventListener('lostpointercapture', (ev) => { if (gesture?.pointerId === ev.pointerId) cancelGesture(); });
 canvas.addEventListener('pointerleave', () => { if (!gesture) editHover = undefined; });
 // Keyboard on the canvas acts on the selected room (the same keys as the sheet's room list).
 canvas.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && gesture) { cancelGesture(); ev.preventDefault(); return; }
   const e = editing;
-  if (!e?.selected) return;
+  if (!e?.selected || e.saving || gesture) return;
   const r = e.rooms.find((q) => q.id === e.selected);
   if (!r) return;
-  if (ev.key === 'Escape' && gesture) { gesture = null; ev.preventDefault(); return; }
   const a = keyAction(ev, r.band);
   if (!a) return;
   ev.preventDefault();

@@ -541,6 +541,30 @@ test('floor edit mode: drag, resize, add, remove, save; conflict, 400, 404, netw
   await page.locator('#styleTabs button[data-style="pixel"]').click();
   await editBtn.click();
 
+  // ---- Escape mid-resize: the live resize is undone, the cursor resets, releasing afterwards commits nothing ----
+  const before = await editRooms(page);
+  let h = await editPoint(page, 'frontend', 'resize');
+  await page.mouse.move(h.x, h.y);
+  await page.mouse.down();
+  for (let i = 1; i <= 6; i++) await page.mouse.move(h.x + h.unit * i, h.y);
+  assert.ok((await editRooms(page))!.find((r) => r.id === 'frontend')!.width > 12, 'the resize is live while dragging');
+  assert.equal(await page.evaluate(() => document.activeElement?.id), 'map', 'pressing a room focuses the canvas');
+  await page.keyboard.press('Escape');
+  assert.deepEqual(await editRooms(page), before, 'Escape restores the rooms from before the gesture');
+  assert.equal(await page.evaluate(() => document.getElementById('map')!.style.cursor), 'default', 'cursor reset');
+  await page.mouse.move(h.x + h.unit * 8, h.y);
+  await page.mouse.up();
+  assert.deepEqual(await editRooms(page), before, 'moving and releasing after Escape changes nothing');
+  // and a room drag cancelled with Escape does not drop
+  h = await editPoint(page, 'qa', 'body');
+  await page.mouse.move(h.x, h.y);
+  await page.mouse.down();
+  for (let i = 1; i <= 6; i++) await page.mouse.move(h.x + h.unit * 4 * i, h.y + h.unit * 2 * i);
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  assert.deepEqual(await editRooms(page), before, 'a cancelled move does not drop');
+  assert.equal(await page.evaluate(() => document.getElementById('map')!.style.cursor), 'default');
+
   // ---- drag uxui to the front of the top band (pointer events) ----
   let a = await editPoint(page, 'uxui', 'body');
   let b = await editPoint(page, 'qa', 'body');
@@ -577,9 +601,33 @@ test('floor edit mode: drag, resize, add, remove, save; conflict, 400, 404, netw
 
   // ---- save: 200 → building arrives, the world shows Docs, the file has revision 1 and these rooms ----
   const expected = await editRooms(page);
+  // Hold the save in flight: nothing may change the edit or leave edit mode until it answers.
+  let releaseSave!: () => void;
+  const held = new Promise<void>((r) => { releaseSave = r; });
+  await page.route('**/api/floors/**', async (route) => { await held; await route.continue(); });
   let resp = page.waitForResponse((r) => r.url().includes('/api/floors/'));
   await page.locator('#editSave').click();
+  await page.waitForFunction(() => document.getElementById('editSave')!.textContent === 'Saving…', null, { timeout: 3000 });
+  assert.ok(await page.locator('#editCancel').isDisabled(), 'Cancel disabled while saving');
+  assert.ok(await editBtn.isDisabled(), 'the toggle is disabled while saving');
+  assert.ok(await page.locator('#editSave').isDisabled());
+  await page.locator('#editCancel').click({ force: true });
+  await editBtn.click({ force: true });
+  assert.ok(await page.locator('#editSheet').isVisible(), 'still editing');
+  h = await editPoint(page, 'qa', 'resize');
+  await drag(page, h, { x: h.x + h.unit * 3, y: h.y });
+  h = await editPoint(page, 'uxui', 'body');
+  await drag(page, h, { x: h.x + h.unit * 30, y: h.y });
+  await page.locator('#editRooms li[data-room="docs"] button.pick').focus();
+  await page.keyboard.press('+');
+  await page.keyboard.press('Delete');
+  await page.locator('#editAddKind').selectOption({ label: 'Custom room' });
+  await page.locator('#editAddName').fill('Late', { force: true });
+  await page.evaluate(() => (document.getElementById('editAddForm') as HTMLFormElement).requestSubmit());
+  assert.deepEqual(await editRooms(page), expected, 'canvas drags, keys and Add do nothing while saving');
+  releaseSave();
   assert.equal((await resp).status(), 200);
+  await page.unroute('**/api/floors/**');
   await page.locator('#editSheet').waitFor({ state: 'hidden', timeout: 3000 });
   assert.equal(await editRooms(page), null, 'edit mode ends after a save');
   await page.waitForFunction((id) => window.__office.state.building.floors[id]?.revision === 1, gid, { timeout: 3000 });

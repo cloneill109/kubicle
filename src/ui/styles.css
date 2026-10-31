@@ -243,3 +243,4 @@ body.editing .map-wrap { border-color: color-mix(in srgb, var(--accent) 55%, var
 .edit-actions { display: flex; gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; }
 /* Narrow: the sheet stacks under the map; keep it close by hiding the hook feed while editing. */
 @media (max-width: 1000px) { body.editing .feed { display: none; } }
+.edit-sheet.saving .edit-rooms, .edit-sheet.saving .edit-add { opacity: .6; pointer-events: none; }
