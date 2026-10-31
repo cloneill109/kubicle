@@ -1,7 +1,8 @@
 // Browser entry: WebSocket → OfficeState → Sim → renderer, plus the header, feed, legend,
-// inspector, needs-you alerts and the wing menu. Bundled by esbuild into dist/ui/main.js.
+// inspector and needs-you alerts. Bundled by esbuild into dist/ui/main.js.
 import type { ServerMsg, FeedItem, AgentView } from '../shared/protocol.ts';
-import { buildWorld, type World } from './sim/world.ts';
+import { buildFloor, type World } from './sim/world.ts';
+import { defaultFloor, DEFAULT_DIVISIONS, type Building, type FloorDef } from '../shared/building.ts';
 import { Sim } from './sim/agents.ts';
 import { STYLES, preferredSize, type Renderer, type StyleId, type SimAgent } from './render/types.ts';
 import { drawOverlays, type SignRect } from './render/overlays.ts';
@@ -21,7 +22,7 @@ const store = {
 
 const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
 const state = new OfficeState();
-let world: World = buildWorld([]);
+let world: World = buildFloor(defaultFloor(), DEFAULT_DIVISIONS);
 const sim = new Sim(world, { ambient: !reducedMotion?.matches });
 reducedMotion?.addEventListener?.('change', () => { sim.ambient = !reducedMotion.matches; });
 const inspector = new Inspector(state, () => sim.agents());
@@ -81,7 +82,7 @@ function loop(ts: number): void {
   ctx.fillRect(0, 0, cw, ch);
   R.frame(ctx, cw, ch, dpr, world, agents, now);
   // Reduced motion: freeze the overlay clock so status marks and the selection ring don't bob.
-  signs = drawOverlays(ctx, R, style, world, agents, inspector.selectedId, hovered, reducedMotion?.matches ? 0 : now, cw);
+  signs = drawOverlays(ctx, R, style, world, agents, roomOf, inspector.selectedId, hovered, reducedMotion?.matches ? 0 : now, cw);
   panelClock += dt;
   if (panelClock > 0.25) { panelClock = 0; inspector.render(now); }
   requestAnimationFrame(loop);
@@ -104,25 +105,22 @@ function hitAgent(mx: number, my: number): SimAgent | undefined {
   }
   return best;
 }
-const hitSign = (mx: number, my: number) => signs.find((s) => mx >= s.x && mx <= s.x + s.w && my >= s.y && my <= s.y + s.h);
+const roomOf = (a: SimAgent) => sim.roomOf(a);
 
+// Door signs are not clickable in 1b (stage 2 uses them for room settings).
 canvas.addEventListener('mousemove', (e) => {
   const [x, y] = rel(e);
   const a = hitAgent(x, y);
   hovered = a?.view.id;
-  const s = !a && hitSign(x, y);
-  canvas.style.cursor = a || (s && isWing(s.roomId)) ? 'pointer' : 'default';
+  canvas.style.cursor = a ? 'pointer' : 'default';
 });
 canvas.addEventListener('mouseleave', () => { hovered = undefined; });
 canvas.addEventListener('click', (e) => {
   const [x, y] = rel(e);
   const a = hitAgent(x, y);
-  if (a) { closeMenu(); inspector.select(a.view.id); return; }
-  const s = hitSign(x, y);
-  if (s && isWing(s.roomId)) { openMenu(s.roomId, e.clientX, e.clientY); return; }
   closeMenu();
+  if (a) inspector.select(a.view.id);
 });
-const isWing = (roomId: string) => world.rooms.some((r) => r.id === roomId && r.kind === 'wing');
 
 // ---------------------------------------------------------------- header, feed, legend, banner
 function renderCounts(): void {
@@ -220,7 +218,7 @@ function renderArchived(): void {
   const arch = state.projects.filter((p) => p.archived);
   el.hidden = !arch.length;
   if (!arch.length) { el.replaceChildren(); return; }
-  const label = document.createElement('span'); label.textContent = 'Archived wings:';
+  const label = document.createElement('span'); label.textContent = 'Archived floors:';
   el.replaceChildren(label, ...arch.map((p) => {
     const b = document.createElement('button');
     b.type = 'button'; b.textContent = `${p.name} · restore`;
@@ -261,7 +259,9 @@ function chime(): void {
   } catch { /* no audio */ }
 }
 
-// ---------------------------------------------------------------- wing menu
+// ---------------------------------------------------------------- floor menu
+// Rename / archive / reorder a project's floor. Stage 1 opened this from a wing's door sign; in 1b the
+// interim single floor has no per-project sign, so it is unreachable until the Lobby (Task 6) opens it.
 const menu = $('wingMenu');
 let menuFor: string | null = null;
 function closeMenu(): void { menu.hidden = true; menuFor = null; menu.replaceChildren(); }
@@ -347,16 +347,26 @@ window.addEventListener('resize', () => { if (!menu.hidden) closeMenu(); });
 scroller.addEventListener('scroll', () => { if (!menu.hidden) closeMenu(); });
 
 // ---------------------------------------------------------------- applying server messages
+// Interim (until per-floor navigation): one floor shows every agent. It is the first live project's
+// floor that the building has, else any floor it has, else the default floor.
+let building: Building | null = null;
+function currentFloor(): FloorDef {
+  const floors = building?.floors ?? {};
+  for (const p of liveWings(state.projects)) if (floors[p.id]) return floors[p.id];
+  return Object.values(floors)[0] ?? defaultFloor();
+}
 let worldKey = '';
 function syncWorld(): void {
-  const key = JSON.stringify(liveWings(state.projects).map((p) => [p.id, p.name, p.order]));
+  const floor = currentFloor();
+  // No divisions yet (server not wired to the building service): use the defaults, not "Unknown division" everywhere.
+  const divisions = building?.divisions.length ? building.divisions : DEFAULT_DIVISIONS;
+  const key = JSON.stringify([floor.rooms, divisions.map((d) => [d.id, d.color])]);
   if (key === worldKey) return;
   worldKey = key;
-  world = buildWorld(state.projects);
+  world = buildFloor(floor, divisions);
   sim.setWorld(world);
   R.invalidate();
   cw = 0; resize();
-  if (menuFor && !isWing(menuFor)) closeMenu();
 }
 
 const sessionsFirst = (a: AgentView, b: AgentView) => (a.kind === b.kind ? 0 : a.kind === 'session' ? -1 : 1);
@@ -365,7 +375,9 @@ function onMessage(m: ServerMsg): void {
   const c = state.apply(m);
   const now = performance.now() / 1000;
   if (c.snapshot && !gotSnapshot) { gotSnapshot = true; renderCounts(); }
-  if (c.projects) { syncWorld(); renderArchived(); }
+  if (m.t === 'snapshot' || m.t === 'building') building = m.building;
+  if (c.projects || m.t === 'snapshot' || m.t === 'building') syncWorld();
+  if (c.projects) renderArchived();
   for (const r of c.removed) {
     sim.remove(r.view.id, r.reason, now);
     inspector.agentLeft(r.view);

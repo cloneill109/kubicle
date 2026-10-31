@@ -1,15 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildWorld, seatOf, assignDesk, type World } from '../../src/ui/sim/world.ts';
+import { buildFloor, seatOf, assignDesk, type World } from '../../src/ui/sim/world.ts';
 import { Sim } from '../../src/ui/sim/agents.ts';
 import type { AgentView } from '../../src/shared/protocol.ts';
+import { defaultFloor, DEFAULT_DIVISIONS, BULLPEN, type FloorDef } from '../../src/shared/building.ts';
 
-const A = '/Users/me/code/alpha', B = '/Users/me/code/beta';
-const PROJECTS = [{ id: A, name: 'alpha', order: 0 }, { id: B, name: 'beta', order: 1 }];
+const DIVS = DEFAULT_DIVISIONS.map((d) => ({ ...d, revision: 1 }));
+const floor = () => buildFloor(defaultFloor(), DIVS);
 
 function view(o: Partial<AgentView> & { id: string }): AgentView {
   return {
-    sessionId: o.id.split(':')[0], kind: 'session', name: o.id, role: 'general', projectId: A, status: 'working',
+    sessionId: o.id.split(':')[0], kind: 'session', name: o.id, role: 'general', projectId: '/p', status: 'working',
     activity: '', startedAt: 0, lastSeen: 0, approvals: 'off', log: [], ...o,
   };
 }
@@ -26,63 +27,90 @@ const inRoom = (w: World, roomId: string, x: number, y: number) => {
   const r = w.rooms.find((q) => q.id === roomId)!;
   return x >= r.x0 && x <= r.x1 + 1 && y >= r.y0 && y <= r.y1 + 1;
 };
+const roomAt = (w: World, a: { x: number; y: number }) => w.grid[Math.floor(a.y)][Math.floor(a.x)].room;
 
-test('a new agent starts at the elevator and walks to its desk', () => {
-  const w = buildWorld(PROJECTS);
+test('a new agent starts at the elevator and walks to a desk in its division\'s room', () => {
+  const w = floor();
   const sim = new Sim(w);
-  sim.upsert(view({ id: 's1' }), 0);
+  sim.upsert(view({ id: 's1', division: 'qa' }), 0);
   const a = get(sim, 's1')!;
   assert.ok(Math.hypot(a.x - (w.elevator.x + 0.5), a.y - (w.elevator.y - 0.5)) < 0.01, `starts at elevator, got ${a.x},${a.y}`);
   assert.equal(a.anim, 'walking');
   run(sim, 0, 60);
   const b = get(sim, 's1')!;
-  const desk = assignDesk(w, A, new Set())!;
+  const desk = assignDesk(w, 'qa', new Set())!;
   assert.equal(b.anim, 'seated');
   assert.equal(b.desk, desk);
   const s = seatOf(desk);
   assert.ok(Math.hypot(b.x - s.x, b.y - s.y) < 0.01, 'sits at the seat');
   assert.equal(b.dir, 'up');
+  assert.equal(sim.roomOf(b), 'qa');
 });
 
 test('placed agents (snapshot) appear at their desk at once', () => {
-  const w = buildWorld(PROJECTS);
-  const sim = new Sim(w);
-  sim.upsert(view({ id: 's1', projectId: B }), 0, { place: true });
+  const sim = new Sim(floor());
+  sim.upsert(view({ id: 's1', division: 'backend' }), 0, { place: true });
   const a = get(sim, 's1')!;
   assert.equal(a.anim, 'seated');
-  assert.equal(a.desk?.room, B);
+  assert.equal(a.desk?.room, 'backend');
 });
 
-test('a subagent sits in its parent\'s wing', () => {
-  const w = buildWorld(PROJECTS);
+test('placement: label beats room beats division; no or unknown hints go to the Bullpen', () => {
+  const sim = new Sim(floor());
+  const cases: [Partial<AgentView>, string][] = [
+    [{}, BULLPEN],
+    [{ division: 'nope' }, BULLPEN],
+    [{ room: 'gone', division: 'nope' }, BULLPEN],
+    [{ division: 'security' }, 'security'],
+    [{ room: 'uxui', division: 'security' }, 'uxui'],
+    [{ roomLabel: 'animation', room: 'uxui', division: 'security' }, 'animation'],
+    [{ roomLabel: 'removed-room', division: 'imagegen' }, 'imagegen'],
+  ];
+  cases.forEach(([hints, want], i) => {
+    sim.upsert(view({ id: `c${i}`, ...hints }), 0, { place: true });
+    const a = get(sim, `c${i}`)!;
+    assert.equal(sim.roomOf(a), want, JSON.stringify(hints));
+    assert.equal(a.desk?.room, want, `${JSON.stringify(hints)} seated in ${want}`);
+  });
+});
+
+test('a subagent stands next to its parent, in the parent\'s room, whatever its own hints', () => {
+  const w = floor();
   const sim = new Sim(w);
-  sim.upsert(view({ id: 'p', projectId: B }), 0);
-  sim.upsert(view({ id: 'p:x', kind: 'subagent', parentId: 'p', projectId: B, role: 'Explore' }), 0);
-  sim.upsert(view({ id: 'p:y', kind: 'subagent', parentId: 'p', projectId: '', role: 'Plan' }), 0); // project not known yet
+  sim.upsert(view({ id: 'p', division: 'frontend' }), 0);
+  sim.upsert(view({ id: 'p:x', kind: 'subagent', parentId: 'p', role: 'Explore' }), 0);
+  sim.upsert(view({ id: 'p:y', kind: 'subagent', parentId: 'p', role: 'Plan', division: 'qa' }), 0);
   run(sim, 0, 60);
+  const p = get(sim, 'p')!;
   for (const id of ['p:x', 'p:y']) {
     const s = get(sim, id)!;
-    assert.equal(s.desk?.room, B, `${id} has a desk in the parent's wing`);
-    assert.equal(s.anim, 'seated');
+    assert.equal(s.desk, undefined, `${id} takes no desk`);
+    assert.equal(s.anim, 'standing');
+    assert.equal(sim.roomOf(s), 'frontend');
+    assert.equal(roomAt(w, s), 'frontend', `${id} stands in the parent's room`);
+    assert.ok(Math.hypot(s.x - p.x, s.y - p.y) < 2.5, `near parent (${s.x},${s.y} vs ${p.x},${p.y})`);
   }
+  assert.ok(Math.hypot(get(sim, 'p:x')!.x - get(sim, 'p:y')!.x, get(sim, 'p:x')!.y - get(sim, 'p:y')!.y) > 0.9, 'not on top of each other');
 });
 
-test('a subagent with no free desk stands next to its parent', () => {
-  const w = buildWorld(PROJECTS);
+test('a subagent follows its parent when the parent is moved to another room', () => {
+  const w = floor();
   const sim = new Sim(w);
-  for (let i = 0; i < 8; i++) sim.upsert(view({ id: `s${i}` }), 0, { place: true });
-  sim.upsert(view({ id: 's0:sub', kind: 'subagent', parentId: 's0' }), 0);
-  run(sim, 0, 60);
-  const p = get(sim, 's0')!, s = get(sim, 's0:sub')!;
-  assert.equal(s.desk, undefined);
-  assert.equal(s.anim, 'standing');
-  assert.ok(Math.hypot(s.x - p.x, s.y - p.y) < 2.5, `near parent (${s.x},${s.y} vs ${p.x},${p.y})`);
+  sim.upsert(view({ id: 'p', division: 'qa' }), 0, { place: true });
+  sim.upsert(view({ id: 'p:x', kind: 'subagent', parentId: 'p' }), 0, { place: true });
+  assert.equal(roomAt(w, get(sim, 'p:x')!), 'qa');
+  sim.upsert(view({ id: 'p', division: 'qa', roomLabel: 'imagegen' }), 1);
+  const t = run(sim, 1, 60);
+  assert.equal(get(sim, 'p')!.desk?.room, 'imagegen');
+  assert.equal(roomAt(w, get(sim, 'p:x')!), 'imagegen', 'subagent followed');
+  assert.equal(get(sim, 'p:x')!.anim, 'standing');
+  assert.ok(t > 0);
 });
 
 test('remove(ended) walks to the elevator, then disappears', () => {
-  const w = buildWorld(PROJECTS);
+  const w = floor();
   const sim = new Sim(w);
-  sim.upsert(view({ id: 's1' }), 0, { place: true });
+  sim.upsert(view({ id: 's1', division: 'imagegen' }), 0, { place: true });
   sim.remove('s1', 'ended', 0);
   const a = get(sim, 's1');
   assert.ok(a, 'still visible while leaving');
@@ -98,67 +126,67 @@ test('remove(ended) walks to the elevator, then disappears', () => {
 });
 
 test('remove(expired) disappears at once', () => {
-  const sim = new Sim(buildWorld(PROJECTS));
+  const sim = new Sim(floor());
   sim.upsert(view({ id: 's1' }), 0, { place: true });
   sim.remove('s1', 'expired', 0);
   assert.equal(get(sim, 's1'), undefined);
   assert.equal(sim.agents().length, 0);
 });
 
-test('the 9th agent in a wing gets no desk and stands in the wing', () => {
-  const w = buildWorld(PROJECTS);
+test('agents beyond a room\'s desks stand in that room, not on top of anyone', () => {
+  const w = floor();
   const sim = new Sim(w);
-  for (let i = 0; i < 9; i++) sim.upsert(view({ id: `s${i}` }), 0);
+  for (let i = 0; i < 7; i++) sim.upsert(view({ id: `s${i}`, division: 'qa' }), 0);
   run(sim, 0, 90);
   const all = sim.agents();
-  assert.equal(all.filter((a) => a.desk).length, 8);
-  assert.equal(new Set(all.map((a) => a.desk).filter(Boolean)).size, 8, 'desks are unique');
-  const ninth = get(sim, 's8')!;
-  assert.equal(ninth.desk, undefined);
-  assert.equal(ninth.anim, 'standing');
-  assert.ok(inRoom(w, A, ninth.x, ninth.y), `stands inside the wing (${ninth.x},${ninth.y})`);
-  for (const o of all) if (o !== ninth) assert.ok(Math.hypot(o.x - ninth.x, o.y - ninth.y) > 0.9, 'not on top of anyone');
+  assert.equal(all.filter((a) => a.desk).length, 4, 'qa has 4 desks');
+  assert.equal(new Set(all.map((a) => a.desk).filter(Boolean)).size, 4, 'desks are unique');
+  for (const id of ['s4', 's5', 's6']) {
+    const o = get(sim, id)!;
+    assert.equal(o.desk, undefined);
+    assert.equal(o.anim, 'standing');
+    assert.ok(inRoom(w, 'qa', o.x, o.y), `${id} stands inside qa (${o.x},${o.y})`);
+    for (const p of all) if (p !== o) assert.ok(Math.hypot(p.x - o.x, p.y - o.y) > 0.9, 'not on top of anyone');
+  }
 });
 
-test('a freed desk goes to the next agent', () => {
-  const w = buildWorld(PROJECTS);
-  const sim = new Sim(w);
-  for (let i = 0; i < 8; i++) sim.upsert(view({ id: `s${i}` }), 0, { place: true });
+test('a freed desk goes to the next agent, and to someone standing in that room', () => {
+  const sim = new Sim(floor());
+  for (let i = 0; i < 5; i++) sim.upsert(view({ id: `s${i}`, division: 'qa' }), 0, { place: true });
+  assert.equal(get(sim, 's4')!.desk, undefined);
   const d0 = get(sim, 's0')!.desk;
   sim.remove('s0', 'expired', 0);
-  sim.upsert(view({ id: 'new' }), 0);
-  assert.equal(get(sim, 'new')!.desk, d0);
+  assert.equal(get(sim, 's4')!.desk, d0, 'the standing agent got the freed desk');
+  const d1 = get(sim, 's1')!.desk;
+  sim.remove('s1', 'expired', 0);
+  sim.upsert(view({ id: 'new', division: 'qa' }), 0);
+  assert.equal(get(sim, 'new')!.desk, d1);
 });
 
-test('an unassigned agent stands in the hall near the elevator', () => {
-  const w = buildWorld(PROJECTS);
+test('a floor without a Bullpen: unplaceable agents stand in the hall near the elevator', () => {
+  const f: FloorDef = { revision: 1, source: 'home', rooms: [{ id: 'qa', name: 'QA', division: 'qa', band: 'top', width: 10 }] };
+  const w = buildFloor(f, DIVS);
   const sim = new Sim(w);
-  sim.upsert(view({ id: 'u1', projectId: '' }), 0);
-  sim.upsert(view({ id: 'u2', projectId: '' }), 0);
+  sim.upsert(view({ id: 'u1' }), 0);
+  sim.upsert(view({ id: 'u2' }), 0);
   run(sim, 0, 30);
   const u1 = get(sim, 'u1')!, u2 = get(sim, 'u2')!;
   for (const u of [u1, u2]) {
     assert.equal(u.desk, undefined);
     assert.equal(u.anim, 'standing');
-    assert.equal(w.grid[Math.floor(u.y)][Math.floor(u.x)].room, 'hall');
+    assert.equal(roomAt(w, u), 'hall');
     assert.ok(Math.hypot(u.x - w.elevator.x, u.y - w.elevator.y) < 10, 'near the elevator');
   }
   assert.ok(Math.hypot(u1.x - u2.x, u1.y - u2.y) > 0.9, 'different spots');
-  // Once the project is known, it walks to a desk.
-  sim.upsert(view({ id: 'u1', projectId: B }), 31);
+  // Once it hints a room that exists, it walks to a desk there.
+  sim.upsert(view({ id: 'u1', division: 'qa' }), 31);
   run(sim, 31, 60);
-  assert.equal(get(sim, 'u1')!.desk?.room, B);
+  assert.equal(get(sim, 'u1')!.desk?.room, 'qa');
   assert.equal(get(sim, 'u1')!.anim, 'seated');
 });
 
-test('nobody is seated in the coordinator room', () => {
-  const sim = new Sim(buildWorld(PROJECTS));
-  for (let i = 0; i < 12; i++) sim.upsert(view({ id: `s${i}` }), 0, { place: true });
-  assert.ok(sim.agents().every((a) => a.desk?.room !== 'coordinator'));
-});
-
 test('activity bubbles are rate-limited to one per 4 s per agent', () => {
-  const sim = new Sim(buildWorld(PROJECTS));
+  const sim = new Sim(floor());
   sim.upsert(view({ id: 's1', activity: '' }), 0, { place: true });
   sim.upsert(view({ id: 's1', activity: 'Read a.ts' }), 10);
   assert.equal(get(sim, 's1')!.bubble?.text, 'Read a.ts');
@@ -171,23 +199,24 @@ test('activity bubbles are rate-limited to one per 4 s per agent', () => {
 });
 
 test('expired bubbles are cleared on step', () => {
-  const sim = new Sim(buildWorld(PROJECTS));
+  const sim = new Sim(floor());
   sim.upsert(view({ id: 's1' }), 0, { place: true });
   sim.upsert(view({ id: 's1', activity: 'Read a.ts' }), 1);
   run(sim, 1, 6);
   assert.equal(get(sim, 's1')!.bubble, undefined);
 });
 
-test('an agent idle for over 2 minutes takes a break-room trip and comes back; at most one per 5 min', () => {
-  const w = buildWorld(PROJECTS);
+const atBreakSpot = (w: World, a: { x: number; y: number }) => w.breakSpots.some(([x, y]) => x === Math.floor(a.x) && y === Math.floor(a.y));
+
+test('an agent idle for over 2 minutes takes a trip to the Bullpen couch and comes back; at most one per 5 min', () => {
+  const w = floor();
   const sim = new Sim(w, { rand: () => 0.5 });
-  sim.upsert(view({ id: 's1', status: 'idle' }), 0, { place: true });
+  sim.upsert(view({ id: 's1', status: 'idle', division: 'security' }), 0, { place: true });
   const home = { x: get(sim, 's1')!.x, y: get(sim, 's1')!.y };
   let trips = 0, inBreak = false;
   const each = () => {
-    const a = get(sim, 's1')!;
-    const now = w.grid[Math.floor(a.y)]?.[Math.floor(a.x)]?.room === 'break';
-    if (now && !inBreak) trips++;
+    const now = atBreakSpot(w, get(sim, 's1')!);
+    if (now && !inBreak) { trips++; assert.equal(roomAt(w, get(sim, 's1')!), BULLPEN); }
     inBreak = now;
   };
   let t = run(sim, 0, 110, each);
@@ -200,8 +229,7 @@ test('an agent idle for over 2 minutes takes a break-room trip and comes back; a
 });
 
 test('ambient trips are off when ambient is disabled (reduced motion)', () => {
-  const w = buildWorld(PROJECTS);
-  const sim = new Sim(w, { ambient: false });
+  const sim = new Sim(floor(), { ambient: false });
   sim.upsert(view({ id: 's1', status: 'idle' }), 0, { place: true });
   let moved = false;
   run(sim, 0, 400, () => { if (get(sim, 's1')!.anim !== 'seated') moved = true; });
@@ -209,40 +237,58 @@ test('ambient trips are off when ambient is disabled (reduced motion)', () => {
 });
 
 test('an agent on a break goes back to its desk when work arrives', () => {
-  const w = buildWorld(PROJECTS);
+  const w = floor();
   const sim = new Sim(w, { rand: () => 0.5 });
-  sim.upsert(view({ id: 's1', status: 'idle' }), 0, { place: true });
+  sim.upsert(view({ id: 's1', status: 'idle', division: 'qa' }), 0, { place: true });
   let t = 0;
-  for (let i = 0; i < 400 && w.grid[Math.floor(get(sim, 's1')!.y)][Math.floor(get(sim, 's1')!.x)].room !== 'break'; i++) t = run(sim, t, 1);
-  assert.equal(w.grid[Math.floor(get(sim, 's1')!.y)][Math.floor(get(sim, 's1')!.x)].room, 'break', 'went on a break');
-  sim.upsert(view({ id: 's1', status: 'working', activity: 'Bash ls' }), t);
+  for (let i = 0; i < 400 && !atBreakSpot(w, get(sim, 's1')!); i++) t = run(sim, t, 1);
+  assert.ok(atBreakSpot(w, get(sim, 's1')!), 'went on a break');
+  sim.upsert(view({ id: 's1', status: 'working', activity: 'Bash ls', division: 'qa' }), t);
   run(sim, t, 40);
   assert.equal(get(sim, 's1')!.anim, 'seated');
+  assert.equal(get(sim, 's1')!.desk?.room, 'qa');
 });
 
-test('setWorld keeps desks stable when a project is added, and re-seats agents of an archived project', () => {
-  const sim = new Sim(buildWorld(PROJECTS));
-  sim.upsert(view({ id: 'a1', projectId: A }), 0, { place: true });
-  sim.upsert(view({ id: 'b1', projectId: B }), 0, { place: true });
+test('setWorld keeps desks stable when a room is added, and sends agents of a removed room to the Bullpen', () => {
+  const sim = new Sim(floor());
+  sim.upsert(view({ id: 'a1', division: 'qa' }), 0, { place: true });
+  sim.upsert(view({ id: 'b1', division: 'imagegen' }), 0, { place: true });
   const before = { ...get(sim, 'a1')!.desk! };
-  const w2 = buildWorld([...PROJECTS, { id: '/c', name: 'c', order: 2 }]);
+  const f2 = defaultFloor();
+  f2.rooms.push({ id: 'ops', name: 'Ops', band: 'top', width: 10 });
+  const w2 = buildFloor(f2, DIVS);
   sim.setWorld(w2);
   const d = get(sim, 'a1')!.desk!;
   assert.ok(w2.furn.includes(d), 'desk belongs to the new world');
   assert.deepEqual({ x: d.x, y: d.y, room: d.room }, { x: before.x, y: before.y, room: before.room });
   assert.equal(get(sim, 'a1')!.anim, 'seated');
-  // Archive beta: its agent has no wing any more and stands in the hall.
-  const w3 = buildWorld([PROJECTS[0], { ...PROJECTS[1], archived: true }]);
+  // Remove imagegen: its agent goes to the Bullpen (Review Focus 4), nothing throws.
+  const f3 = defaultFloor();
+  f3.rooms = f3.rooms.filter((r) => r.id !== 'imagegen');
+  const w3 = buildFloor(f3, DIVS);
   sim.setWorld(w3);
   run(sim, 0, 60);
   const b = get(sim, 'b1')!;
-  assert.equal(b.desk, undefined);
-  assert.equal(w3.grid[Math.floor(b.y)][Math.floor(b.x)].room, 'hall');
+  assert.equal(b.desk?.room, BULLPEN);
+  assert.equal(sim.roomOf(b), BULLPEN);
+  assert.equal(b.anim, 'seated');
 });
 
 test('appearance is deterministic from the agent id', () => {
-  const s1 = new Sim(buildWorld(PROJECTS)), s2 = new Sim(buildWorld(PROJECTS));
+  const s1 = new Sim(floor()), s2 = new Sim(floor());
   for (const s of [s1, s2]) s.upsert(view({ id: 'abc-123' }), 0);
   assert.equal(get(s1, 'abc-123')!.skin, get(s2, 'abc-123')!.skin);
   assert.equal(get(s1, 'abc-123')!.hair, get(s2, 'abc-123')!.hair);
+});
+
+test('a subagent that arrives before its parent joins the parent once it appears', () => {
+  const w = floor();
+  const sim = new Sim(w);
+  sim.upsert(view({ id: 'p:x', kind: 'subagent', parentId: 'p' }), 0, { place: true });
+  assert.equal(roomAt(w, get(sim, 'p:x')!), BULLPEN, 'no parent yet: Bullpen');
+  sim.upsert(view({ id: 'p', division: 'backend' }), 1, { place: true });
+  run(sim, 1, 60);
+  assert.equal(roomAt(w, get(sim, 'p:x')!), 'backend');
+  const p = get(sim, 'p')!, s = get(sim, 'p:x')!;
+  assert.ok(Math.hypot(s.x - p.x, s.y - p.y) < 2.5);
 });

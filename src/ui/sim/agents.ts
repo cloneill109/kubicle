@@ -1,9 +1,10 @@
 // Client-side agent simulation: turns server AgentViews into positioned SimAgents that walk
-// between the elevator, desks and the break room. Pure logic (no DOM), driven by step(dt, now)
+// between the elevator, desks in their room and the Bullpen couch. Pure logic (no DOM), driven by step(dt, now)
 // with `now` in seconds, so it runs under node:test as well as in the browser.
 import type { AgentView } from '../../shared/protocol.ts';
 import type { SimAgent } from '../render/types.ts';
-import { bfs, seatOf, assignDesk, type World, type Furn } from './world.ts';
+import { bfs, seatOf, assignDesk, standSpots, type World, type Furn } from './world.ts';
+import { resolveRoom, type FloorDef } from '../../shared/building.ts';
 
 const SKINS = ['#f1c9a5', '#e0ac85', '#c68863', '#9a6243', '#6e432b'];
 const HAIRS = ['#2b1d16', '#5a3a22', '#c9a05a', '#1d1d26', '#8a3b2a', '#d8d2c4'];
@@ -15,14 +16,14 @@ const FADE_S = 0.5;
 const BUBBLE_S = 2.6, BUBBLE_GAP_S = 4;
 const IDLE_BEFORE_TRIP_S = 120, TRIP_GAP_S = 300;
 const BREAK_MIN_S = 20, BREAK_MAX_S = 40;
-/** Standing rows inside a wing, relative to its top (desks sit at +1 and +5, chairs at +2 and +6). */
-const WING_STAND_ROWS = [3, 4, 8, 7, 9];
 
 type Pt = { x: number; y: number };
 type Mode = 'home' | 'break' | 'leaving';
 
 interface Mover extends SimAgent {
   home: Pt;
+  /** Room the current home was chosen for (null: no room, standing in the hall). */
+  homeRoom: string | null;
   homeAnim: 'seated' | 'standing';
   mode: Mode;
   speed: number;
@@ -35,7 +36,7 @@ interface Mover extends SimAgent {
 }
 
 export interface SimOptions {
-  /** Ambient break-room trips (off under prefers-reduced-motion). Default true. */
+  /** Ambient Bullpen trips (off under prefers-reduced-motion). Default true. */
   ambient?: boolean;
   /** Random source for ambient choices (tests pass a fixed one). */
   rand?: () => number;
@@ -53,6 +54,7 @@ const near = (a: Pt, b: Pt) => Math.hypot(a.x - b.x, a.y - b.y) < 0.05;
 
 export class Sim {
   #world: World;
+  #floor: FloorDef;
   #agents = new Map<string, Mover>();
   #ambient: boolean;
   #rand: () => number;
@@ -60,6 +62,7 @@ export class Sim {
 
   constructor(world: World, opts: SimOptions = {}) {
     this.#world = world;
+    this.#floor = floorOf(world);
     this.#ambient = opts.ambient ?? true;
     this.#rand = opts.rand ?? Math.random;
   }
@@ -69,18 +72,27 @@ export class Sim {
 
   agents(): SimAgent[] { return [...this.#agents.values()]; }
 
-  /** Re-seat everyone after the project list (and so the floor plan) changed. Desks that still exist are kept. */
+  /** The room an agent belongs in (its resolved room id), or '' when the floor has no room for it. */
+  roomOf(a: SimAgent): string {
+    const m = this.#agents.get(a.view.id);
+    return (m ? this.#roomOf(m) : this.#resolve(a.view)) ?? '';
+  }
+
+  /** Re-seat everyone after the floor plan changed. Desks that still exist (same room, same spot) are kept. */
   setWorld(world: World): void {
     const old = this.#world;
     this.#world = world;
+    this.#floor = floorOf(world);
     if (old === world) return;
     const live = [...this.#agents.values()].filter((a) => a.mode !== 'leaving');
     // Map kept desks onto the new world's furniture first, so the re-seat below can't hand them out.
     for (const a of live) {
       const d = a.desk;
-      a.desk = d ? world.furn.find((f) => f.room === d.room && f.x === d.x && f.y === d.y && f.type === d.type && this.#wingOf(a) === f.room) : undefined;
+      a.desk = d ? world.furn.find((f) => f.room === d.room && f.x === d.x && f.y === d.y && f.type === d.type && this.#roomOf(a) === f.room) : undefined;
     }
-    for (const a of live) this.#seat(a, true);
+    // Sessions first, so subagents find their parent's new spot.
+    for (const a of live) if (a.view.kind === 'session') this.#seat(a, true);
+    for (const a of live) if (a.view.kind !== 'session') this.#seat(a, true);
     for (const a of this.#agents.values()) {
       if (a.mode === 'leaving') { if (!a.fading) this.#leave(a); }
       else this.#goHome(a);
@@ -104,19 +116,21 @@ export class Sim {
       this.#seat(a, false);
       return this.#goHome(a);
     }
-    const moved = v.projectId !== prev.projectId || (v.kind === 'subagent' && v.parentId !== prev.parentId);
-    if (moved) { a.desk = undefined; this.#seat(a, false); this.#goHome(a); }
-    else if (a.mode === 'break' && v.status !== 'idle') this.#goHome(a);
+    const moved = this.#roomOf(a) !== a.homeRoom || (v.kind === 'subagent' && v.parentId !== prev.parentId);
+    if (moved) {
+      a.desk = undefined; this.#seat(a, false); this.#goHome(a);
+      this.#rehomeChildren(a);
+    } else if (a.mode === 'break' && v.status !== 'idle') this.#goHome(a);
   }
 
   remove(id: string, reason: 'ended' | 'expired', now: number): void {
     this.#now = Math.max(this.#now, now);
     const a = this.#agents.get(id);
     if (!a) return;
-    const wing = a.desk?.room;
+    const room = a.desk?.room;
     if (reason === 'expired') this.#agents.delete(id);
     else if (a.mode !== 'leaving') { a.mode = 'leaving'; a.desk = undefined; this.#leave(a); }
-    if (wing) this.#reflow(wing);
+    if (room) this.#reflow(room);
   }
 
   step(dt: number, now: number): void {
@@ -145,35 +159,54 @@ export class Sim {
     const a: Mover = {
       view: v, x: ex.x + 0.5, y: ex.y - 0.5, dir: 'up', walkPhase: 0, anim: 'walking',
       skin: SKINS[h % SKINS.length], hair: v.kind === 'subagent' ? SUB_HAIR : HAIRS[(h >>> 8) % HAIRS.length], alpha: 1,
-      home: { x: 0, y: 0 }, homeAnim: 'standing', mode: 'home', speed: v.kind === 'subagent' ? SUB_SPEED : SPEED,
+      home: { x: 0, y: 0 }, homeRoom: null, homeAnim: 'standing', mode: 'home', speed: v.kind === 'subagent' ? SUB_SPEED : SPEED,
       fading: false, lastBubble: -Infinity, idleSince: v.status === 'idle' ? now : null, lastTrip: -Infinity, breakUntil: 0,
     };
     this.#agents.set(v.id, a);
     this.#seat(a, false);
     if (place) { a.x = a.home.x; a.y = a.home.y; this.#settle(a); }
     else this.#goHome(a);
+    this.#rehomeChildren(a); // subagents that arrived before their parent join it now
   }
 
-  /** The wing room an agent belongs in, or null (unassigned / archived project). Subagents follow their parent. */
-  #wingOf(a: Mover): string | null {
-    let pid = a.view.projectId;
-    if (!pid && a.view.parentId) pid = this.#agents.get(a.view.parentId)?.view.projectId ?? '';
-    if (!pid) return null;
-    return this.#world.rooms.some((r) => r.id === pid && r.kind === 'wing') ? pid : null;
+  /** Subagents follow their parent to its (new) room and stand next to it. */
+  #rehomeChildren(p: Mover): void {
+    if (p.view.kind !== 'session') return;
+    for (const s of this.#agents.values()) {
+      if (s === p || s.view.parentId !== p.view.id || s.mode === 'leaving') continue;
+      this.#seat(s, false);
+      this.#goHome(s);
+    }
   }
 
-  /** Choose a home: keep a valid desk, else a free desk in the wing, else a standing spot. */
+  /** Room id for a view's hints on this floor (label, then room, then division, else the Bullpen), or null if that room isn't here. */
+  #resolve(v: AgentView): string | null {
+    const id = resolveRoom(this.#floor, { label: v.roomLabel, room: v.room, division: v.division });
+    return this.#world.rooms.some((r) => r.id === id) ? id : null;
+  }
+
+  /** The room an agent belongs in. Subagents follow their parent once it is on the floor. */
+  #roomOf(a: Mover): string | null {
+    const p = a.view.kind === 'subagent' && a.view.parentId ? this.#agents.get(a.view.parentId) : undefined;
+    return this.#resolve(p ? p.view : a.view);
+  }
+
+  /**
+   * Choose a home. Sessions keep a valid desk, else take a free desk in their room, else stand there.
+   * Subagents take no desk: they stand next to their parent, else elsewhere in the room.
+   */
   #seat(a: Mover, keepDesk: boolean): void {
-    const wing = this.#wingOf(a);
-    if (!keepDesk || !a.desk || a.desk.room !== wing) a.desk = undefined;
-    if (wing && !a.desk) {
+    const room = this.#roomOf(a);
+    a.homeRoom = room;
+    if (!keepDesk || !a.desk || a.desk.room !== room || a.view.kind === 'subagent') a.desk = undefined;
+    if (room && !a.desk && a.view.kind === 'session') {
       const taken = new Set<Furn>();
       for (const o of this.#agents.values()) if (o !== a && o.desk) taken.add(o.desk);
-      a.desk = assignDesk(this.#world, wing, taken) ?? undefined;
+      a.desk = assignDesk(this.#world, room, taken) ?? undefined;
     }
     if (a.desk) { a.home = seatOf(a.desk); a.homeAnim = 'seated'; return; }
     a.homeAnim = 'standing';
-    const spot = (wing && a.view.kind === 'subagent' ? this.#nextToParent(a) : null) ?? (wing ? this.#wingSpot(a, wing) : null) ?? this.#hallSpot(a);
+    const spot = (room && a.view.kind === 'subagent' ? this.#nextToParent(a, room) : null) ?? (room ? this.#roomSpot(a, room) : null) ?? this.#hallSpot(a);
     a.home = spot ? { x: spot.x + 0.5, y: spot.y + 0.5 } : { x: this.#world.elevator.x + 0.5, y: this.#world.elevator.y - 2.5 };
   }
 
@@ -192,25 +225,20 @@ export class Sim {
     return s;
   }
 
-  #nextToParent(a: Mover): Pt | null {
+  #nextToParent(a: Mover, room: string): Pt | null {
     const p = a.view.parentId ? this.#agents.get(a.view.parentId) : undefined;
     if (!p || p.mode === 'leaving') return null;
-    const b = tileOf(p.home), claimed = this.#claimed(a), wing = this.#wingOf(a);
-    for (const [dx, dy] of [[0, 1], [1, 1], [-1, 1], [2, 0], [-2, 0], [1, 0], [-1, 0], [0, 2]]) {
+    const b = tileOf(p.home), claimed = this.#claimed(a);
+    for (const [dx, dy] of [[0, 1], [1, 1], [-1, 1], [2, 0], [-2, 0], [1, 0], [-1, 0], [0, 2], [2, 1], [-2, 1], [1, 2], [-1, 2]]) {
       const x = b.x + dx, y = b.y + dy;
-      if (this.#walkable(x, y) && !claimed.has(key(x, y)) && this.#world.grid[y][x].room === wing) return { x, y };
+      if (this.#walkable(x, y) && !claimed.has(key(x, y)) && this.#world.grid[y][x].room === room) return { x, y };
     }
     return null;
   }
 
-  #wingSpot(a: Mover, wing: string): Pt | null {
-    const r = this.#world.rooms.find((q) => q.id === wing);
-    if (!r) return null;
+  #roomSpot(a: Mover, room: string): Pt | null {
     const claimed = this.#claimed(a);
-    for (const dy of WING_STAND_ROWS) for (let x = r.x0 + 1; x < r.x1; x++) {
-      const y = r.y0 + dy;
-      if (y <= r.y1 && this.#walkable(x, y) && !claimed.has(key(x, y))) return { x, y };
-    }
+    for (const [x, y] of standSpots(this.#world, room)) if (this.#walkable(x, y) && !claimed.has(key(x, y))) return { x, y };
     return null;
   }
 
@@ -226,10 +254,10 @@ export class Sim {
     return best;
   }
 
-  /** Give desks freed in a wing to agents standing there for lack of one. */
-  #reflow(wing: string): void {
+  /** Give desks freed in a room to sessions standing there for lack of one. */
+  #reflow(room: string): void {
     for (const a of this.#agents.values()) {
-      if (a.mode === 'leaving' || a.desk || this.#wingOf(a) !== wing) continue;
+      if (a.mode === 'leaving' || a.desk || a.view.kind !== 'session' || this.#roomOf(a) !== room) continue;
       this.#seat(a, false);
       if (a.desk) this.#goHome(a);
     }
@@ -304,4 +332,12 @@ export class Sim {
       a.breakUntil = this.#now + BREAK_MIN_S + this.#rand() * (BREAK_MAX_S - BREAK_MIN_S);
     });
   }
+}
+
+/** The FloorDef view of a built world, for resolveRoom. */
+function floorOf(w: World): FloorDef {
+  return {
+    revision: 0, source: 'default',
+    rooms: w.rooms.map((r) => ({ id: r.id, name: r.name, division: r.division, band: r.doors[0]?.[1] > r.y1 ? 'top' : 'bottom', width: r.x1 - r.x0 + 1 })),
+  };
 }

@@ -19,6 +19,19 @@ export function makeBlueprint(): Renderer {
     g.lineWidth = 1;
     for (let x = 0; x <= COLS; x++) { g.strokeStyle = x % 4 ? 'rgba(233,242,255,.05)' : 'rgba(233,242,255,.11)'; g.beginPath(); g.moveTo(ox + x * T, oy); g.lineTo(ox + x * T, oy + ROWS * T); g.stroke(); }
     for (let y = 0; y <= ROWS; y++) { g.strokeStyle = y % 4 ? 'rgba(233,242,255,.05)' : 'rgba(233,242,255,.11)'; g.beginPath(); g.moveTo(ox, oy + y * T); g.lineTo(ox + COLS * T, oy + y * T); g.stroke(); }
+    // Room washes: a faint tint of the division color; the Bullpen gets warm diagonal hatching.
+    for (const r of w.rooms) {
+      const X = ox + r.x0 * T, Y = oy + r.y0 * T, W = (r.x1 - r.x0 + 1) * T, H = (r.y1 - r.y0 + 1) * T;
+      if (r.kind === 'bullpen') {
+        g.fillStyle = 'rgba(242,184,75,.10)'; g.fillRect(X, Y, W, H);
+        g.save(); g.beginPath(); g.rect(X, Y, W, H); g.clip();
+        g.strokeStyle = 'rgba(242,184,75,.22)'; g.lineWidth = 1; g.beginPath();
+        for (let d = -H; d < W; d += T * 0.8) { g.moveTo(X + d, Y + H); g.lineTo(X + d + H, Y); }
+        g.stroke(); g.restore();
+      } else if (r.color) {
+        g.fillStyle = r.color; g.globalAlpha = 0.16; g.fillRect(X, Y, W, H); g.globalAlpha = 1;
+      }
+    }
     for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (w.grid[y][x].wall && nearFloor(w, x, y)) { g.fillStyle = 'rgba(233,242,255,.13)'; g.fillRect(ox + x * T, oy + y * T, T, T); }
     g.strokeStyle = INK; g.lineWidth = Math.max(1.5, T * 0.12); g.lineCap = 'square';
     g.beginPath();
@@ -60,7 +73,9 @@ export function makeBlueprint(): Renderer {
     g.font = `500 ${fs}px "IBM Plex Mono", monospace`; g.textBaseline = 'alphabetic';
     for (const r of w.rooms) {
       g.fillStyle = 'rgba(233,242,255,.55)';
-      g.fillText(`${r.x1 - r.x0 + 1}.0 × ${r.y1 - r.y0 + 1}.0 m`, ox + (r.x0 + 1.4) * T, oy + (r.y1 + 0.75) * T);
+      // Along the bottom row; in a bottom-band Bullpen that row is the lounge, so use its top (walkway) row, left of the door.
+      const ly = r.kind === 'bullpen' && !isTopRoom(r) ? r.y0 + 0.75 : r.y1 + 0.75;
+      g.fillText(`${r.x1 - r.x0 + 1}.0 × ${r.y1 - r.y0 + 1}.0 m`, ox + (r.x0 + (ly < r.y1 ? 0.6 : 1.4)) * T, oy + ly * T);
     }
     g.fillStyle = 'rgba(233,242,255,.7)';
     g.fillText('KUBICLE · LEVEL 1 · 1 SQ = 1 M · DWG A-101', ox + 1.3 * T, oy + (ROWS - 0.3) * T);

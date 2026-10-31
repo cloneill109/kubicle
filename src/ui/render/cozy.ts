@@ -3,9 +3,11 @@
 import type { World, Furn } from '../sim/world.ts';
 import { isWall, seatOf } from '../sim/world.ts';
 import type { Renderer, SimAgent } from './types.ts';
-import { mk, ctx2d, nearFloor, floorKeys, isDesk, tableChairs, deskScreen, elevatorOpen, bodyColor, parentColor, agentAlpha, shade, grey, rr, fit, DIRV, type Buf, type Ctx, type FloorKey } from './sprite.ts';
+import { mk, ctx2d, nearFloor, floorInfo, mix, isDesk, tableChairs, deskScreen, elevatorOpen, bodyColor, parentColor, agentAlpha, shade, grey, rr, fit, DIRV, type Buf, type Ctx, type FloorInfo } from './sprite.ts';
 
-const FLOOR_CZ: Record<FloorKey, string> = { hall: '#e6e0d4', mgr: '#d6b08a', wingA: '#cad6ea', wingB: '#dcd1ea', wingC: '#cfe2d2', brk: '#f0e5d0' };
+/** Cozy floors: pale hall, warm wood Bullpen, division rooms as a soft pastel of the division color. */
+const czFloor = (f: FloorInfo): string =>
+  f.kind === 'hall' ? '#e6e0d4' : f.kind === 'bullpen' ? '#d6b08a' : f.kind === 'unknown' ? '#d9d9dd' : mix(f.color, '#ffffff', 0.68);
 
 export function makeCozy(): Renderer {
   let stat: Buf | null = null, key = '', world: World | null = null;
@@ -59,18 +61,18 @@ export function makeCozy(): Renderer {
   const build = (w: World, cw: number, ch: number, dpr: number): Buf => {
     const c = mk(cw * dpr, ch * dpr), g = ctx2d(c);
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const fk = floorKeys(w);
+    const fk = floorInfo(w);
     g.fillStyle = r.bg; g.fillRect(0, 0, cw, ch);
     for (let y = 0; y < w.rows; y++) for (let x = 0; x < w.cols; x++) {
       const cell = w.grid[y][x], X = ox + x * T, Y = oy + y * T;
       if (cell.wall) continue;
-      const k = fk(cell.room);
-      g.fillStyle = FLOOR_CZ[k]; g.fillRect(X - .5, Y - .5, T + 1, T + 1);
+      const f = fk(cell.room), k = f.kind;
+      g.fillStyle = czFloor(f); g.fillRect(X - .5, Y - .5, T + 1, T + 1);
       if (k === 'hall' && (x + y) % 2) { g.fillStyle = 'rgba(120,100,70,.05)'; g.fillRect(X, Y, T, T); }
-      if (k === 'brk') { g.strokeStyle = 'rgba(150,120,80,.12)'; g.lineWidth = 1; g.strokeRect(X + .5, Y + .5, T - 1, T - 1); }
-      if (k === 'mgr') { g.fillStyle = 'rgba(110,70,35,.16)'; g.fillRect(X, Y + T * .48, T, 1); g.fillRect(X + ((x * 7 + y * 3) % 10) / 10 * T, Y, 1, T * .48); }
+      if (k === 'unknown') { g.strokeStyle = 'rgba(90,90,100,.12)'; g.lineWidth = 1; g.strokeRect(X + .5, Y + .5, T - 1, T - 1); }
+      if (k === 'bullpen') { g.fillStyle = 'rgba(110,70,35,.16)'; g.fillRect(X, Y + T * .48, T, 1); g.fillRect(X + ((x * 7 + y * 3) % 10) / 10 * T, Y, 1, T * .48); }
     }
-    for (const rm of w.rooms) if (rm.kind === 'wing') {
+    for (const rm of w.rooms) if (rm.kind === 'division') {
       g.strokeStyle = 'rgba(255,255,255,.55)'; g.lineWidth = 1.5; g.setLineDash([]);
       rr(g, ox + (rm.x0 + .5) * T, oy + (rm.y0 + .5) * T, (rm.x1 - rm.x0) * T, (rm.y1 - rm.y0) * T, T * .6); g.stroke();
     }

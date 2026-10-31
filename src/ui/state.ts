@@ -129,7 +129,7 @@ export function titleFor(needYou: number): string {
   return needYou > 0 ? `(${needYou}) ${BASE_TITLE}` : BASE_TITLE;
 }
 
-/** Live (non-archived) wings in floor order, as buildWorld lays them out. */
+/** Live (non-archived) projects (floors) in floor order. */
 export function liveWings(projects: ProjectRow[]): ProjectRow[] {
   return projects.filter((p) => !p.archived).sort((a, b) => a.order - b.order);
 }

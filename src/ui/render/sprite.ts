@@ -87,18 +87,37 @@ export function isTopRoom(r: Room): boolean {
   return r.doors[0][1] > r.y1;
 }
 
-/** Floor palette key per cell: the mockup's hall/mgr/brk, wings cycle through its three wing palettes. */
-export type FloorKey = 'hall' | 'mgr' | 'brk' | 'wingA' | 'wingB' | 'wingC';
-export function floorKeys(w: World): (roomId: string | null) => FloorKey {
-  const m = new Map<string, FloorKey>();
-  const wings: FloorKey[] = ['wingA', 'wingB', 'wingC'];
-  let i = 0;
-  for (const r of w.rooms) {
-    if (r.kind === 'coordinator') m.set(r.id, 'mgr');
-    else if (r.kind === 'break') m.set(r.id, 'brk');
-    else m.set(r.id, wings[i++ % 3]);
+/**
+ * What the floor of a cell is: the hall, the Bullpen (a fixed warm floor), a division room tinted by
+ * its division's color, or a room whose division is unknown or missing (neutral, no color).
+ */
+export type FloorInfo = { kind: 'hall' } | { kind: 'bullpen' } | { kind: 'room'; color: string } | { kind: 'unknown' };
+export function floorInfo(w: World): (roomId: string | null) => FloorInfo {
+  const m = new Map<string, FloorInfo>();
+  for (const r of w.rooms) m.set(r.id, r.kind === 'bullpen' ? { kind: 'bullpen' } : r.color ? { kind: 'room', color: r.color } : { kind: 'unknown' });
+  const hall: FloorInfo = { kind: 'hall' };
+  return (id) => (id === null ? hall : m.get(id) ?? hall);
+}
+
+/** Linear mix of two #rrggbb colors (t = 0 → a, 1 → b), as #rrggbb. */
+export function mix(a: string, b: string, t: number): string {
+  const p = (h: string) => { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; };
+  const [x, y] = [p(a), p(b)];
+  return '#' + x.map((v, i) => Math.round(v + (y[i] - v) * t).toString(16).padStart(2, '0')).join('');
+}
+
+/** Two-tone floor for the pixel styles (pixel, iso): division color pulled toward a dark slate so it reads as carpet. */
+export const PIX_HALL: [string, string] = ['#cdbf9f', '#c3b493'];
+/** Light honey-oak planks: lighter and yellower than any carpet, so even an orange division reads differently. */
+export const PIX_BULLPEN: [string, string] = ['#cf9d62', '#b98853'];
+export const PIX_UNKNOWN: [string, string] = ['#5d606b', '#555862'];
+export function pixFloor(f: FloorInfo): [string, string] {
+  switch (f.kind) {
+    case 'hall': return PIX_HALL;
+    case 'bullpen': return PIX_BULLPEN;
+    case 'unknown': return PIX_UNKNOWN;
+    case 'room': return [mix(f.color, '#2e3142', 0.5), mix(f.color, '#2e3142', 0.57)];
   }
-  return (id) => (id === null ? 'hall' : m.get(id) ?? 'hall');
 }
 
 export const isDesk = (f: Furn) => f.type === 'desk' || f.type === 'bigdesk';

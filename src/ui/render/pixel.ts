@@ -3,9 +3,7 @@
 import type { World, Furn } from '../sim/world.ts';
 import { isWall, seatOf } from '../sim/world.ts';
 import type { Renderer, SimAgent } from './types.ts';
-import { mk, ctx2d, nearFloor, floorKeys, isDesk, tableChairs, deskScreen, elevatorOpen, sprite, fit, type Buf, type Ctx, type FloorKey } from './sprite.ts';
-
-const FLOOR_PX: Record<FloorKey, [string, string]> = { hall: ['#cdbf9f', '#c3b493'], mgr: ['#a36f44', '#8c5c36'], wingA: ['#566a8e', '#4e6084'], wingB: ['#70567f', '#664d74'], wingC: ['#507a5e', '#487055'], brk: ['#dcd0b4', '#d1c4a6'] };
+import { mk, ctx2d, nearFloor, floorInfo, pixFloor, isDesk, tableChairs, deskScreen, elevatorOpen, sprite, fit, type Buf, type Ctx } from './sprite.ts';
 
 function furn(g: Ctx, f: Furn): void {
   const X = f.x * 8, Y = f.y * 8, W = f.w * 8, H = f.h * 8;
@@ -62,7 +60,7 @@ function furn(g: Ctx, f: Furn): void {
 
 function build(w: World): Buf {
   const c = mk(w.cols * 8, w.rows * 8), g = ctx2d(c);
-  const key = floorKeys(w);
+  const info = floorInfo(w);
   for (let y = 0; y < w.rows; y++) for (let x = 0; x < w.cols; x++) {
     const X = x * 8, Y = y * 8, cell = w.grid[y][x];
     if (cell.wall) {
@@ -72,11 +70,11 @@ function build(w: World): Buf {
       if (faceBelow) { g.fillStyle = '#5b4f70'; g.fillRect(X, Y + 3, 8, 5); g.fillStyle = '#6a5d80'; g.fillRect(X, Y + 3, 8, 1); g.fillStyle = '#2b2538'; g.fillRect(X, Y + 7, 8, 1); }
       continue;
     }
-    const k = key(cell.room), [a, b] = FLOOR_PX[k];
-    if (k === 'hall' || k === 'brk') {
+    const f = info(cell.room), k = f.kind, [a, b] = pixFloor(f);
+    if (k === 'hall') {
       g.fillStyle = (x + y) & 1 ? a : b; g.fillRect(X, Y, 8, 8);
       g.fillStyle = 'rgba(0,0,0,.07)'; g.fillRect(X, Y + 7, 8, 1); g.fillRect(X + 7, Y, 1, 8);
-    } else if (k === 'mgr') {
+    } else if (k === 'bullpen') { // wood planks
       g.fillStyle = a; g.fillRect(X, Y, 8, 8); g.fillStyle = b;
       g.fillRect(X, Y + 3, 8, 1); g.fillRect(X, Y + 7, 8, 1);
       g.fillRect(X + ((x * 5 + y * 3) % 8), Y, 1, 3); g.fillRect(X + ((x * 5 + y * 3 + 4) % 8), Y + 4, 1, 3);

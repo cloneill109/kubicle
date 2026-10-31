@@ -2,9 +2,7 @@
 // a tile is a 16×8 diamond, so the world's footprint is (cols+rows)·8 wide and (cols+rows)·4 tall.
 import type { World, Furn } from '../sim/world.ts';
 import type { Renderer, SimAgent } from './types.ts';
-import { mk, ctx2d, nearFloor, floorKeys, deskScreen, elevatorOpen, sprite, fit, type Buf, type Ctx, type FloorKey } from './sprite.ts';
-
-const FLOOR_ISO: Record<FloorKey, [string, string]> = { hall: ['#cdbf9f', '#c5b696'], mgr: ['#a36f44', '#996840'], wingA: ['#5b6f94', '#55688c'], wingB: ['#745a84', '#6d547c'], wingC: ['#557f63', '#4f775c'], brk: ['#dcd0b4', '#d2c6a9'] };
+import { mk, ctx2d, nearFloor, floorInfo, pixFloor, deskScreen, elevatorOpen, sprite, fit, type Buf, type Ctx } from './sprite.ts';
 const OY = 34; // headroom for walls/furniture on the back row (as in the mockup)
 
 /** Buffer geometry for a world; matches the mockup's 640×360 / OX 248 at 48×30. */
@@ -32,12 +30,14 @@ export function makeIso(): Renderer {
   };
   const build = (w: World): Buf => {
     const c = mk(D.bw, D.bh), g = ctx2d(c);
-    const key = floorKeys(w);
+    const info = floorInfo(w);
     for (let s = 0; s < w.cols + w.rows; s++) for (let y = 0; y < w.rows; y++) {
       const x = s - y; if (x < 0 || x >= w.cols) continue;
       const cell = w.grid[y][x];
       if (cell.wall) continue;
-      const [a, b] = FLOOR_ISO[key(cell.room)], p = I(x, y), col = (x + y) & 1 ? a : b;
+      const f = info(cell.room), [a, b] = pixFloor(f), p = I(x, y);
+      // Bullpen planks run along x (stripe every other row); everything else is a two-tone checker.
+      const col = f.kind === 'bullpen' ? (y & 1 ? a : b) : (x + y) & 1 ? a : b;
       dia(g, p.x, p.y, col, col);
     }
     const walls: [number, number][] = [];

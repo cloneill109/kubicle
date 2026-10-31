@@ -1,5 +1,5 @@
 // Live office client against a real server: hook events in, office state out, approvals answered
-// from the inspector, wing menu, style switching, narrow viewport, and the disconnected overlay.
+// from the inspector, rooms and door signs, style switching, narrow viewport, and the disconnected overlay.
 // Screenshots land in test-results/live-*.png for a human look. Run with `npm run test:e2e`.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -40,8 +40,8 @@ type Office = {
   sim: { agents(): { view: { id: string; name: string; status: string }; anim: string; x: number; y: number }[] };
   center(id: string): { x: number; y: number };
   style(): string;
-  signs(): { roomId: string; x: number; y: number; w: number; h: number }[];
-  world(): { rooms: { id: string; name: string; kind: string; x0: number; x1: number; y0: number; y1: number }[] };
+  signs(): { roomId: string; x: number; y: number; w: number; h: number; text: string }[];
+  world(): { rooms: { id: string; name: string; kind: string; x0: number; x1: number; y0: number; y1: number }[]; grid: { room: string | null }[][] };
 };
 declare global { interface Window { __office: Office } }
 
@@ -82,7 +82,7 @@ async function settle(page: Page): Promise<void> {
   await page.waitForFunction(() => window.__office.sim.agents().every((a) => a.anim === 'seated' || a.anim === 'standing'), null, { timeout: 20000 });
 }
 
-test('live office: state, approvals, wings, styles, narrow view, disconnect', async () => {
+test('live office: state, approvals, rooms, styles, narrow view, disconnect', async () => {
   const home = join(tmp, 'home');
   srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, { openBrowser: false });
 
@@ -112,16 +112,22 @@ test('live office: state, approvals, wings, styles, narrow view, disconnect', as
   await page.waitForFunction(() => /2 sessions/.test(document.getElementById('counts')!.innerText) && /1 subagents/.test(document.getElementById('counts')!.innerText), null, { timeout: 5000 });
   assert.match(await counts(page), /0 need you/);
   assert.ok(await page.locator('#emptyFloor').isHidden(), 'hint gone once sessions appear');
-  await page.waitForFunction(() => window.__office.world().rooms.filter((r) => r.id.endsWith('/alpha') || r.id.endsWith('/beta')).length === 2, null, { timeout: 5000 });
+  // Interim single floor (default layout): 7 division rooms plus the Bullpen.
+  assert.deepEqual(await page.evaluate(() => window.__office.world().rooms.map((r) => `${r.id}:${r.kind}`)),
+    ['qa:division', 'security:division', 'uxui:division', 'frontend:division', 'bullpen:bullpen', 'backend:division', 'animation:division', 'imagegen:division']);
   await page.waitForFunction(() => document.querySelectorAll('#feed li').length >= 4, null, { timeout: 5000 });
   assert.match(await page.locator('#feed').innerText(), /SubagentStart/);
   await settle(page);
-  const subWing = await page.evaluate((id) => {
-    const a = window.__office.sim.agents().find((x) => x.view.id === id)!;
-    const r = window.__office.world().rooms.find((q) => q.id.endsWith('/alpha'))!;
-    return a.x >= r.x0 && a.x <= r.x1 + 1 && a.y >= r.y0 && a.y <= r.y1 + 1;
-  }, `${S1}:${SUB}`);
-  assert.ok(subWing, 'subagent sits in its parent\'s wing');
+  // No room hints: everyone lands in the Bullpen; the subagent stands next to its parent there.
+  const where = await page.evaluate(([sub, parent]) => {
+    const o = window.__office, at = (id: string) => { const a = o.sim.agents().find((x) => x.view.id === id)!; return { room: o.world().grid[Math.floor(a.y)][Math.floor(a.x)].room, x: a.x, y: a.y }; };
+    return { sub: at(sub), parent: at(parent) };
+  }, [`${S1}:${SUB}`, S1]);
+  assert.equal(where.parent.room, 'bullpen', 'session without hints sits in the Bullpen');
+  assert.equal(where.sub.room, 'bullpen', 'subagent in its parent\'s room');
+  assert.ok(Math.hypot(where.sub.x - where.parent.x, where.sub.y - where.parent.y) < 2.5, `subagent next to its parent ${JSON.stringify(where)}`);
+  await page.waitForFunction(() => window.__office.signs().find((s) => s.roomId === 'bullpen')?.text === 'Bullpen · 3', null, { timeout: 3000 });
+  assert.equal(await page.evaluate(() => window.__office.signs().find((s) => s.roomId === 'qa')?.text), 'QA · 0');
 
   // ---- turn on approval routing for S2 from the inspector ----
   await clickAgent(page, S2);
@@ -227,28 +233,16 @@ test('live office: state, approvals, wings, styles, narrow view, disconnect', as
   await page.setViewportSize({ width: 1400, height: 1000 });
   await page.waitForTimeout(300);
 
-  // ---- wing menu: rename and move via the door sign ----
-  const signFor = async (suffix: string) => page.evaluate((s) => {
-    const r = window.__office.signs().find((x) => x.roomId.endsWith(s))!;
+  // ---- door signs: one per room, not clickable in 1b ----
+  assert.equal(await page.evaluate(() => window.__office.signs().length), 8);
+  const p = await page.evaluate(() => {
+    const r = window.__office.signs().find((x) => x.roomId === 'bullpen')!;
     const c = document.getElementById('map')!.getBoundingClientRect();
     return { x: c.left + r.x + r.w / 2, y: c.top + r.y + r.h / 2 };
-  }, suffix);
-  let p = await signFor('/alpha');
+  });
   await page.mouse.click(p.x, p.y);
-  await page.locator('#wingMenu').waitFor({ state: 'visible', timeout: 3000 });
-  await page.locator('#wingMenu [data-act="rename"]').click();
-  await page.locator('#wingName').fill('alpha-renamed');
-  await page.locator('#wingName').press('Enter');
-  await page.waitForFunction(() => window.__office.world().rooms.some((r) => r.name === 'alpha-renamed'), null, { timeout: 3000 });
-  assert.ok(await page.evaluate(() => window.__office.world().rooms.filter((r) => r.kind === 'wing')[0].id.endsWith('/alpha')), 'alpha is the first wing');
-  p = await signFor('/alpha');
-  await page.mouse.click(p.x, p.y);
-  await page.locator('#wingMenu [data-act="right"]').click();
-  await page.waitForFunction(() => {
-    const rooms = window.__office.world().rooms.filter((r) => r.kind === 'wing');
-    return rooms[0].id.endsWith('/beta');
-  }, null, { timeout: 3000 });
-  await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+  assert.ok(await page.locator('#wingMenu').isHidden(), 'a door sign opens no menu');
   await settle(page);
 
   // ---- every style renders without errors; screenshot each ----

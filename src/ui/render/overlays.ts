@@ -5,7 +5,10 @@ import type { Renderer, SimAgent, StyleId } from './types.ts';
 import { ROLE, LOST_BODY, roleColor, isTopRoom, rr, type Ctx } from './sprite.ts';
 import { INK, BLUEPRINT_BG } from './blueprint.ts';
 
-export interface SignRect { roomId: string; x: number; y: number; w: number; h: number }
+/** A door sign (CSS px). `text` is what it says, e.g. "QA · 2" or "Ops · 0 / Unknown division". */
+export interface SignRect { roomId: string; x: number; y: number; w: number; h: number; text: string }
+
+export const UNKNOWN_DIVISION = 'Unknown division';
 
 const isPix = (s: StyleId) => s === 'pixel' || s === 'iso';
 const signFont = (s: StyleId) => isPix(s) ? '600 12px "Pixelify Sans", monospace' : s === 'blueprint' ? '500 10.5px "IBM Plex Mono", monospace' : '600 11px "IBM Plex Sans", sans-serif';
@@ -22,16 +25,20 @@ const overlaps = (a: SignRect, b: SignRect) => a.x < b.x + b.w && b.x < a.x + a.
 
 /**
  * Draws all overlays. Returns the door-sign rectangles (CSS px) so the caller can hit-test them.
- * `cw` is the canvas CSS width, used to keep bubbles and tags on screen.
+ * `roomOf` gives an agent's resolved room id (the sign count); `cw` is the canvas CSS width,
+ * used to keep bubbles and tags on screen.
  */
-export function drawOverlays(ctx: CanvasRenderingContext2D, R: Renderer, style: StyleId, world: World, agents: SimAgent[], selected: string | undefined, hovered: string | undefined, now: number, cw: number): SignRect[] {
+export function drawOverlays(ctx: CanvasRenderingContext2D, R: Renderer, style: StyleId, world: World, agents: SimAgent[], roomOf: (a: SimAgent) => string, selected: string | undefined, hovered: string | undefined, now: number, cw: number): SignRect[] {
   const u = R.unit(), pix = isPix(style);
   ctx.save();
   // ---- door signs ----
   ctx.font = signFont(style);
   ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  const counts = new Map<string, number>();
+  for (const a of agents) if (a.anim !== 'leaving') { const id = roomOf(a); counts.set(id, (counts.get(id) ?? 0) + 1); }
   const signs: SignRect[] = [];
-  const texts: { label: string; extra: string }[] = [];
+  const texts: { label: string; extra: string; sub: string; color?: string }[] = [];
+  const LINE = 14, PAD = 7;
   for (const r of world.rooms) {
     if (!r.doors.length) continue;
     const [dx, dy] = r.doors[0];
@@ -40,25 +47,32 @@ export function drawOverlays(ctx: CanvasRenderingContext2D, R: Renderer, style: 
     const front = style === 'iso' && !isTopRoom(r);
     const topRoom = isTopRoom(r) || front;
     const p = front ? R.pt(dx + 1, r.y1 + 1.6) : R.pt(dx + 1, topRoom ? dy + 1.15 : dy - 0.15);
-    const extra = r.kind === 'wing' ? ` · ${agents.filter((a) => a.view.projectId === r.id).length}` : '';
-    const maxW = Math.max(60, (r.x1 - r.x0 - 1) * u) - 14 - ctx.measureText(extra).width;
+    const extra = ` · ${counts.get(r.id) ?? 0}`;
+    const sub = r.kind === 'division' && !r.color ? (style === 'blueprint' ? UNKNOWN_DIVISION.toUpperCase() : UNKNOWN_DIVISION) : '';
+    // A two-line sign is at least as wide as "Unknown division", so the name may use that width too.
+    const maxW = Math.max(60, (r.x1 - r.x0 - 1) * u - PAD * 2, sub ? ctx.measureText(sub).width : 0) - ctx.measureText(extra).width;
     const label = ellipsize(ctx, style === 'blueprint' ? r.name.toUpperCase() : r.name, maxW);
-    const w = ctx.measureText(label + extra).width + 14, h = 18;
+    const w = Math.max(ctx.measureText(label + extra).width, sub ? ctx.measureText(sub).width : 0) + PAD * 2, h = sub ? 18 + LINE : 18;
     const x = Math.max(4, Math.min(Math.round(p.x - w / 2), cw - w - 4));
-    const s: SignRect = { roomId: r.id, x, y: Math.round(topRoom ? p.y : p.y - h), w, h };
+    const s: SignRect = { roomId: r.id, x, y: Math.round(topRoom ? p.y : p.y - h), w, h, text: label + extra + (sub ? ` / ${sub}` : '') };
     // Signs of facing rooms can collide (iso shears columns together): push the later one away from the hall.
     for (let i = 0; i < 20 && signs.some((o) => overlaps(o, s)); i++) s.y += topRoom ? -3 : 3;
-    signs.push(s); texts.push({ label, extra });
+    signs.push(s); texts.push({ label, extra, sub, color: r.kind === 'bullpen' ? '#e0a96d' : r.color });
   }
   signs.forEach((s, i) => {
-    const { x, y, w, h } = s, { label, extra } = texts[i];
-    if (pix) { ctx.fillStyle = '#1d1b26'; ctx.fillRect(x, y, w, h); ctx.fillStyle = '#f3e9c6'; ctx.fillRect(x, y, w, 2); }
+    const { x, y, w, h } = s, { label, extra, sub, color } = texts[i];
+    if (pix) { ctx.fillStyle = '#1d1b26'; ctx.fillRect(x, y, w, h); ctx.fillStyle = color ?? '#8a8794'; ctx.fillRect(x, y, w, 2); }
     else if (style === 'blueprint') { ctx.fillStyle = BLUEPRINT_BG; ctx.fillRect(x, y, w, h); ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.strokeRect(x + .5, y + .5, w - 1, h - 1); }
-    else { ctx.fillStyle = '#ffffff'; rr(ctx, x, y, w, h, 9); ctx.fill(); }
+    else { ctx.fillStyle = '#ffffff'; rr(ctx, x, y, w, h, 9); ctx.fill(); if (color) { ctx.fillStyle = color; ctx.fillRect(x + 9, y + h - 3, w - 18, 2); } }
+    const ly = y + 9 + 1;
     ctx.fillStyle = pix ? '#f3e9c6' : style === 'blueprint' ? INK : '#2b2f3a';
-    ctx.fillText(label, x + 7, y + h / 2 + 1);
+    ctx.fillText(label, x + PAD, ly);
     ctx.fillStyle = pix ? '#a9a39a' : style === 'blueprint' ? 'rgba(233,242,255,.6)' : '#7a7f8c';
-    ctx.fillText(extra, x + 7 + ctx.measureText(label).width, y + h / 2 + 1);
+    ctx.fillText(extra, x + PAD + ctx.measureText(label).width, ly);
+    if (sub) {
+      ctx.fillStyle = pix ? '#e8a0a0' : style === 'blueprint' ? 'rgba(233,242,255,.75)' : '#a14a4a';
+      ctx.fillText(sub, x + PAD, ly + LINE);
+    }
   });
 
   // ---- per-agent marks ----
