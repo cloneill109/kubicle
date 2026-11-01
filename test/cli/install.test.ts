@@ -282,3 +282,21 @@ test('new entries: PreToolUse ends with `2 pre`, and no entry mentions KUBICLE_P
   assert.equal(old.hooks.PreToolUse.length, 1);
   assert.match(old.hooks.PreToolUse[0].hooks[0].command, / 2 pre$/);
 });
+
+test('UserPromptSubmit runs `10 prompt` with timeout 12; the other events are unchanged', () => {
+  const out = planInstall({}, SHIM, ENV);
+  const ups = out.hooks.UserPromptSubmit;
+  assert.equal(ups.length, 1);
+  assert.deepEqual(ups[0], { hooks: [{ type: 'command', command: `${PRE} '${SHIM}' 10 prompt`, timeout: 12 }] });
+  assert.match(ups[0].hooks[0].command, / 10 prompt$/);
+  for (const e of HOOK_EVENTS) {
+    if (e === 'UserPromptSubmit') continue;
+    const h = out.hooks[e][0].hooks[0];
+    const want = e === 'PermissionRequest' ? ['140 perm', 150] : e === 'PreToolUse' ? ['2 pre', 5] : ['1', 5];
+    assert.equal(h.command, `${PRE} '${SHIM}' ${want[0]}`, e);
+    assert.equal(h.timeout, want[1], e);
+  }
+  // an older `1` line for UserPromptSubmit is replaced, not duplicated
+  const old = planInstall({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: `${PRE} '${SHIM}' 1`, timeout: 5 }] }] } }, SHIM, ENV);
+  assert.deepEqual(old.hooks.UserPromptSubmit, ups);
+});

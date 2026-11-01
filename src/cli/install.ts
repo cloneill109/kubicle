@@ -60,10 +60,11 @@ export function planInstall(settings: any, shimPath: string, env: HookEnv): any 
   const hooks: Record<string, any[]> = next.hooks ?? {};
   const prefix = `KUBICLE_HOME=${quote(env.home)}`;
   for (const ev of HOOK_EVENTS) {
-    const perm = ev === 'PermissionRequest';
-    const args = perm ? '140 perm' : ev === 'PreToolUse' ? '2 pre' : '1'; // pre: the guard may answer "ask"
+    // pre: the guard may answer "ask"; prompt: Bubbles intake may add a briefing (waits up to 8 s).
+    const [args, timeout] = ev === 'PermissionRequest' ? ['140 perm', 150] : ev === 'PreToolUse' ? ['2 pre', 5]
+      : ev === 'UserPromptSubmit' ? ['10 prompt', 12] : ['1', 5];
     const group: any = {
-      hooks: [{ type: 'command', command: `${prefix} ${quote(shimPath)} ${args}`, timeout: perm ? 150 : 5 }],
+      hooks: [{ type: 'command', command: `${prefix} ${quote(shimPath)} ${args}`, timeout }],
     };
     if (TOOL_EVENTS.has(ev)) group.matcher = '*';
     hooks[ev] = [...stripOurs(hooks[ev] ?? []), group];

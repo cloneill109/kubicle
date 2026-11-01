@@ -22,8 +22,8 @@ const envelope = (result, extra = {}) => JSON.stringify({
   type: 'result', subtype: 'success', is_error: false, duration_ms: 5, num_turns: 1, result,
   session_id: 'fake-session', total_cost_usd: 0, usage: { input_tokens: 100, output_tokens: 20 }, ...extra,
 });
-const intake = (room, confidence) => JSON.stringify({
-  room, confidence, briefing: 'Focus on src/ui.', subagents: [{ specialty: 'backend', job: 'check the API' }], questions_for_owner: [],
+const intake = (room, confidence, questions = []) => JSON.stringify({
+  room, confidence, briefing: 'Focus on src/ui.', subagents: [{ specialty: 'backend', job: 'check the API' }], questions_for_owner: questions,
 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -49,6 +49,8 @@ async function main() {
     case 'intake-frontend': return out(envelope(intake('frontend', 0.9)));
     case 'intake-low': return out(envelope(intake('frontend', 0.4)));
     case 'intake-badroom': return out(envelope(intake('nope', 0.9)));
+    case 'intake-asks': return out(envelope(intake('frontend', 0.9, ['Which "nav" \\ layout?', 'Second?'])));
+    case 'intake-slow': await sleep(Number(process.env.FAKE_CLAUDE_DELAY ?? 300)); return out(envelope(intake('frontend', 0.9, ['Which "nav" \\ layout?'])));
     case 'not-json':
     case 'garbage': return out(envelope('I cannot decide {not: json} at all'));
     case 'slow': await sleep(Number(process.env.FAKE_CLAUDE_DELAY ?? 300)); return out(envelope(verdict('approve', 0.95)));

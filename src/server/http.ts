@@ -7,6 +7,7 @@ import type { BuildingService } from './building/service.ts';
 import { BuildingFileError, RevisionConflict } from './building/files.ts';
 import type { AgentView, BubblesState, FeedItem, ServerMsg } from '../shared/protocol.ts';
 import type { BubblesLog, LogKind, LogQuery } from './bubbles/log.ts';
+import { INTAKE_IDLE_MS, intakeResponse, type IntakeOutcome, type IntakeRequest } from './bubbles/intake.ts';
 import { PolicyError, type PendingChange, type Policy } from './bubbles/policy.ts';
 import { GUARD_ASK, type PermissionFlow } from './permission-flow.ts';
 import { hookResponse, type Approvals } from './approvals.ts';
@@ -63,12 +64,19 @@ export interface HttpDeps {
     ownerToggledOn(): void;
     /** Policy changed: broadcast the new `bubbles` message. */
     changed(): void;
+    /** First-prompt intake (Bubbles.intake): never throws for a model failure; does its own timeout and logging. */
+    intake(r: IntakeRequest): Promise<IntakeOutcome>;
   };
   pushFeed(item: FeedItem): void;
   /** A hook arrived with a missing or wrong ingest token (I4). */
   onBadToken?(): void;
-  /** A PreToolUse arrived from a hook line that is not `kubicle-hook <max> pre`: the guard never ran for it. */
-  onStaleHook?(): void;
+  /**
+   * A PreToolUse arrived from a hook line that is not `kubicle-hook <max> pre` (the guard never ran for it),
+   * or a UserPromptSubmit from one that is not `kubicle-hook <max> prompt` (no intake briefing can reach it).
+   */
+  onStaleHook?(event: 'PreToolUse' | 'UserPromptSubmit'): void;
+  /** Clock for hook event timestamps and the intake gate (tests). Default Date.now. */
+  now?(): number;
   /** Repo root: serves `src/ui/index.html`, `src/ui/styles.css`, `dist/ui/*`. */
   rootDir: string;
   /** Actual bound port (for the CSP connect-src). */
@@ -138,7 +146,7 @@ function hint(req: IncomingMessage, name: string): string | undefined {
   return typeof v === 'string' && ID_RE.test(v) ? v : undefined;
 }
 
-const LOG_KINDS = new Set<LogKind>(['triage', 'escalation', 'owner-answer', 'guard', 'grant', 'instruction', 'toggle', 'error', 'usage']);
+const LOG_KINDS = new Set<LogKind>(['triage', 'escalation', 'owner-answer', 'guard', 'grant', 'instruction', 'toggle', 'error', 'usage', 'intake']);
 const GREP_MAX = 200;
 
 /** `?project&session&kind&since&grep&limit` for GET /api/log and /cli/log. */
@@ -169,6 +177,26 @@ function logQuery(url: URL): LogQuery {
   return q;
 }
 
+/** The session's prompt history and liveness as they were BEFORE this event was ingested. */
+export interface PromptHistory { count: number; lastPromptAt?: number; lastSeen?: number }
+
+/**
+ * Whether a UserPromptSubmit gets a Bubbles intake: a plain session (no subagent, no launch room/division
+ * hint, on this event or kept from an earlier one), a non-empty prompt, a project floor, and either the
+ * session's first prompt or one after it sat idle for INTAKE_IDLE_MS (both its last prompt and its last
+ * event of any kind, so a subagent hand-back mid-task never qualifies).
+ */
+export function shouldIntake(e: AgentEvent, prompt: unknown, before: PromptHistory, view: AgentView | undefined, hasFloor: boolean, now: number): boolean {
+  if (e.event !== 'UserPromptSubmit' || e.agentId !== undefined) return false;
+  if (e.room || e.division || view?.room || view?.division) return false;
+  if (typeof prompt !== 'string' || prompt.trim() === '') return false;
+  if (!view || view.kind !== 'session' || !view.projectId || !hasFloor) return false;
+  if (before.count === 0) return true;
+  // No view before this event (expired after a day idle, so the registry dropped it): idle too.
+  return before.lastPromptAt !== undefined && now - before.lastPromptAt >= INTAKE_IDLE_MS
+    && (before.lastSeen === undefined || now - before.lastSeen >= INTAKE_IDLE_MS);
+}
+
 export function agentKey(e: AgentEvent): string {
   return e.agentId !== undefined ? `${e.sessionId}:${e.agentId}` : e.sessionId;
 }
@@ -183,6 +211,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
   const distDir = resolve(d.rootDir, 'dist', 'ui');
   const pageCsp = csp(d.port);
   const debug = process.env.KUBICLE_DEBUG === '1'; // smoke-test aid; off by default
+  const now = d.now ?? Date.now;
   // A new project appears during ingest (inside registry.apply): broadcast the list before the
   // agent update that references it, so clients already have its floor.
   d.projects.onCreate = () => {
@@ -214,7 +243,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
   async function hooks(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!checkIngest(req, d.ingestToken)) { d.onBadToken?.(); return send(res, 401, 'unauthorized'); }
     const raw = await readJson(req);
-    const e = normalizeHook(raw, Date.now(), d.cfg.payloadCap);
+    const e = normalizeHook(raw, now(), d.cfg.payloadCap);
     if (!e) return send(res, 400, 'not a hook event');
     const division = hint(req, 'x-kubicle-division'), room = hint(req, 'x-kubicle-room');
     if (division) e.division = division;
@@ -228,7 +257,11 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       try { ingest(e); } catch (err) { d.log(`ingest failed: ${String(err)}`); }
       return;
     }
-    if (e.event === 'PreToolUse') d.onStaleHook?.(); // an older install's PreToolUse line: no guard
+    if (e.event === 'PreToolUse') d.onStaleHook?.('PreToolUse'); // an older install's PreToolUse line: no guard
+    if (e.event === 'UserPromptSubmit') {
+      if (req.headers['x-kubicle-hook-kind'] === 'prompt') return promptHook(res, e, isObj(raw) ? raw.prompt : undefined);
+      d.onStaleHook?.('UserPromptSubmit'); // an older install's `kubicle-hook 1` line: it can never print a briefing
+    }
     if (e.event !== 'PermissionRequest') {
       send(res, 200);
       try { ingest(e); } catch (err) { d.log(`ingest failed: ${String(err)}`); }
@@ -245,21 +278,84 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     // While Bubbles triages and the office waits, send a space every HEARTBEAT_MS (I2). The shim's curl gives up after
     // ~3 s without bytes, so a frozen server never holds a session for the full hook timeout.
     // Immediate answers (not opted in, no UI) finish before the first beat and stay byte-exact.
-    const beat = setInterval(() => {
-      if (res.destroyed || res.writableEnded) return;
-      if (!res.headersSent) res.writeHead(200, { ...BASE_HEADERS, 'content-type': 'application/json' });
-      res.write(' ');
-    }, HEARTBEAT_MS);
+    const stop = heartbeat(res);
     try {
       ingest(e);
       // Bubbles triage, then the office (if a UI is connected), else the terminal. A caller that disconnects
       // during triage still gets its triage finished and logged, but no office wait starts.
       decision = await d.flow.decide(e, { canDeliver, gone: () => gone || res.destroyed, input: rawInput });
     } catch (err) { d.log(`approval failed: ${String(err)}`); }
-    finally { clearInterval(beat); }
-    const body = hookResponse(decision);
+    finally { stop(); }
+    finish(res, hookResponse(decision));
+  }
+
+  /** Writes a space every HEARTBEAT_MS until stopped, so the shim's curl (--speed-time 3) keeps waiting. */
+  function heartbeat(res: ServerResponse): () => void {
+    const beat = setInterval(() => {
+      if (res.destroyed || res.writableEnded) return;
+      if (!res.headersSent) res.writeHead(200, { ...BASE_HEADERS, 'content-type': 'application/json' });
+      res.write(' ');
+    }, HEARTBEAT_MS);
+    return () => clearInterval(beat);
+  }
+
+  /** Ends a response that may already carry heartbeat spaces (headers sent) with `body`. */
+  function finish(res: ServerResponse, body: string): void {
     if (res.headersSent) { if (!res.destroyed && !res.writableEnded) res.end(body); return; }
-    send(res, 200, body, body ? { 'content-type': 'application/json' } : {});
+    send(res, 200, body, body ? JSON_HDR : {});
+  }
+
+  /**
+   * UserPromptSubmit from `kubicle-hook <max> prompt`. The gate reads the prompt history from before this event,
+   * then the event is ingested as always, then (gate open) Bubbles intake runs while heartbeats keep the shim
+   * waiting. Briefed: assign the room, tell the office, answer with the briefing. Anything else: empty 200.
+   */
+  async function promptHook(res: ServerResponse, e: AgentEvent, prompt: unknown): Promise<void> {
+    let before: PromptHistory | null = null;
+    try {
+      before = { count: d.registry.promptCount(e.sessionId), lastPromptAt: d.registry.lastPromptAt(e.sessionId), lastSeen: d.registry.get(e.sessionId)?.lastSeen };
+    } catch (err) { d.log(`intake gate failed: ${String(err)}`); }
+    try { ingest(e); } catch (err) { d.log(`ingest failed: ${String(err)}`); }
+    let request: IntakeRequest | null = null;
+    let roomName = (id: string) => id;
+    try {
+      const view = d.registry.get(e.sessionId);
+      const floor = view?.projectId ? d.building.snapshot().floors[view.projectId] : undefined;
+      if (before && view && floor && shouldIntake(e, prompt, before, view, true, e.ts)) {
+        roomName = (id) => floor.rooms.find((r) => r.id === id)?.name ?? (id === 'bullpen' ? 'Bullpen' : id);
+        request = {
+          prompt: prompt as string, projectId: view.projectId,
+          projectName: d.projects.list().find((p) => p.id === view.projectId)?.name ?? view.projectId,
+          rooms: floor.rooms.map((r) => ({ id: r.id, name: r.name, ...(r.division ? { division: r.division } : {}) })),
+          sessionId: e.sessionId,
+          ...(e.cwd ?? view.cwd ? { cwd: (e.cwd ?? view.cwd)! } : {}),
+          ...(e.transcriptPath ? { transcriptPath: e.transcriptPath } : {}),
+        };
+      }
+    } catch (err) { d.log(`intake gate failed: ${String(err)}`); }
+    if (!request) return send(res, 200);
+
+    const stop = heartbeat(res);
+    let body = '';
+    try {
+      const out = await d.bubbles.intake(request);
+      if (out.ok) {
+        body = intakeResponse(out.context);
+        try {
+          const changed = d.registry.assignByBubbles(e.sessionId, out.room, { subagents: out.verdict.subagents, questions: out.verdict.questions_for_owner });
+          broadcastAgents(changed);
+          const name = d.registry.get(e.sessionId)?.name;
+          if (name) {
+            const q = out.verdict.questions_for_owner[0];
+            const item: FeedItem = { ts: now(), event: 'Intake', agentName: name, detail: `Bubbles placed ${name} in ${roomName(out.room)}${q ? `; asks: ${q}` : ''}` };
+            d.pushFeed(item);
+            broadcast({ t: 'feed', item });
+          }
+        } catch (err) { d.log(`intake placement failed: ${String(err)}`); }
+      }
+    } catch (err) { d.log(`intake failed: ${String(err)}`); body = ''; }
+    finally { stop(); }
+    finish(res, body);
   }
 
   function guard(req: IncomingMessage, res: ServerResponse): boolean {

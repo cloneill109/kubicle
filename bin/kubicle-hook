@@ -1,11 +1,12 @@
 #!/bin/bash
 # Kubicle hook shim. Fail-open: always exits 0.
-#   kubicle-hook <max-seconds> [perm|pre]
+#   kubicle-hook <max-seconds> [perm|pre|prompt]
 # Talks to the office over its private Unix socket (<home>/run/hook.sock, dir mode 0700); no TCP.
 # Prints NOTHING unless the kind is `perm` (PermissionRequest) and the trimmed 2xx body is exactly
 # one of the two office decisions below, or the kind is `pre` (PreToolUse) and it is exactly the
-# guard's "ask". Anything else (an impostor, a stale server) can neither inject context nor
-# approve tool calls.
+# guard's "ask", or the kind is `prompt` (UserPromptSubmit) and it is exactly one Bubbles briefing
+# (one line, BRIEF_HEAD + a JSON string body + '"}}'). Anything else (an impostor, a stale server)
+# can neither inject arbitrary output nor approve tool calls.
 set -u
 max="${1:-1}"
 kind="${2:-}"
@@ -16,6 +17,9 @@ ALLOW='{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"b
 DENY='{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from Kubicle"}}}'
 # Must equal GUARD_ASK / guardResponse() in src/server/permission-flow.ts (unit-tested).
 GUARD_ASK='{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Kubicle: pushes and merges to protected branches need the owner"}}'
+# Must equal the start of intakeResponse(BRIEFING_PREFIX + ...) in src/server/bubbles/intake.ts (unit-tested).
+BRIEF_HEAD='{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"[Kubicle/Bubbles briefing]'
+BRIEF_TAIL='"}}'
 
 [ -n "${KUBICLE_AGENT:-}" ] && exit 0
 
@@ -32,6 +36,7 @@ sock="$home/run/hook.sock"
 hkind="event"
 [ "$kind" = "perm" ] && hkind="perm"
 [ "$kind" = "pre" ] && hkind="pre"
+[ "$kind" = "prompt" ] && hkind="prompt"
 
 # Optional placement hints; sent only when they look like a building id (never raw env text).
 extra=()
@@ -63,8 +68,25 @@ case "$code" in 2??) ;; *) exit 0 ;; esac
 # Trim leading/trailing whitespace (heartbeat spaces), bash 3.2-safe.
 body="${body#"${body%%[![:space:]]*}"}"
 body="${body%"${body##*[![:space:]]}"}"
+# True only for exactly one briefing: one line, the fixed head, then the rest of ONE JSON string (no raw
+# quote once escapes are removed, so nothing can add keys after additionalContext), then the fixed tail.
+is_briefing() {
+  local b="$1" mid
+  case "$b" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  [ "${#b}" -ge $(( ${#BRIEF_HEAD} + ${#BRIEF_TAIL} )) ] || return 1
+  [ "${b:0:${#BRIEF_HEAD}}" = "$BRIEF_HEAD" ] || return 1
+  [ "${b:$(( ${#b} - ${#BRIEF_TAIL} ))}" = "$BRIEF_TAIL" ] || return 1
+  mid="${b:${#BRIEF_HEAD}:$(( ${#b} - ${#BRIEF_HEAD} - ${#BRIEF_TAIL} ))}"
+  mid="${mid//\\\\/}"  # escaped backslashes first (left to right, as JSON reads them)
+  mid="${mid//\\\"/}"  # then escaped quotes
+  case "$mid" in *'"'*|*'\') return 1 ;; esac
+  return 0
+}
+
 if [ "$hkind" = "perm" ]; then
   if [ "$body" = "$ALLOW" ] || [ "$body" = "$DENY" ]; then printf '%s' "$body"; fi
+elif [ "$hkind" = "prompt" ]; then
+  if is_briefing "$body"; then printf '%s' "$body"; fi
 elif [ "$body" = "$GUARD_ASK" ]; then
   printf '%s' "$body"
 fi

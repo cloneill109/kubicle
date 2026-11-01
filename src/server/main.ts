@@ -28,6 +28,7 @@ const KEEP_EVENTS_MS = 7 * 86_400_000;
 const FEED_MAX = 200;
 export const BAD_TOKEN_BANNER = 'Hooks are sending the wrong token. Re-run npm run install-hooks.';
 export const STALE_HOOKS_BANNER = 'Hooks are out of date: the protected-branch guard is off. Re-run npm run install-hooks.';
+export const STALE_PROMPT_HOOK_BANNER = 'Hooks are out of date: Bubbles intake briefings are off. Re-run npm run install-hooks.';
 // sockaddr_un.sun_path holds 104 bytes on macOS (108 on Linux), terminator included.
 const SOCKET_PATH_MAX = 103;
 const PROBE_MS = 300;
@@ -108,6 +109,8 @@ export interface StartOpts {
   log?: (s: string) => void;
   /** Test hooks: the `claude` binary (default KUBICLE_CLAUDE_BIN or `claude`), extra child env, triage timeouts. */
   bubbles?: { bin?: string; env?: Record<string, string | undefined>; timeouts?: Partial<Timeouts> };
+  /** Test hook: the clock for hook event timestamps and the intake idle gate. */
+  now?: () => number;
 }
 
 export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<RunningServer> {
@@ -162,9 +165,11 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   let badTokenAt = -Infinity;
   let badTokenCount = 0;
   let staleHookAt = -Infinity; // last PreToolUse from a hook line without the `pre` kind (guard not running)
-  let staleHookLogged = false;
+  let stalePromptAt = -Infinity; // last UserPromptSubmit from a hook line without the `prompt` kind (no briefing possible)
+  const staleLogged = new Set<string>();
   const setBanner = (now: number) => {
-    const hooks = now - badTokenAt < cfg.bannerMs ? BAD_TOKEN_BANNER : now - staleHookAt < cfg.bannerMs ? STALE_HOOKS_BANNER : staleBanner;
+    const hooks = now - badTokenAt < cfg.bannerMs ? BAD_TOKEN_BANNER : now - staleHookAt < cfg.bannerMs ? STALE_HOOKS_BANNER
+      : now - stalePromptAt < cfg.bannerMs ? STALE_PROMPT_HOOK_BANNER : staleBanner;
     const next = composeBanner(hooks, building.snapshot().warnings,
       bubblesBannerItems(bubbles.status(), bubblesConfigWarning, bubblesLog.warning()));
     if (next !== banner) { banner = next; hub.broadcast({ t: 'banner', text: banner }); }
@@ -218,17 +223,24 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   });
   const handler = createHandler({
     cfg, ingestToken, auth, store, writer, projects, registry, building, approvals, hub, pushFeed, rootDir: ROOT, port, log, flow,
-    bubbles: { policy, log: bubblesLog, state: bubblesState, ownerToggledOn: () => bubbles.ownerToggledOn(), changed: bubblesChanged },
+    bubbles: { policy, log: bubblesLog, state: bubblesState, ownerToggledOn: () => bubbles.ownerToggledOn(), changed: bubblesChanged, intake: (r) => bubbles.intake(r) },
+    ...(opts.now ? { now: opts.now } : {}),
     onBadToken: () => {
       badTokenCount++;
       if (badTokenCount === 1 || badTokenCount % 100 === 0) log(`hooks: ${badTokenCount} request(s) with a wrong ingest token`);
       badTokenAt = Date.now();
       setBanner(badTokenAt);
     },
-    onStaleHook: () => {
-      if (!staleHookLogged) { staleHookLogged = true; log('hooks: a PreToolUse came from an out-of-date hook line; the protected-branch guard is off until npm run install-hooks'); }
-      staleHookAt = Date.now();
-      setBanner(staleHookAt);
+    onStaleHook: (event) => {
+      if (!staleLogged.has(event)) {
+        staleLogged.add(event);
+        log(event === 'PreToolUse'
+          ? 'hooks: a PreToolUse came from an out-of-date hook line; the protected-branch guard is off until npm run install-hooks'
+          : 'hooks: a UserPromptSubmit came from an out-of-date hook line; Bubbles intake briefings are off until npm run install-hooks');
+      }
+      const t = Date.now();
+      if (event === 'PreToolUse') staleHookAt = t; else stalePromptAt = t;
+      setBanner(t);
     },
   });
   server.on('request', handler);

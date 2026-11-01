@@ -11,6 +11,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hookResponse } from '../../src/server/approvals.ts';
 import { GUARD_ASK, guardResponse } from '../../src/server/permission-flow.ts';
+import { BRIEFING_PREFIX, intakeResponse } from '../../src/server/bubbles/intake.ts';
 
 // Bubbles triage runs on every PermissionRequest now: never the real claude here. The fake escalates by
 // default, so these office-approval tests still reach the owner.
@@ -355,4 +356,99 @@ test('KUBICLE_PORT is ignored: a TCP listener on it is never contacted', async (
     assert.equal(hit, false);
     assert.equal(s.hits.length, 1);
   } finally { s.close(); tcp.close(); }
+});
+
+// ---- kind `prompt`: only an exact intake briefing response is ever printed ----
+const promptFixture = readFileSync(join(root, 'test', 'fixtures', 'hooks', 'UserPromptSubmit.json'), 'utf8');
+
+test('prompt: an exact intake response (with heartbeat spaces) is printed trimmed; the kind header is sent', async () => {
+  const home = homeWithToken();
+  const bodies = [
+    intakeResponse('[Kubicle/Bubbles briefing] Room: X. y'),
+    // JSON escapes inside the context are fine: quotes, backslashes, newlines (escaped), unicode
+    intakeResponse(`${BRIEFING_PREFIX} Room: Front end. Say "hi" to C:\\tmp\\ é ✓\nSpawn these subagents:\n- [backend] check \\"x\\"`),
+  ];
+  for (const body of bodies) {
+    const s = await startServer(home, () => ({ status: 200, body: `   ${body}\n` }));
+    try {
+      const r = await runShim({ KUBICLE_HOME: home }, ['10', 'prompt'], promptFixture);
+      assert.equal(r.code, 0);
+      assert.equal(r.stdout, body);
+      assert.equal(s.hits[0]!.headers['x-kubicle-hook-kind'], 'prompt');
+    } finally { s.close(); }
+  }
+});
+
+test('prompt: any other body prints nothing (wrong prefix, two lines, GUARD_ASK, extra keys, non-2xx)', async () => {
+  const home = homeWithToken();
+  const good = intakeResponse(`${BRIEFING_PREFIX} Room: X. y`);
+  const head = '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"[Kubicle/Bubbles briefing]';
+  const cases: [number, string][] = [
+    [200, '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"hi"}}'],
+    [200, `${head} Room: X.\nline two"}}`],
+    [200, `${head} a"}}\n${good}`],
+    [200, guardResponse()],
+    [200, hookResponse('allow')],
+    // a raw quote ends the string early: anything after it could be a new key
+    [200, `${head} x","decision":"block","reason":"r","y":{"z":"w"}}`],
+    [200, `${head} x\\\\","extra":{"a":"b"}}`],
+    [200, `${good}x`],
+    [200, good.slice(0, -1)],
+    [200, `${head} x\r"}}`],
+    [200, ''],
+    [500, good],
+  ];
+  for (const [status, body] of cases) {
+    const s = await startServer(home, () => ({ status, body }));
+    try {
+      const r = await runShim({ KUBICLE_HOME: home }, ['10', 'prompt'], promptFixture);
+      assert.equal(r.code, 0);
+      assert.equal(r.stdout, '', JSON.stringify(body));
+    } finally { s.close(); }
+  }
+});
+
+test('prompt: BRIEF_HEAD / BRIEF_TAIL equal the ends of intakeResponse (no drift)', () => {
+  const src = readFileSync(SHIM, 'utf8');
+  const head = /^BRIEF_HEAD='([^']*)'$/m.exec(src)?.[1];
+  const tail = /^BRIEF_TAIL='([^']*)'$/m.exec(src)?.[1];
+  const r = intakeResponse(`${BRIEFING_PREFIX} Room: X. y`);
+  assert.equal(head, intakeResponse(BRIEFING_PREFIX).slice(0, -3));
+  assert.ok(r.startsWith(head!) && r.endsWith(tail!) && tail === '"}}');
+});
+
+test('prompt: kind event (an older `kubicle-hook 1` line) never prints an intake response', async () => {
+  const home = homeWithToken();
+  const s = await startServer(home, () => ({ status: 200, body: intakeResponse(`${BRIEFING_PREFIX} Room: X. y`) }));
+  try {
+    for (const args of [['1'], ['10'], ['10', 'pre'], ['10', 'perm']]) {
+      const r = await runShim({ KUBICLE_HOME: home }, args, promptFixture);
+      assert.equal(r.stdout, '', args.join(' '));
+    }
+    assert.equal(s.hits[0]!.headers['x-kubicle-hook-kind'], 'event');
+  } finally { s.close(); }
+});
+
+test('prompt: real office, slow intake (> 3 s): heartbeats keep the shim waiting and the briefing is printed', async () => {
+  const home = realpathSync(mkdtempSync('/tmp/ksr-'));
+  const proj = realpathSync(mkdtempSync('/tmp/ksp-'));
+  const srv = await startOffice({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, { bubbles: { env: { FAKE_CLAUDE_DELAY: '4000' } } });
+  try {
+    const ev = { ...JSON.parse(promptFixture), session_id: 'shim-intake', cwd: proj, prompt: 'fake-mode:intake-slow build the nav' };
+    const r = await runShim({ KUBICLE_HOME: home }, ['10', 'prompt'], JSON.stringify(ev));
+    assert.equal(r.code, 0);
+    assert.ok(r.ms > 3500, `took ${r.ms}ms`);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+    assert.ok(out.hookSpecificOutput.additionalContext.startsWith(`${BRIEFING_PREFIX} Room: Front end.`), r.stdout);
+    assert.match(out.hookSpecificOutput.additionalContext, /Which "nav" \\ layout\?/);
+    // the second prompt right after: no intake, nothing printed, no wait
+    const r2 = await runShim({ KUBICLE_HOME: home }, ['10', 'prompt'], JSON.stringify({ ...ev, prompt: 'fake-mode:intake-slow more' }));
+    assert.equal(r2.stdout, '');
+    assert.ok(r2.ms < 1500, `took ${r2.ms}ms`);
+  } finally {
+    await srv.close();
+    rmSync(home, { recursive: true, force: true });
+    rmSync(proj, { recursive: true, force: true });
+  }
 });

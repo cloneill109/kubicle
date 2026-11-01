@@ -7,7 +7,7 @@ import { cleanText, logMatches, logSummary, revealText, type LogFilter, type Off
 import { timeText } from './bubbles-panel.ts';
 import { getApi } from './panel.ts';
 
-export const LOG_KINDS = ['triage', 'escalation', 'owner-answer', 'guard', 'grant', 'instruction', 'toggle', 'error', 'usage'] as const;
+export const LOG_KINDS = ['triage', 'escalation', 'owner-answer', 'guard', 'grant', 'instruction', 'toggle', 'error', 'usage', 'intake'] as const;
 const PAGE = 200;
 const MAX_ROWS = 500;
 const DEBOUNCE_MS = 250;

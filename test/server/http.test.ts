@@ -9,6 +9,10 @@ import { WebSocket } from 'ws';
 import { loadConfig, type Config } from '../../src/server/config.ts';
 import { startServer } from '../../src/server/main.ts';
 import { hookResponse } from '../../src/server/approvals.ts';
+import { BRIEFING_PREFIX } from '../../src/server/bubbles/intake.ts';
+import { STALE_HOOKS_BANNER, STALE_PROMPT_HOOK_BANNER } from '../../src/server/main.ts';
+import { shouldIntake } from '../../src/server/http.ts';
+import type { AgentEvent } from '../../src/shared/events.ts';
 import type { ServerMsg, AgentView } from '../../src/shared/protocol.ts';
 
 // Bubbles triage runs on every PermissionRequest now: never the real claude here. The fake escalates by
@@ -81,6 +85,7 @@ function postHook(s: Srv, body: unknown, token: string | null = s.ingestToken): 
   const ev = typeof body === 'object' && body !== null ? (body as { hook_event_name?: unknown }).hook_event_name : undefined;
   if (ev === 'PermissionRequest') headers['x-kubicle-hook-kind'] = 'perm';
   else if (ev === 'PreToolUse') headers['x-kubicle-hook-kind'] = 'pre';
+  else if (ev === 'UserPromptSubmit') headers['x-kubicle-hook-kind'] = 'prompt'; // `kubicle-hook 10 prompt`
   return sockFetch(s, '/hooks', { method: 'POST', headers, body: typeof body === 'string' ? body : JSON.stringify(body) });
 }
 
@@ -938,4 +943,168 @@ test('final M3: POST /hooks exists only on the hook socket (404 over TCP, nothin
   assert.equal((await postHook(s, { ...fixture('SessionStart'), session_id: 'sock-1' })).status, 200);
   await c.waitFor(isAgent((a) => a.id === 'sock-1'));
   assert.ok(!c.msgs.some((m) => (m.t === 'agent' && m.agent.id === 'tcp-1') || m.t === 'banner'));
+});
+
+// ---------------------------------------------------------------- intake (UserPromptSubmit, kind `prompt`)
+const MIN = 60_000;
+
+async function startIntake(env: Record<string, string> = {}) {
+  const home = tmpHome();
+  const fakeLog = join(home, 'fake-claude.jsonl');
+  const clock = { now: Date.now() };
+  const s = await startServer(cfgFor(home), { now: () => clock.now, bubbles: { env: { FAKE_CLAUDE_LOG: fakeLog, ...env } } });
+  cleanup.push(() => s.close());
+  const starts = () => { try { return readFileSync(fakeLog, 'utf8').split('\n').filter((l) => l.includes('"event":"start"')).length; } catch { return 0; } };
+  const proj = tmpHome();
+  const prompt = (sid: string, text: unknown, headers: Record<string, string> = { 'x-kubicle-hook-kind': 'prompt' }) => sockFetch(s, '/hooks', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken, ...headers },
+    body: JSON.stringify({ ...fixture('UserPromptSubmit'), session_id: sid, cwd: proj, prompt: text }),
+  });
+  return { s, clock, starts, proj, prompt };
+}
+
+const briefing = (body: string) => JSON.parse(body.trim()).hookSpecificOutput.additionalContext as string;
+
+test('intake: first prompt is briefed and placed; 30 s later (subagent hand-back) and 1 min later nothing; 16 min idle runs it again', async () => {
+  const { s, clock, starts, proj, prompt } = await startIntake();
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  await c.waitFor((m) => m.t === 'snapshot');
+
+  // the very first event of this session: the project (and its default floor, with a frontend room) is new too
+  const r1 = await prompt('in1', 'fake-mode:intake-frontend build the nav bar');
+  assert.equal(r1.status, 200);
+  assert.match(r1.headers.get('content-type') ?? '', /application\/json/);
+  const body1 = await r1.text();
+  assert.ok(briefing(body1).startsWith(BRIEFING_PREFIX), body1);
+  assert.ok(briefing(body1).includes('Room: Front end.'), body1);
+  assert.equal(starts(), 1);
+  const placed = await c.waitFor(isAgent((a) => a.id === 'in1' && a.bubblesRoom === 'frontend'));
+  assert.deepEqual(placed.agent.bubblesNote?.subagents, [{ specialty: 'backend', job: 'check the API' }]);
+  const feed = await c.waitFor((m) => m.t === 'feed' && m.item.detail.startsWith('Bubbles placed'));
+  assert.ok(feed.t === 'feed' && feed.item.detail === `Bubbles placed ${placed.agent.name} in Front end`, JSON.stringify(feed));
+
+  // Review Focus 1: a subagent hands back, which fires UserPromptSubmit on the parent 30 s after the first prompt
+  clock.now += 15_000;
+  assert.equal((await postHook(s, { ...fixture('SubagentStart'), session_id: 'in1', cwd: proj })).status, 200);
+  clock.now += 15_000;
+  const r2 = await prompt('in1', 'fake-mode:intake-frontend <task-notification> done');
+  assert.equal(r2.status, 200);
+  assert.equal(await r2.text(), '');
+  assert.equal(starts(), 1);
+
+  clock.now += 30_000; // 1 min after the first prompt
+  const r3 = await prompt('in1', 'fake-mode:intake-frontend next thing');
+  assert.equal(await r3.text(), '');
+  assert.equal(starts(), 1, 'no new fake start');
+
+  clock.now += 16 * MIN; // lastPromptAt and lastSeen are both 16 min old
+  const r4 = await prompt('in1', 'fake-mode:intake-frontend back after lunch');
+  assert.ok(briefing(await r4.text()).startsWith(BRIEFING_PREFIX));
+  assert.equal(starts(), 2);
+  void proj;
+});
+
+test('intake: a launch room hint (on this hook or an earlier one) never runs it; nor a non-string or empty prompt', async () => {
+  const { s, starts, prompt } = await startIntake();
+  const r = await prompt('in2', 'fake-mode:intake-frontend hi', { 'x-kubicle-hook-kind': 'prompt', 'x-kubicle-room': 'fe' });
+  assert.equal(r.status, 200);
+  assert.equal(await r.text(), '');
+  // a division hint on an earlier event sticks to the session
+  await sockFetch(s, '/hooks', { method: 'POST', headers: { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken, 'x-kubicle-division': 'qa' },
+    body: JSON.stringify({ ...fixture('SessionStart'), session_id: 'in3' }) });
+  assert.equal(await (await prompt('in3', 'fake-mode:intake-frontend hi')).text(), '');
+  for (const [sid, text] of [['in4', ''], ['in5', 42], ['in6', undefined], ['in6b', '  \n ']] as const) {
+    assert.equal(await (await prompt(sid, text)).text(), '', String(text));
+  }
+  assert.equal(starts(), 0);
+  // control: a plain session on the same server is briefed
+  assert.ok(briefing(await (await prompt('in6c', 'fake-mode:intake-frontend hi')).text()).startsWith(BRIEFING_PREFIX));
+  assert.equal(starts(), 1);
+});
+
+test('intake: the feed item names the first question; a subagent prompt (agent_id) never runs intake', async () => {
+  const { s, starts, prompt, proj } = await startIntake();
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  await c.waitFor((m) => m.t === 'snapshot');
+  const sub = await sockFetch(s, '/hooks', { method: 'POST', headers: { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken, 'x-kubicle-hook-kind': 'prompt' },
+    body: JSON.stringify({ ...fixture('UserPromptSubmit'), session_id: 'inA', cwd: proj, agent_id: 'sub1', agent_type: 'Explore', prompt: 'fake-mode:intake-frontend hi' }) });
+  assert.equal(await sub.text(), '');
+  assert.equal(starts(), 0);
+  const body = await (await prompt('inB', 'fake-mode:intake-asks hi')).text();
+  assert.match(briefing(body), /Before starting, ask the owner:\n- Which "nav" \\ layout\?/);
+  const feed = await c.waitFor((m) => m.t === 'feed' && m.item.detail.startsWith('Bubbles placed'));
+  assert.ok(feed.t === 'feed' && / in Front end; asks: Which "nav" \\ layout\?$/.test(feed.item.detail), JSON.stringify(feed));
+});
+
+test('intake: Bubbles off gives an empty body (and no model call)', async () => {
+  const { s, starts, prompt } = await startIntake();
+  const cookie = await login(s);
+  assert.equal((await control(s, cookie, '/api/bubbles/enabled', { enabled: false })).status, 204);
+  const r = await prompt('in7', 'fake-mode:intake-frontend hi');
+  assert.equal(r.status, 200);
+  assert.equal(await r.text(), '');
+  assert.equal(starts(), 0);
+  // control: back on, a new session is briefed
+  assert.equal((await control(s, cookie, '/api/bubbles/enabled', { enabled: true })).status, 204);
+  assert.ok(briefing(await (await prompt('in7b', 'fake-mode:intake-frontend hi')).text()).startsWith(BRIEFING_PREFIX));
+  assert.equal(starts(), 1);
+});
+
+test('intake: a slow model gives an empty body (after heartbeat spaces) within 9 s and logs outcome timeout', async () => {
+  const { s, prompt } = await startIntake({ FAKE_CLAUDE_DELAY: '20000' });
+  const t0 = Date.now();
+  const r = await prompt('in8', 'fake-mode:slow hi');
+  const body = await r.text();
+  const ms = Date.now() - t0;
+  assert.equal(r.status, 200);
+  assert.ok(ms < 9000, `took ${ms} ms`);
+  assert.match(body, /^ +$/, 'only heartbeat spaces');
+  const log = await sockFetch(s, '/cli/log?kind=intake', { headers: { 'x-kubicle-token': s.ingestToken } });
+  assert.equal(log.status, 200);
+  const rows = await log.json() as { kind: string; sessionId?: string; outcome?: string }[];
+  assert.ok(rows.some((x) => x.kind === 'intake' && x.sessionId === 'in8' && x.outcome === 'timeout'), JSON.stringify(rows));
+});
+
+test('intake: a UserPromptSubmit without the prompt kind (an older hook line) raises the stale-hooks banner and never runs intake', async () => {
+  const { s, starts, prompt } = await startIntake();
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  await c.waitFor((m) => m.t === 'snapshot');
+  const r = await prompt('in9', 'fake-mode:intake-frontend hi', {});
+  assert.equal(r.status, 200);
+  assert.equal(await r.text(), '');
+  await c.waitFor((m) => m.t === 'banner' && (m.text ?? '').includes(STALE_PROMPT_HOOK_BANNER));
+  assert.equal(starts(), 0);
+  // a stale PreToolUse line (guard off) is the louder problem and wins
+  await sockFetch(s, '/hooks', { method: 'POST', headers: { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken },
+    body: JSON.stringify({ ...fixture('PreToolUse'), session_id: 'in9' }) });
+  await c.waitFor((m) => m.t === 'banner' && (m.text ?? '').includes(STALE_HOOKS_BANNER));
+  await c.waitFor(isAgent((a) => a.id === 'in9' && a.status === 'working')); // still ingested
+});
+
+test('shouldIntake: the gate, case by case', () => {
+  const T = 100 * MIN;
+  const e = (x: Partial<AgentEvent> = {}): AgentEvent => ({ id: 'x', ts: T, event: 'UserPromptSubmit', sessionId: 's', payload: '{}', ...x });
+  const view = { id: 's', kind: 'session', projectId: '/p', lastSeen: T } as AgentView;
+  const first = { count: 0 };
+  assert.equal(shouldIntake(e(), 'hi', first, view, true, T), true);
+  assert.equal(shouldIntake(e({ agentId: 'a' }), 'hi', first, view, true, T), false);
+  assert.equal(shouldIntake(e({ room: 'fe' }), 'hi', first, view, true, T), false);
+  assert.equal(shouldIntake(e({ division: 'qa' }), 'hi', first, view, true, T), false);
+  assert.equal(shouldIntake(e(), 'hi', first, { ...view, room: 'fe' }, true, T), false);
+  assert.equal(shouldIntake(e(), 'hi', first, { ...view, division: 'qa' }, true, T), false);
+  for (const p of ['', '   ', 5, null, undefined, ['hi']]) assert.equal(shouldIntake(e(), p, first, view, true, T), false, String(p));
+  assert.equal(shouldIntake(e(), 'hi', first, view, false, T), false, 'no floor');
+  assert.equal(shouldIntake(e(), 'hi', first, { ...view, projectId: '' }, true, T), false, 'no project');
+  assert.equal(shouldIntake(e(), 'hi', first, undefined, true, T), false);
+  assert.equal(shouldIntake(e({ event: 'Stop' }), 'hi', first, view, true, T), false);
+  const ago = (p: number, s?: number) => ({ count: 3, lastPromptAt: T - p, ...(s === undefined ? {} : { lastSeen: T - s }) });
+  assert.equal(shouldIntake(e(), 'hi', ago(15 * MIN, 15 * MIN), view, true, T), true, 'exactly 15 min idle');
+  assert.equal(shouldIntake(e(), 'hi', ago(15 * MIN - 1, 20 * MIN), view, true, T), false);
+  assert.equal(shouldIntake(e(), 'hi', ago(20 * MIN, 30_000), view, true, T), false, 'busy with tools (or a subagent) since the last prompt');
+  assert.equal(shouldIntake(e(), 'hi', ago(30 * 60 * MIN), view, true, T), true, 'the view expired (a day idle): no lastSeen counts as idle');
+  assert.equal(shouldIntake(e(), 'hi', { count: 3 }, view, true, T), false);
 });

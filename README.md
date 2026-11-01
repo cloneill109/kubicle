@@ -118,6 +118,18 @@ Bubbles is the office's coordinator. Every permission request first goes to Bubb
 - **The log.** An append-only, hash-chained record of triage verdicts (what Bubbles was shown, model, reason), escalations, your answers, guard decisions, grants, instructions and toggles. Read it with `kubicle log` (filters: `--project --session --kind --since --grep --limit --json`) or the office Log view. `kubicle log verify` checks the chain: it detects edited or deleted log rows. It does not detect a grant or instruction row inserted straight into `office.db` by a process outside Claude's tools, so review the active grants and instructions the Bubbles panel lists. JSONL mirror files are in `~/.kubicle/log/`.
 - **Turning it off.** Use the toggle in the office, `kubicle bubbles off` (then confirm in the office), or set `enabled: false` in `~/.kubicle/bubbles.yaml` and restart. Per session or project, you can also opt out of office approvals from the inspector.
 
+### Intake
+
+When you send a session its first prompt, Bubbles reads it and does two things: it picks the room on the project's floor where the work belongs, and it adds a short briefing to the session's context. The briefing starts with `[Kubicle/Bubbles briefing]`, may list subagents to spawn and questions to ask you first, and ends by saying it is advisory: your instructions win.
+
+- **When it runs.** On a session's first prompt, and on a prompt after the session has been idle for 15 minutes or more (no prompt and no other event in that time). It never runs on every turn, never for subagents, and never for a session launched with `KUBICLE_ROOM` or `KUBICLE_DIVISION`. It needs Bubbles on, and it counts against the same daily cap, concurrency limit and usage-limit rules as triage. It waits at most 8 seconds (one `fast`-model call, no retry). On a timeout or any failure, the prompt goes through without a briefing and the agent stays where it is.
+- **Room precedence.** Your manual move first, then the launch room (`KUBICLE_ROOM`), then the launch division (`KUBICLE_DIVISION`), then the room Bubbles picked, then the Bullpen. Bubbles places an agent in the Bullpen when it is not confident or names a room that is not on the floor.
+- **Overriding it.** Move the agent yourself with the room menu in the inspector. Your move always wins, including over a later intake after the session sits idle.
+- **Subagents.** A subagent stays in its parent's room, unless its agent type is named after a division (for example a `qa` or `security` agent type), in which case it works in that division's room.
+- **The log.** Every intake is logged with kind `intake`: what Bubbles was shown, the room it picked, its confidence and briefing, or why it did not run (skipped, timeout, error). Read it with `kubicle log --kind intake` or the office Log view.
+- **Hooks.** The UserPromptSubmit hook line is `kubicle-hook 10 prompt` (timeout 12 s). An older install's line cannot deliver a briefing; the office shows a banner until you re-run `npm run install-hooks`.
+- **Auto mode.** In Claude Code auto mode the session's own classifier decides permissions, so no permission request reaches Bubbles. That is your choice of mode. Intake and the main-branch guard still apply.
+
 ## Tests
 
 ```
