@@ -16,6 +16,8 @@ import type { Redactor } from './redact.ts';
 import type { Protected } from './rules.ts';
 import { notStarted, type RunResult } from './runner.ts';
 import { recentTurns } from './transcript.ts';
+import { INTAKE_PROMPT_VERSION, INTAKE_TIMEOUT_MS, INTAKE_ASSIGN_MIN, INTAKE_PROMPT_MAX, buildIntakeInput, extractIntake, formatBriefing,
+  type IntakeOutcome, type IntakeRequest } from './intake.ts';
 
 export interface TriageRequest {
   toolName: string; input: string; inputTruncated: boolean; projectId: string; projectName: string;
@@ -67,7 +69,7 @@ function validVerdict(v: unknown): TriageVerdict | null {
 }
 
 /** End index (exclusive) of the balanced object starting at `start`, honouring JSON strings; -1 if unbalanced. */
-function balancedEnd(s: string, start: number): number {
+export function balancedEnd(s: string, start: number): number {
   let depth = 0; let inStr = false;
   for (let i = start; i < s.length; i++) {
     const c = s[i];
@@ -112,7 +114,7 @@ const nextMidnight = (t: number) => { const d = new Date(t); return new Date(d.g
 const pad = (n: number) => String(n).padStart(2, '0');
 const localTime = (t: number) => { const d = new Date(t); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 /** Data may not forge block delimiters: runs of 3+ angle brackets become look-alike guillemets. */
-const defang = (s: string) => s.replace(/<{3,}/g, (m) => '‹'.repeat(m.length)).replace(/>{3,}/g, (m) => '›'.repeat(m.length));
+export const defang = (s: string) => s.replace(/<{3,}/g, (m) => '‹'.repeat(m.length)).replace(/>{3,}/g, (m) => '›'.repeat(m.length));
 const UNAVAILABLE_RE = /^(ENOENT|EACCES)\b/;
 
 type Attempt =
@@ -134,6 +136,7 @@ export class Bubbles {
   private redact: Redactor;
   private now: () => number;
   private prompt: string;
+  private intakePrompt: string;
 
   private day = '';
   private calls = 0;
@@ -151,6 +154,7 @@ export class Bubbles {
     this.redact = deps.redact; this.now = deps.now ?? Date.now;
     this.timeouts = Object.freeze({ ...DEFAULT_TIMEOUTS, ...deps.timeouts });
     this.prompt = readFileSync(join(import.meta.dirname, 'prompts', `${PROMPT_VERSION}.md`), 'utf8');
+    this.intakePrompt = readFileSync(join(import.meta.dirname, 'prompts', `${INTAKE_PROMPT_VERSION}.md`), 'utf8');
   }
 
   // ---- status --------------------------------------------------------------------------------------
@@ -246,6 +250,59 @@ export class Bubbles {
       return this.escalate(ctx, why, v, v.recommendation_for_owner);
     } catch (err) {
       return this.escalate(ctx, 'error', undefined, `internal: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      this.inflight--;
+    }
+  }
+
+  // ---- intake --------------------------------------------------------------------------------------
+
+  /** First-prompt intake: one fast-model call that picks a room and writes a briefing. Never throws except on log failure. */
+  async intake(r: IntakeRequest): Promise<IntakeOutcome> {
+    const t0 = performance.now();
+    const ids = r.rooms.map((x) => x.id);
+    const base = { projectId: r.projectId, sessionId: r.sessionId, transcriptPath: r.transcriptPath };
+    const p = this.redact(r.prompt);
+    const request = p.length > INTAKE_PROMPT_MAX ? `${p.slice(0, INTAKE_PROMPT_MAX)}\n[truncated]` : p;
+    const latencyMs = () => Math.round(performance.now() - t0);
+    const fail = (why: EscalateWhy | 'timeout', outcome: string, detail: string, extra: Partial<Parameters<BubblesLog['append']>[0]> = {}): IntakeOutcome => {
+      const e = this.log.append({ ts: this.now(), kind: 'intake', ...base, request, latencyMs: latencyMs(), outcome, detail, ...extra }, { verbatim: ['shown'] });
+      return { ok: false, why, logSeq: e.seq };
+    };
+    this.inflight++;
+    try {
+      const st = this.status();
+      if (st.state !== 'on') return fail(this.whyFor(st), 'skipped', st.detail);
+
+      const input = buildIntakeInput(r, this.redact, this.policy.instructions(r.projectId).map((i) => i.text));
+      const model = this.config().models.fast;
+      const meta = { shown: input, shownHash: sha(input), model, promptVersion: INTAKE_PROMPT_VERSION };
+      const res = await this.call(model, this.intakePrompt, input, INTAKE_TIMEOUT_MS);
+      const usage = res.ok ? res.usage : undefined;
+      const usageRow = [{ model, ...(usage !== undefined ? { usage } : {}), ms: res.durationMs, ...(res.ok ? {} : { error: res.kind }) }];
+      if (!res.ok) {
+        const why = this.classifyFailure(res);
+        const timedOut = res.kind === 'timeout';
+        return fail(timedOut ? 'timeout' : why, timedOut ? 'timeout' : 'error', res.detail, notStarted(res) && res.kind === 'spawn' ? {} : { ...meta, usage: usageRow });
+      }
+      const verdict = extractIntake(res.text, ids);
+      if (!verdict) {
+        const detail = `not-json: no valid intake verdict in model output: ${res.text.replace(/\s+/g, ' ').slice(0, 200)}`;
+        this.failure(detail);
+        return fail('error', 'error', detail, { ...meta, usage: usageRow });
+      }
+      this.success();
+      const room = verdict.confidence >= INTAKE_ASSIGN_MIN ? verdict.room : 'bullpen';
+      const roomName = r.rooms.find((x) => x.id === room)?.name ?? 'Bullpen';
+      const context = formatBriefing(verdict, roomName);
+      const e = this.log.append({
+        ts: this.now(), kind: 'intake', ...base, request, ...meta, latencyMs: latencyMs(), usage: usageRow,
+        decision: room, confidence: verdict.confidence, reason: verdict.briefing,
+        detail: JSON.stringify({ subagents: verdict.subagents, questions_for_owner: verdict.questions_for_owner }), outcome: 'briefed',
+      }, { verbatim: ['shown'] });
+      return { ok: true, verdict, room, context, logSeq: e.seq };
+    } catch (err) {
+      return fail('error', 'error', `internal: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       this.inflight--;
     }

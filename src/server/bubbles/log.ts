@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { Redactor } from './redact.ts';
 
 export type LogKind =
-  'triage' | 'escalation' | 'owner-answer' | 'guard' | 'grant' | 'instruction' | 'toggle' | 'error' | 'usage';
+  'triage' | 'escalation' | 'owner-answer' | 'guard' | 'grant' | 'instruction' | 'toggle' | 'error' | 'usage' | 'intake';
 
 export interface LogEntry {
   seq: number; ts: number; kind: LogKind;

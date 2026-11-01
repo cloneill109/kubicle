@@ -254,7 +254,7 @@ function validateGrant(g: GrantInput): { projectId: string; action: 'push' | 'me
  * newline and carriage return; every format character (\p{Cf}: zero-width, joiners, word joiner, BOM, soft hyphen,
  * bidi marks/overrides/isolates, Unicode tags U+E0000-E007F); variation selectors (U+FE00-FE0F, U+E0100-E01EF).
  */
-const HIDDEN_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\p{Cf}\u{E0000}-\u{E007F}\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u;
+export const HIDDEN_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\p{Cf}\u{E0000}-\u{E007F}\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u;
 
 function validateInstruction(text: unknown): string {
   if (typeof text !== 'string' || text.length < 1 || text.length > INSTRUCTION_MAX) {

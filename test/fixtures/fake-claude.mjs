@@ -22,6 +22,9 @@ const envelope = (result, extra = {}) => JSON.stringify({
   type: 'result', subtype: 'success', is_error: false, duration_ms: 5, num_turns: 1, result,
   session_id: 'fake-session', total_cost_usd: 0, usage: { input_tokens: 100, output_tokens: 20 }, ...extra,
 });
+const intake = (room, confidence) => JSON.stringify({
+  room, confidence, briefing: 'Focus on src/ui.', subagents: [{ specialty: 'backend', job: 'check the API' }], questions_for_owner: [],
+});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
@@ -43,6 +46,10 @@ async function main() {
     case 'uncertain': return out(envelope(verdict('approve', 0.95, true)));
     case 'prose-wrapped':
       return out(envelope(`Sure! Weighing {"it": "up"} first.\n\`\`\`json\n${verdict('approve', 0.9)}\n\`\`\`\nThanks {not json}`));
+    case 'intake-frontend': return out(envelope(intake('frontend', 0.9)));
+    case 'intake-low': return out(envelope(intake('frontend', 0.4)));
+    case 'intake-badroom': return out(envelope(intake('nope', 0.9)));
+    case 'not-json':
     case 'garbage': return out(envelope('I cannot decide {not: json} at all'));
     case 'slow': await sleep(Number(process.env.FAKE_CLAUDE_DELAY ?? 300)); return out(envelope(verdict('approve', 0.95)));
     case 'slow-escalate': await sleep(Number(process.env.FAKE_CLAUDE_DELAY ?? 300)); return out(envelope(verdict('escalate', 0.9)));
