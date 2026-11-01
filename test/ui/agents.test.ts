@@ -330,3 +330,12 @@ test('a subagent with its own room resolves by its division, not its parent', ()
   sim.upsert(view({ id: 'q', bubblesRoom: 'animation' }), 0, { place: true });
   assert.equal(sim.roomOf(get(sim, 'q')!), 'animation');
 });
+
+test('an own-room subagent whose division has no room on the floor follows its parent', () => {
+  const f = defaultFloor();
+  f.rooms = f.rooms.filter((r) => r.id !== 'qa');
+  const sim = new Sim(buildFloor(f, DIVS));
+  sim.upsert(view({ id: 'p', division: 'frontend' }), 0, { place: true });
+  sim.upsert(view({ id: 'p:x', kind: 'subagent', parentId: 'p', division: 'qa', ownRoom: true }), 0, { place: true });
+  assert.equal(sim.roomOf(get(sim, 'p:x')!), 'frontend');
+});

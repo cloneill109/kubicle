@@ -492,3 +492,25 @@ test('promptCount and lastPromptAt count session prompts only', () => {
   reg.apply(ev('SessionEnd', { ts: 30 }));
   assert.equal(reg.promptCount('s1'), 0);
 });
+
+test('reclassifySubagents applies divisions that loaded after rebuild', () => {
+  const store = openStore(':memory:');
+  let divs: { id: string; name: string; color: string; harness: Record<string, unknown>; revision: number }[] = [];
+  const reg = new Registry(new Projects(store), store, loadConfig({}), undefined, { divisions: () => divs });
+  reg.rebuild([
+    ev('SessionStart', { ts: 1, cwd: '/tmp', room: 'r1' }),
+    ev('SubagentStart', { ts: 2, agentId: 'b', agentType: 'back-end' }),
+  ]);
+  assert.equal(reg.get('s1:b')!.ownRoom, undefined);
+  assert.equal(reg.get('s1:b')!.room, 'r1');
+  assert.deepEqual(reg.reclassifySubagents(), []);
+  divs = [{ id: 'backend', name: 'Back end', color: '#000', harness: {}, revision: 1 }];
+  const out = reg.reclassifySubagents();
+  assert.deepEqual(out.map((v) => v.id), ['s1:b']);
+  const v = reg.get('s1:b')!;
+  assert.deepEqual([v.ownRoom, v.division, v.room], [true, 'backend', undefined]);
+  divs = [];
+  const back = reg.reclassifySubagents();
+  assert.equal(back.length, 1);
+  assert.deepEqual([reg.get('s1:b')!.ownRoom, reg.get('s1:b')!.room], [undefined, 'r1']);
+});

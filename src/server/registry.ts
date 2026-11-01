@@ -420,6 +420,30 @@ export class Registry {
     return out;
   }
 
+  /** Re-evaluate every subagent's division/ownRoom against the current divisions (they load after rebuild, and can change). */
+  reclassifySubagents(): AgentView[] {
+    const out: AgentView[] = [];
+    for (const a of this.#agents.values()) {
+      if (a.kind !== 'subagent') continue;
+      const before = JSON.stringify([a.division, a.ownRoom, a.room, a.roomLabel, a.bubblesRoom]);
+      const div = this.#divisionFor(a.role);
+      const parent = a.parentId ? this.#agents.get(a.parentId) : undefined;
+      if (div) {
+        a.division = div;
+        a.ownRoom = true;
+        delete a.room; delete a.roomLabel; delete a.bubblesRoom;
+      } else if (a.ownRoom) {
+        delete a.ownRoom;
+        const set = <K extends 'division' | 'room' | 'roomLabel' | 'bubblesRoom'>(k: K) => {
+          if (parent?.[k]) a[k] = parent[k]; else delete a[k];
+        };
+        set('division'); set('room'); set('roomLabel'); set('bubblesRoom');
+      }
+      if (JSON.stringify([a.division, a.ownRoom, a.room, a.roomLabel, a.bubblesRoom]) !== before) out.push(snap(a));
+    }
+    return out;
+  }
+
   lastPromptAt(sessionId: string): number | undefined {
     return this.#prompts.get(sessionId)?.last;
   }

@@ -188,7 +188,10 @@ export class Sim {
 
   /** The room an agent belongs in. Subagents follow their parent once it is on the floor. */
   #roomOf(a: Mover): string | null {
-    const p = a.view.kind === 'subagent' && !a.view.ownRoom && a.view.parentId ? this.#agents.get(a.view.parentId) : undefined;
+    const v = a.view;
+    // An own-room subagent whose division has no room on this floor falls back to its parent.
+    const own = v.ownRoom && this.#floor.rooms.some((r) => r.division === v.division);
+    const p = v.kind === 'subagent' && !own && v.parentId ? this.#agents.get(v.parentId) : undefined;
     return this.#resolve(p ? p.view : a.view);
   }
 
