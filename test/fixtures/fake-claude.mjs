@@ -26,7 +26,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
   const mode = stdin.match(/fake-mode:([a-z0-9-]+)/)?.[1] ?? process.env.FAKE_CLAUDE_MODE ?? 'approve-high';
-  note({ event: 'start', model, mode, args, cwd: process.cwd(), agent: process.env.KUBICLE_AGENT ?? null, apiKey: 'ANTHROPIC_API_KEY' in process.env || 'ANTHROPIC_AUTH_TOKEN' in process.env, stdin });
+  note({ event: 'start', model, mode, args, cwd: process.cwd(), agent: process.env.KUBICLE_AGENT ?? null, apiKey: 'ANTHROPIC_API_KEY' in process.env || 'ANTHROPIC_AUTH_TOKEN' in process.env,
+    envKeys: Object.keys(process.env).filter((k) => /^(ANTHROPIC_|CLAUDE_CODE_USE_|KEEP_ME$)/.test(k)).sort(), stdin });
   const out = (s, code = 0) => { note({ event: 'end' }); process.stdout.write(s, () => process.exit(code)); };
   const strong = model !== 'haiku';
   switch (mode) {

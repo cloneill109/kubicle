@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../../src/server/store.ts';
 import { BubblesLog } from '../../src/server/bubbles/log.ts';
-import { makeRedactor } from '../../src/server/bubbles/redact.ts';
+import { makeRedactor, redactPatterns } from '../../src/server/bubbles/redact.ts';
 
 function setup(secrets?: string) {
   const home = mkdtempSync(join(tmpdir(), 'bl-'));
@@ -180,4 +180,25 @@ test('redacts nested strings in usage; fixes pre-existing log dir mode', () => {
   assert.deepEqual(r.usage, { n: 3, note: ['‹redacted›'] });
   assert.equal(statSync(join(home, 'log')).mode & 0o777, 0o700);
   done();
+});
+
+test('final M4: lower-case assignments, Authorization headers and URL credentials are redacted', () => {
+  const cases: [string, string][] = [
+    ['api_key=abc123def', 'api_key=‹redacted›'],
+    ['apikey: zzz999', 'apikey: ‹redacted›'],
+    ['export password=hunter22', 'export password=‹redacted›'],
+    ['db_passwd=p4ss', 'db_passwd=‹redacted›'],
+    ['Secret = s3cr3t', 'Secret = ‹redacted›'],
+    ['github_token=abc', 'github_token=‹redacted›'],
+    ['curl -H "Authorization: Bearer eyJhbGciOi.x.y" https://a.example', 'curl -H "Authorization: Bearer ‹redacted›" https://a.example'],
+    ["curl -H 'authorization: token abc123' x", "curl -H 'authorization: token ‹redacted›' x"],
+    ['Authorization: Basic dXNlcjpwYXNz', 'Authorization: Basic ‹redacted›'],
+    ['git clone https://user:pa55word@github.com/o/r.git', 'git clone https://user:‹redacted›@github.com/o/r.git'],
+    ['postgres://admin:s3cret@db:5432/x', 'postgres://admin:‹redacted›@db:5432/x'],
+  ];
+  for (const [inp, want] of cases) assert.equal(redactPatterns(inp), want, inp);
+  // ordinary text stays
+  for (const ok of ['git push origin main', 'see https://github.com/o/r', 'the keyboard is fine', 'ssh git@github.com:o/r.git']) {
+    assert.equal(redactPatterns(ok), ok, ok);
+  }
 });

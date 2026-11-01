@@ -25,12 +25,16 @@ export function notStarted(r: RunResult): boolean {
   return !r.ok && (r.kind === 'spawn' || (r.kind === 'timeout' && r.detail.startsWith(QUEUED_PREFIX)));
 }
 
-/** Subscription only: never let an API credential in the owner's env switch `claude -p` to API billing. */
-export const STRIPPED_ENV = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
+/**
+ * Subscription only: never let the owner's env switch `claude -p` to API billing, another endpoint or another provider.
+ * Every ANTHROPIC_* variable (API key, auth token, base URL, custom headers, model overrides) and every
+ * CLAUDE_CODE_USE_* switch (Bedrock, Vertex, ...) is removed from Bubbles' child env.
+ */
+export const STRIPPED_ENV = /^(ANTHROPIC_|CLAUDE_CODE_USE_)/;
 
 function childEnv(extra: Record<string, string | undefined>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...extra, KUBICLE_AGENT: 'bubbles' };
-  for (const k of STRIPPED_ENV) delete env[k];
+  for (const k of Object.keys(env)) if (STRIPPED_ENV.test(k)) delete env[k];
   return env;
 }
 

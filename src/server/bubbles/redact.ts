@@ -33,7 +33,12 @@ function orphanEnds(s: string): string {
   return out + s.slice(last);
 }
 // Only the value part is replaced: keep the name so the log stays readable.
-const ASSIGN = /(\b[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*\s*[=:]\s*)\S+/g;
+// Any case: `API_KEY=`, `api_key:`, `apikey=`, `db_passwd=`, `Secret =`.
+const ASSIGN = /(\b[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*\s*[=:]\s*)\S+/gi;
+// `Authorization: Bearer|Basic|token <value>` (headers in curl commands, logs): the scheme stays, the value goes.
+const AUTH_HEADER = /(\bAuthorization\s*:\s*(?:Bearer|Basic|token)\s+)[^\s"']+/gi;
+// `scheme://user:password@host`: the password part only.
+const URL_CRED = /(:\/\/[^\/\s:@]+:)[^\/\s@]+(?=@)/g;
 
 function collect(v: unknown, out: Set<string>): void {
   if (typeof v === 'string') { if (v.length >= 6) out.add(v); }
@@ -54,6 +59,7 @@ export function redactPatterns(s: string): string {
   let r = s;
   for (const p of PATTERNS) r = r.replace(p, REDACTED);
   r = orphanEnds(r);
+  r = r.replace(AUTH_HEADER, (_m, pre: string) => pre + REDACTED).replace(URL_CRED, (_m, pre: string) => pre + REDACTED);
   return r.replace(ASSIGN, (_m, pre: string) => pre + REDACTED);
 }
 

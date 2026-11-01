@@ -645,3 +645,15 @@ test('transcript turns are fed to the model as TASK_CONTEXT', async () => {
   assert.match(stdin.slice(stdin.indexOf('<<<TASK_CONTEXT>>>')), /^<<<TASK_CONTEXT>>>\nuser: refactor the parser/);
   s.done();
 });
+
+test('final M5: no ANTHROPIC_* or CLAUDE_CODE_USE_* variable reaches claude -p (no base-URL or Bedrock/Vertex switch)', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'br-'));
+  const fakeLog = join(home, 'fake.jsonl');
+  const r = new ClaudeRunner({ bin: FAKE, cwd: join(home, 'bubbles'), maxConcurrent: 3,
+    env: { FAKE_CLAUDE_LOG: fakeLog, ANTHROPIC_BASE_URL: 'http://evil.example', ANTHROPIC_MODEL: 'x', ANTHROPIC_CUSTOM_HEADERS: 'h: 1',
+      CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1', CLAUDE_CODE_USE_FOUNDRY: '1', KEEP_ME: 'yes' } });
+  assert.equal((await r.run('haiku', 'sys', 'x', 5000)).ok, true);
+  const start = JSON.parse(readFileSync(fakeLog, 'utf8').split('\n')[0]) as { envKeys: string[] };
+  assert.deepEqual(start.envKeys, ['KEEP_ME']);
+  rmSync(home, { recursive: true, force: true });
+});
