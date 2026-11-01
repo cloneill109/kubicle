@@ -10,11 +10,13 @@ import { drawEdit, dropTarget, hitRoom, partPoint, screenToWorld, type EditPart,
 import { CUSTOM, keyAction, renderAddKinds, renderRoomList, type RoomAction } from './floor-sheet.ts';
 import { Sim } from './sim/agents.ts';
 import { STYLES, preferredSize, type Renderer, type StyleId, type SimAgent } from './render/types.ts';
-import { drawOverlays, type SignRect } from './render/overlays.ts';
 import { ROLE, roleColor } from './render/sprite.ts';
 import { OfficeState, LOBBY, titleFor, moveFloor, pickNeedsYou, shouldAutoSelect, type Change, type FloorItem } from './state.ts';
 import { Inspector, post, roleLabel } from './panel.ts';
 import { openPicker, closePicker, pickerOpen, renderLobby } from './elevator.ts';
+import { drawOverlays, bubblesMarks, type SignRect } from './render/overlays.ts';
+import { BubblesUi } from './bubbles-panel.ts';
+import { LogView } from './log-view.ts';
 
 const STYLE_KEY = 'kubicle-style';
 const CHIME_KEY = 'kubicle-chime';
@@ -58,6 +60,12 @@ let editing: Editing | null = null;
 /** The layout on the canvas for a floor: the edit in progress, else the server's floor. */
 const layoutFor = (id: string): FloorDef => (editing?.floorId === id ? { ...floorDef(id), rooms: editing.rooms } : floorDef(id));
 const inspector = new Inspector(state, () => sim.agents(), (projectId) => floorDef(projectId).rooms.map((r) => ({ id: r.id, name: r.name })));
+// Bubbles: the Lobby card, header dot and panel (#bubbles), and the Log view.
+const projectName = (id: string): string => state.project(id)?.name ?? id;
+const logView = new LogView(state, projectName);
+const bubbles = new BubblesUi(state, { projectName, onOpenLog: () => logView.open($('logBtn')) });
+const openFromHash = () => { if (location.hash === '#bubbles') { closeMenu(); closePicker(false); if (logView.isOpen) $<HTMLDialogElement>('logView').close(); bubbles.open($('bubblesDot')); } };
+window.addEventListener('hashchange', openFromHash);
 
 // ---------------------------------------------------------------- style + canvas
 let style: StyleId = 'pixel';
@@ -282,7 +290,7 @@ function renderLegend(): void {
   const sep = () => { const s = document.createElement('span'); s.className = 'sep'; return s; };
   const els: HTMLElement[] = [...roles].sort().map((r) => item(roleColor(r), roleLabel(r)));
   if (subs) els.push(item(ROLE.subagent.color, 'Subagent'));
-  els.push(sep(), item(null, 'Needs you', 'mark', '!'), item(null, 'Quiet', 'zz', 'z'), item('#6c707d', 'Lost contact'));
+  els.push(sep(), item(null, 'Needs you', 'mark', '!'), item(null, 'Bubbles is checking', 'bmark', 'B'), item(null, 'Quiet', 'zz', 'z'), item('#6c707d', 'Lost contact'));
   $('legend').replaceChildren(...els);
 }
 
@@ -340,7 +348,7 @@ function showPicker(): void {
 floorBtn.addEventListener('click', () => { if (editing) return; pickerOpen() ? closePicker() : showPicker(); });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'e' && e.key !== 'E') return;
-  if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || pickerOpen() || !menu.hidden || editing) return;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || pickerOpen() || !menu.hidden || editing || document.querySelector('dialog[open]')) return;
   const t = document.activeElement as HTMLElement | null;
   if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
   e.preventDefault();
@@ -430,12 +438,15 @@ function renderLobbyNow(): void {
   // Keep keyboard focus on the same control across re-renders.
   const f = document.activeElement as HTMLElement | null;
   const keep = f && el.contains(f) ? { id: f.closest('li')?.dataset.id, cls: f.className } : null;
+  const cardFocused = f === bubbles.card;
   renderLobby(el, items, goFloor, {
+    header: bubbles.card,
     archived, unassigned,
     onMenu: (pid, btn) => openMenu(pid, btn),
     onRestore: (pid) => void post(`/api/projects/${encodeURIComponent(pid)}`, { archived: false }),
     emptyText: gotSnapshot ? EMPTY_TEXT : 'Connecting to the office…',
   });
+  if (cardFocused) bubbles.card.focus();
   if (keep?.id) [...el.querySelectorAll<HTMLElement>('li')].find((li) => li.dataset.id === keep.id)?.querySelector<HTMLElement>(`[class="${keep.cls}"]`)?.focus();
 }
 
@@ -564,6 +575,9 @@ function onMessage(m: ServerMsg): void {
   // Counts also drive the floor button, glow, empty hint and Lobby. Not on feed-only messages,
   // so a focused "need you" chip isn't replaced on every hook event.
   if (c.snapshot || c.floor || c.projects || c.building || c.upserted.length || c.removed.length) renderCounts();
+  if (c.bubbles) bubbles.render();
+  if (c.projects) { bubbles.render(); logView.projectsChanged(); }
+  if (c.log.length) { bubbles.onLog(c.log); logView.onLog(c.log); inspector.onLog(c.log); }
   if (c.newlyWaiting.length) chime();
   // A new approval the owner can answer here takes the inspector, unless one is already open there.
   for (const a of c.newlyAnswerable) {
@@ -915,6 +929,7 @@ showFloor();
 renderCounts();
 renderLegend();
 connect();
+openFromHash();
 
 // ---------------------------------------------------------------- test hook
 (window as unknown as { __office: unknown }).__office = {
@@ -930,6 +945,7 @@ connect();
   renderer: () => R,
   style: () => style,
   signs: () => signs,
+  bubblesMarks: () => [...bubblesMarks],
   world: () => world,
   editRooms: () => (editing ? cloneRooms(editing.rooms) : null),
   /** Client coordinates of a room's body center or resize handle (edit mode), scrolling the map box to it. */

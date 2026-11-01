@@ -1,9 +1,11 @@
 // Client mirror of the server's office state, fed by ServerMsg. Pure (no DOM) so it is unit-tested.
 // apply() reports what changed so main.ts can drive the sim, the panel and needs-you alerts.
-import type { AgentView, FeedItem, ProjectRow, ServerMsg } from '../shared/protocol.ts';
+import type { AgentView, BubblesState, BubblesStatus, FeedItem, LogEntry, PendingChange, ProjectRow, ServerMsg } from '../shared/protocol.ts';
 import type { Building } from '../shared/building.ts';
 
 export const FEED_MAX = 200;
+/** Bubbles log entries kept client-side (newest first). */
+export const LOG_MAX = 500;
 export const BASE_TITLE = 'Kubicle';
 
 export interface Change {
@@ -24,9 +26,13 @@ export interface Change {
   banner: boolean;
   snapshot: boolean;
   firstSnapshot: boolean;
+  /** Bubbles' state was replaced (snapshot or bubbles message). */
+  bubbles: boolean;
+  /** Log entries this message added (not seen before), newest first. */
+  log: LogEntry[];
 }
 
-const empty = (): Change => ({ upserted: [], removed: [], newlyWaiting: [], newlyAnswerable: [], projects: false, building: false, floor: false, feed: [], banner: false, snapshot: false, firstSnapshot: false });
+const empty = (): Change => ({ upserted: [], removed: [], newlyWaiting: [], newlyAnswerable: [], projects: false, building: false, floor: false, feed: [], banner: false, snapshot: false, firstSnapshot: false, bubbles: false, log: [] });
 
 export const LOBBY = 'lobby';
 export interface FloorItem { id: string; name: string; agents: number; needYou: number }
@@ -37,6 +43,10 @@ export class OfficeState {
   feed: FeedItem[] = []; // newest first
   banner: string | null = null;
   building: Building = { divisions: [], floors: {}, warnings: [] };
+  /** Bubbles' last state (null until the first snapshot). */
+  bubbles: BubblesState | null = null;
+  /** Bubbles log entries seen live or fetched, newest first (by seq), at most LOG_MAX, no duplicate seq. */
+  log: LogEntry[] = [];
   /** A project id, or 'lobby'. */
   currentFloor: string = LOBBY;
   #hadSnapshot = false;
@@ -132,6 +142,8 @@ export class OfficeState {
         c.feed = this.feed;
         c.banner = this.banner !== m.banner;
         this.banner = m.banner;
+        this.bubbles = m.bubbles;
+        c.bubbles = true;
         this.#hadSnapshot = true;
         break;
       }
@@ -165,6 +177,15 @@ export class OfficeState {
         c.banner = this.banner !== m.text;
         this.banner = m.text;
         break;
+      case 'bubbles': {
+        const { t: _t, ...rest } = m;
+        this.bubbles = rest;
+        c.bubbles = true;
+        break;
+      }
+      case 'log':
+        c.log = this.mergeLog([m.entry]);
+        break;
     }
     return c;
   }
@@ -179,6 +200,65 @@ export class OfficeState {
   }
 
   project(id: string): ProjectRow | undefined { return this.projects.find((p) => p.id === id); }
+
+  /** Adds log entries (live or from GET /api/log) by seq; returns the ones not seen before, newest first. */
+  mergeLog(entries: LogEntry[]): LogEntry[] {
+    const seen = new Set(this.log.map((e) => e.seq));
+    const fresh = entries.filter((e) => Number.isFinite(e?.seq) && !seen.has(e.seq) && (seen.add(e.seq), true));
+    if (!fresh.length) return [];
+    this.log = [...fresh, ...this.log].sort((a, b) => b.seq - a.seq).slice(0, LOG_MAX);
+    const kept = new Set(this.log.map((e) => e.seq));
+    return fresh.filter((e) => kept.has(e.seq)).sort((a, b) => b.seq - a.seq);
+  }
+}
+
+// ---------------------------------------------------------------- Bubbles helpers (pure)
+
+/** Log filters as GET /api/log takes them (project, session, kind, grep). Empty = any. */
+export interface LogFilter { project?: string; session?: string; kind?: string; grep?: string }
+
+/** Whether a live entry belongs in a view filtered like this (mirrors the server's query: grep is a case-insensitive substring of the entry JSON). */
+export function logMatches(e: LogEntry, f: LogFilter): boolean {
+  if (f.project && e.projectId !== f.project) return false;
+  if (f.session && e.sessionId !== f.session) return false;
+  if (f.kind && e.kind !== f.kind) return false;
+  if (f.grep) {
+    const { seq: _s, prevHash: _p, hash: _h, ...body } = e;
+    if (!JSON.stringify(body).toLowerCase().includes(f.grep.toLowerCase())) return false;
+  }
+  return true;
+}
+
+const STATUS_LABEL: Record<BubblesStatus['state'], string> = { on: 'On', off: 'Off', 'off-duty': 'Off duty', failing: 'Failing', unavailable: 'Unavailable' };
+export const statusLabel = (s: BubblesStatus['state']): string => STATUS_LABEL[s] ?? s;
+
+/** 30 min, 1 h, 1 d, 90 min… */
+export function durationText(ms: number): string {
+  const m = Math.round(ms / 60_000);
+  if (m % 1440 === 0) return `${m / 1440} d`;
+  if (m % 60 === 0) return `${m / 60} h`;
+  return `${m} min`;
+}
+
+/** The exact change a CLI request proposes, in words (names via `projectName`). */
+export function describeChange(c: PendingChange['change'], projectName: (id: string) => string): string {
+  switch (c.type) {
+    case 'grant':
+      return `Grant: ${c.action} to ${c.branch ?? 'any protected branch'} in ${projectName(c.projectId)}, ${c.uses === null ? 'unlimited uses' : `${c.uses} use${c.uses === 1 ? '' : 's'}`}, for ${durationText(c.ttlMs)}`;
+    case 'instruction':
+      return `Standing instruction (${c.projectId === null ? 'all projects' : projectName(c.projectId)}): ${c.text}`;
+    case 'revoke':
+      return `Revoke ${c.target} ${c.id}`;
+    case 'toggle':
+      return `Turn Bubbles ${c.enabled ? 'on' : 'off'}`;
+  }
+  return 'Unknown change';
+}
+
+/** One line for a log entry: outcome · reason (or detail, or the request). */
+export function logSummary(e: LogEntry): string {
+  const text = e.reason || e.detail || e.request || '';
+  return [e.outcome, text].filter(Boolean).join(' · ');
 }
 
 const answerableId = (a: AgentView | undefined): string | undefined => (a?.pending?.answerable ? a.pending.id : undefined);

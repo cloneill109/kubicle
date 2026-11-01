@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { OfficeState, titleFor, moveFloor, FEED_MAX, pickNeedsYou, shouldAutoSelect } from '../../src/ui/state.ts';
-import type { AgentView, BubblesState, ProjectRow } from '../../src/shared/protocol.ts';
+import { OfficeState, titleFor, moveFloor, FEED_MAX, LOG_MAX, pickNeedsYou, shouldAutoSelect, logMatches, describeChange, logSummary, statusLabel } from '../../src/ui/state.ts';
+import type { AgentView, BubblesState, LogEntry, ProjectRow } from '../../src/shared/protocol.ts';
 
 const BUB: BubblesState = { status: { state: 'on', detail: '', callsToday: 0, cap: 300, thinking: 0 }, instructions: [], grants: [], pending: [] };
 const v = (id: string, o: Partial<AgentView> = {}): AgentView => ({
@@ -91,4 +91,74 @@ test('I5: shouldAutoSelect only when the current selection has no answerable pen
   assert.equal(shouldAutoSelect(v('cur', { status: 'waiting', pending: pend('q', 1, false) }), inc), true);
   assert.equal(shouldAutoSelect(v('cur', { status: 'waiting', pending: pend('q', 1, true) }), inc), false, 'never steal an open approval');
   assert.equal(shouldAutoSelect(inc, inc), false, 'already selected');
+});
+
+// ---------------------------------------------------------------- Bubbles (Task 9)
+const snap = (bubbles: BubblesState) => ({ t: 'snapshot' as const, agents: [], projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, warnings: [] }, bubbles });
+const entry = (seq: number, o: Partial<LogEntry> = {}): LogEntry => ({ seq, ts: seq * 1000, kind: 'triage', prevHash: 'p', hash: `h${seq}`, ...o });
+
+test('bubbles: the snapshot sets it, a bubbles message replaces it wholesale', () => {
+  const s = new OfficeState();
+  assert.equal(s.bubbles, null, 'nothing before the first snapshot');
+  const c = s.apply(snap(BUB));
+  assert.equal(c.bubbles, true);
+  assert.deepEqual(s.bubbles, BUB);
+  const next: BubblesState = {
+    status: { state: 'off-duty', detail: 'cap', callsToday: 300, cap: 300, thinking: 0 },
+    instructions: [{ id: 'i1', projectId: null, text: 'be careful', version: 1, createdAt: 1, revokedAt: null }],
+    grants: [], pending: [],
+  };
+  const c2 = s.apply({ t: 'bubbles', ...next });
+  assert.equal(c2.bubbles, true);
+  assert.deepEqual(s.bubbles, next, 'replaced, and the message tag is not kept');
+  assert.equal('t' in s.bubbles!, false);
+  assert.equal(s.apply({ t: 'banner', text: null }).bubbles, false, 'other messages leave it alone');
+});
+
+test('log: newest first, de-duplicated by seq, capped at LOG_MAX', () => {
+  const s = new OfficeState();
+  s.apply(snap(BUB));
+  assert.equal(s.log.length, 0);
+  assert.deepEqual(s.apply({ t: 'log', entry: entry(1) }).log.map((e) => e.seq), [1]);
+  s.apply({ t: 'log', entry: entry(2) });
+  assert.deepEqual(s.apply({ t: 'log', entry: entry(2) }).log, [], 'a duplicate is not reported as new');
+  assert.deepEqual(s.log.map((e) => e.seq), [2, 1]);
+  // Out-of-order arrival (an HTTP page merged after live entries) still lands in seq order.
+  assert.deepEqual(s.mergeLog([entry(5), entry(3), entry(1)]).map((e) => e.seq), [5, 3], 'returns only the new ones');
+  assert.deepEqual(s.log.map((e) => e.seq), [5, 3, 2, 1]);
+  for (let i = 10; i < 10 + LOG_MAX + 20; i++) s.apply({ t: 'log', entry: entry(i) });
+  assert.equal(s.log.length, LOG_MAX);
+  assert.equal(LOG_MAX, 500);
+  assert.equal(s.log[0].seq, 10 + LOG_MAX + 19, 'newest first');
+  assert.equal(s.log.at(-1)!.seq, 10 + 20, 'oldest dropped');
+  // A reconnect snapshot keeps the log (the snapshot does not carry it).
+  s.apply(snap(BUB));
+  assert.equal(s.log.length, LOG_MAX);
+});
+
+test('logMatches: project, session, kind and case-insensitive text, as the server filters', () => {
+  const e = entry(7, { kind: 'escalation', projectId: '/p', sessionId: 's1', reason: 'Push to MAIN' });
+  assert.equal(logMatches(e, {}), true);
+  assert.equal(logMatches(e, { project: '/p', kind: 'escalation', grep: 'main' }), true);
+  assert.equal(logMatches(e, { project: '/q' }), false);
+  assert.equal(logMatches(e, { kind: 'triage' }), false);
+  assert.equal(logMatches(e, { session: 's2' }), false);
+  assert.equal(logMatches(e, { grep: 'nothing here' }), false);
+  assert.equal(logMatches(e, { grep: 'h7' }), false, 'hash/seq are not part of the searched text');
+});
+
+test('describeChange / logSummary / statusLabel give the owner the exact change in words', () => {
+  const name = (id: string) => (id === '/p' ? 'alpha' : id);
+  assert.equal(describeChange({ type: 'grant', projectId: '/p', action: 'push', branch: null, uses: 1, ttlMs: 3_600_000 }, name),
+    'Grant: push to any protected branch in alpha, 1 use, for 1 h');
+  assert.equal(describeChange({ type: 'grant', projectId: '/p', action: 'merge', branch: 'main', uses: null, ttlMs: 1_800_000 }, name),
+    'Grant: merge to main in alpha, unlimited uses, for 30 min');
+  assert.equal(describeChange({ type: 'instruction', projectId: null, text: 'no force pushes' }, name), 'Standing instruction (all projects): no force pushes');
+  assert.equal(describeChange({ type: 'instruction', projectId: '/p', text: 'x' }, name), 'Standing instruction (alpha): x');
+  assert.equal(describeChange({ type: 'revoke', target: 'grant', id: 'g1' }, name), 'Revoke grant g1');
+  assert.equal(describeChange({ type: 'toggle', enabled: false }, name), 'Turn Bubbles off');
+  assert.equal(logSummary(entry(1, { kind: 'escalation', outcome: 'protected', reason: 'push to main' })), 'protected · push to main');
+  assert.equal(logSummary(entry(1, { kind: 'owner-answer', outcome: 'allow', detail: 'answered in the office' })), 'allow · answered in the office');
+  assert.equal(logSummary(entry(1, { kind: 'toggle' })), '');
+  assert.deepEqual(['on', 'off', 'off-duty', 'failing', 'unavailable'].map((s) => statusLabel(s as never)), ['On', 'Off', 'Off duty', 'Failing', 'Unavailable']);
 });

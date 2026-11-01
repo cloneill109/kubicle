@@ -1,12 +1,14 @@
 // Inspector panel: who is selected, what they are doing, the approval box and routing toggles.
 // Reads OfficeState; all writes go through post() with the CSRF header and same-origin cookie.
-import type { AgentView } from '../shared/protocol.ts';
+import type { AgentView, LogEntry } from '../shared/protocol.ts';
 import type { SimAgent } from './render/types.ts';
 import { ROLE, sprite } from './render/sprite.ts';
-import type { OfficeState } from './state.ts';
+import { logSummary, type OfficeState } from './state.ts';
 
 export const LINK_TEXT = 'Started in a terminal. You can watch it and answer approvals here when routing is on.';
 export const TOO_LONG_TEXT = 'Too long to review here — answer in the terminal.';
+export const PROTECTED_TEXT = 'Protected branch — only you can approve this.';
+const BUB_LOG_MAX = 20;
 const STATUS_TEXT: Record<AgentView['status'], string> = { idle: 'Idle', working: 'Working', waiting: 'Needs you', quiet: 'Quiet', lost: 'Lost contact' };
 
 export function post(path: string, body: unknown): Promise<Response> {
@@ -16,6 +18,11 @@ export function post(path: string, body: unknown): Promise<Response> {
     headers: { 'content-type': 'application/json', 'X-Kubicle-CSRF': '1' },
     body: JSON.stringify(body),
   });
+}
+
+/** Owner read API (GET /api/bubbles, /api/log): same-origin cookie plus the CSRF header, like the writes. */
+export function getApi(path: string): Promise<Response> {
+  return fetch(path, { credentials: 'same-origin', headers: { 'X-Kubicle-CSRF': '1' } });
 }
 
 export const roleLabel = (role: string) => ROLE[role]?.label ?? role;
@@ -33,6 +40,9 @@ export class Inspector {
   #roomBusy = false;
   #roomNote = '';
   #roomKey = '';
+  /** Bubbles' log entries for the selected agent's session (GET /api/log?session=…, then live), newest first. */
+  #bub: { session: string; entries: LogEntry[]; loaded: boolean } = { session: '', entries: [], loaded: false };
+  #bubKey = '';
   #state: OfficeState;
   #simAgents: () => SimAgent[];
   #rooms: (projectId: string) => { id: string; name: string }[];
@@ -55,6 +65,40 @@ export class Inspector {
     this.#routeNote = '';
     this.#roomNote = '';
     this.#logKey = '';
+    this.#loadBubbles();
+    this.render(0);
+  }
+
+  /** Fetches the selected agent's session entries from Bubbles' log (newest 20). */
+  #loadBubbles(): void {
+    const v = this.selectedId ? this.#state.agents.get(this.selectedId) : undefined;
+    const session = v?.sessionId ?? '';
+    if (session === this.#bub.session) return;
+    this.#bub = { session, entries: [], loaded: false };
+    this.#bubKey = '';
+    if (!session) return;
+    const want = this.#bub;
+    void getApi(`/api/log?session=${encodeURIComponent(session)}&limit=${BUB_LOG_MAX}`)
+      .then(async (r) => (r.ok ? await r.json() as LogEntry[] : []))
+      .catch(() => [] as LogEntry[])
+      .then((rows) => {
+        if (this.#bub !== want) return; // the selection moved on
+        this.#mergeBubbles(rows);
+        want.loaded = true;
+        this.render(0);
+      });
+  }
+
+  #mergeBubbles(rows: LogEntry[]): void {
+    const seen = new Set(this.#bub.entries.map((e) => e.seq));
+    const add = rows.filter((e) => e.sessionId === this.#bub.session && !seen.has(e.seq));
+    if (add.length) this.#bub.entries = [...add, ...this.#bub.entries].sort((a, b) => b.seq - a.seq).slice(0, BUB_LOG_MAX * 5);
+  }
+
+  /** Live log entries: keep the selected session's Bubbles section current. */
+  onLog(fresh: LogEntry[]): void {
+    if (!this.#bub.session || !fresh.some((e) => e.sessionId === this.#bub.session)) return;
+    this.#mergeBubbles(fresh);
     this.render(0);
   }
 
@@ -102,7 +146,15 @@ export class Inspector {
       $<HTMLButtonElement>('deny').disabled = !!st?.busy;
       setText($('iPendingNote'), !answerable ? 'Answer this in the terminal'
         : st?.note ?? (tooLong ? TOO_LONG_TEXT : ''));
+      // Why Bubbles handed it over (model text: textContent only).
+      const nb = p?.bubbles;
+      $('iBubbles').hidden = !nb;
+      setText($('iBubblesReason'), nb ? `Bubbles: ${nb.reason}` : '');
+      $('iBubblesRec').hidden = !nb?.recommendation;
+      setText($('iBubblesRec'), nb?.recommendation ? `Recommends: ${nb.recommendation}` : '');
+      $('iBubblesProtected').hidden = nb?.why !== 'protected';
     }
+    $('iBubblesThinking').hidden = !v.bubblesThinking;
 
     // ---- facts ----
     setText($('iTask'), v.kind === 'subagent'
@@ -146,6 +198,17 @@ export class Inspector {
       this.#logKey = logKey;
       const ol = $('iLog');
       ol.replaceChildren(...(v.log.length ? v.log.slice(0, 8) : ['Nothing yet']).map((l) => { const li = document.createElement('li'); li.textContent = l; return li; }));
+    }
+
+    // ---- Bubbles: this agent's entries in the log ----
+    if (this.#bub.session !== v.sessionId) this.#loadBubbles();
+    const mine = this.#bub.entries.filter((e) => (v.kind === 'subagent' ? e.agentId === v.agentId : true)).slice(0, BUB_LOG_MAX);
+    const bubKey = `${this.#bub.loaded}|${mine.map((e) => e.seq).join()}`;
+    if (bubKey !== this.#bubKey) {
+      this.#bubKey = bubKey;
+      const lines = mine.length ? mine.map((e) => `${new Date(e.ts).toLocaleTimeString([], { hour12: false })} ${e.kind}${logSummary(e) ? ` · ${logSummary(e)}` : ''}`)
+        : [this.#bub.loaded ? 'Nothing from Bubbles for this agent yet' : 'Loading…'];
+      $('iBubLog').replaceChildren(...lines.map((l) => { const li = document.createElement('li'); li.textContent = l; return li; }));
     }
 
     this.#avatar(v, now);

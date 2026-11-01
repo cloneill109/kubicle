@@ -32,6 +32,11 @@ async function main() {
   switch (mode) {
     case 'approve-high': return out(envelope(verdict('approve', 0.95)));
     case 'escalate': return out(envelope(verdict('escalate', 0.9)));
+    // Model text that looks like markup: the office must show it as text (never build elements from it).
+    case 'escalate-xss': return out(envelope(JSON.stringify({
+      decision: 'escalate', confidence: 0.9, reason: 'odd <img src=x onerror="window.__xss=1"> request', uncertain_about_direction: false,
+      recommendation_for_owner: 'deny <b>it</b><img src=y onerror="window.__xss=2">',
+    })));
     case 'approve-mid-then-high': return out(envelope(verdict('approve', strong ? 0.9 : 0.6)));
     case 'approve-mid-then-mid': return out(envelope(verdict('approve', 0.6)));
     case 'uncertain': return out(envelope(verdict('approve', 0.95, true)));

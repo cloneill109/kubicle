@@ -104,6 +104,8 @@ export interface LobbyOptions {
   onRestore?: (id: string) => void;
   /** Shown instead of the list when there are no floors at all. */
   emptyText?: string;
+  /** Placed above the floor list (the Bubbles card). Kept as is: the caller owns and updates it. */
+  header?: HTMLElement;
 }
 
 /** Renders the Lobby into `container`: one row per floor (click to go there), each with a menu. */
@@ -112,6 +114,7 @@ export function renderLobby(container: HTMLElement, items: FloorItem[], onPick: 
   const sub = document.createElement('p'); sub.className = 'sub';
   sub.textContent = 'Every floor in the building. Pick one to take the elevator there.';
   const out: HTMLElement[] = [h, sub];
+  if (o.header) out.push(o.header);
   const floors = items.filter((i) => i.id !== 'lobby');
   if (!floors.length && !o.archived?.length) {
     const p = document.createElement('p'); p.className = 'lobby-empty'; p.id = 'lobbyEmpty';

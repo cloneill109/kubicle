@@ -21,6 +21,8 @@
   <button class="btn edit-btn" id="editBtn" type="button" aria-pressed="false" aria-controls="editSheet" title="Rearrange this floor's rooms" hidden>Edit floor</button>
   <div class="counts" id="counts" aria-live="polite"></div>
   <div class="tools">
+    <button class="btn bub-dot" id="bubblesDot" type="button" data-state="" aria-haspopup="dialog" aria-controls="bubblesPanel" aria-label="Bubbles: connecting. Open the Bubbles panel"><i class="dot" aria-hidden="true"></i>Bubbles<span class="glow" hidden></span></button>
+    <button class="btn" id="logBtn" type="button" aria-haspopup="dialog" aria-controls="logView" title="Everything Bubbles decided, and why">Log</button>
     <button class="btn chime" id="chime" type="button" aria-pressed="false" title="Play a sound when an agent starts waiting on you">Chime off</button>
     <nav class="styles" role="tablist" aria-label="Visual style" id="styleTabs"></nav>
   </div>
@@ -81,9 +83,15 @@
         <p><b>Needs your approval</b> to run:</p>
         <code id="iPendingCmd"></code>
         <pre class="pending-input" id="iPendingInput" tabindex="0" aria-label="Full tool input" hidden></pre>
+        <div class="bub-note" id="iBubbles" hidden>
+          <p id="iBubblesReason"></p>
+          <p id="iBubblesRec" hidden></p>
+          <p class="bub-protected" id="iBubblesProtected" hidden>Protected branch — only you can approve this.</p>
+        </div>
         <div class="btns" id="iPendingBtns"><button class="btn primary" id="approve" type="button">Approve</button><button class="btn" id="deny" type="button">Deny</button></div>
         <p class="conn" id="iPendingNote"></p>
       </div>
+      <p class="bub-thinking" id="iBubblesThinking" role="status" hidden><i class="bmark" aria-hidden="true">B</i>Bubbles is looking at this request…</p>
       <dl class="facts">
         <dt>Task</dt><dd id="iTask"></dd>
         <dt>Doing</dt><dd id="iDoing" class="mono"></dd>
@@ -109,12 +117,95 @@
         <p class="conn tabs-note">Available for agents launched from the office (stage 2)</p>
       </div>
       <div><h3>Recent activity</h3><ol class="log" id="iLog"></ol></div>
+      <div id="iBubSection"><h3>Bubbles</h3><ol class="log" id="iBubLog"></ol></div>
     </div>
   </aside>
   </div>
 </div>
 
 <div class="floor-menu" id="floorMenu" role="menu" hidden></div>
+
+<dialog class="drawer bub-panel" id="bubblesPanel" aria-labelledby="bubTitle">
+  <header class="bub-head">
+    <canvas class="bub-avatar" width="14" height="14" aria-hidden="true"></canvas>
+    <div class="bub-title"><h2 id="bubTitle">Bubbles</h2><p class="sub">Coordinator · looks at your agents' permission requests first</p></div>
+    <button class="btn icon" id="bubblesClose" type="button" aria-label="Close the Bubbles panel">✕</button>
+  </header>
+  <div class="bub-statusbox" id="bubStatus" data-state="">
+    <p class="bub-line"><i class="dot" aria-hidden="true"></i><b class="bub-state" id="bubState">Connecting…</b><span class="bub-calls" id="bubCalls"></span></p>
+    <p class="bub-detail" id="bubDetail"></p>
+    <label class="bub-switch"><input type="checkbox" id="bubblesEnabled" role="switch"> Bubbles answers requests (off: every request comes to you)</label>
+    <p class="bub-err" id="bubEnabledMsg" role="alert" hidden></p>
+  </div>
+  <section class="bub-sec" aria-labelledby="bubWaitH">
+    <h3 id="bubWaitH">Waiting for you</h3>
+    <p class="bub-help">Changes asked for from the command line. Nothing happens until you confirm.</p>
+    <ol class="bub-list" id="bubblesPending"></ol>
+  </section>
+  <section class="bub-sec" aria-labelledby="bubInstrH">
+    <h3 id="bubInstrH">Standing instructions</h3>
+    <ol class="bub-list" id="bubblesInstructions"></ol>
+    <form class="bub-form" id="instrForm">
+      <h4>Add an instruction</h4>
+      <div class="field wide"><label for="instrText">Instruction</label><textarea id="instrText" rows="3" maxlength="1000" required placeholder="e.g. Never approve anything that deletes data."></textarea></div>
+      <div class="field"><label for="instrScope">Applies to</label><select id="instrScope"></select></div>
+      <button class="btn" id="instrAdd" type="submit">Add instruction</button>
+      <p class="bub-err" id="instrMsg" role="alert" hidden></p>
+    </form>
+  </section>
+  <section class="bub-sec" aria-labelledby="bubGrantH">
+    <h3 id="bubGrantH">Grants</h3>
+    <p class="bub-help">Let agents push or merge to a protected branch without asking you, for a while.</p>
+    <ol class="bub-list" id="bubblesGrants"></ol>
+    <form class="bub-form" id="grantForm">
+      <h4>New grant</h4>
+      <div class="field"><label for="grantProject">Project</label><select id="grantProject" required></select></div>
+      <div class="field"><label for="grantAction">Action</label><select id="grantAction"><option value="push">Push</option><option value="merge">Merge</option></select></div>
+      <div class="field wide"><label for="grantBranch">Branch</label><input id="grantBranch" maxlength="200" autocomplete="off" spellcheck="false" placeholder="any protected branch"></div>
+      <div class="field"><label for="grantUses">Uses</label><select id="grantUses"><option value="1">1 use</option><option value="unlimited">Unlimited</option></select></div>
+      <div class="field"><label for="grantTtl">For</label><select id="grantTtl"><option value="1800000">30 m</option><option value="3600000" selected>1 h</option><option value="86400000">1 d</option></select></div>
+      <button class="btn" id="grantAdd" type="submit">Add grant</button>
+      <p class="bub-err" id="grantMsg" role="alert" hidden></p>
+    </form>
+  </section>
+  <section class="bub-sec" aria-labelledby="bubRecentH">
+    <h3 id="bubRecentH">Recent decisions</h3>
+    <ol class="log bub-recent" id="bubblesRecent"></ol>
+    <button class="btn" id="bubblesOpenLog" type="button">Open the full log</button>
+  </section>
+</dialog>
+
+<dialog class="wide log-view" id="logView" aria-labelledby="logTitle">
+  <header class="log-head">
+    <div><h2 id="logTitle">Log</h2><p class="sub">Everything Bubbles saw and decided, newest first. Append-only.</p></div>
+    <button class="btn icon" id="logClose" type="button" aria-label="Close the log">✕</button>
+  </header>
+  <form class="log-filters" id="logFilters" role="search">
+    <div class="field"><label for="logProject">Project</label><select id="logProject"></select></div>
+    <div class="field"><label for="logKind">Kind</label><select id="logKind"></select></div>
+    <div class="field grow"><label for="logGrep">Search</label><input id="logGrep" type="search" maxlength="200" autocomplete="off" spellcheck="false" placeholder="text in any field"></div>
+  </form>
+  <p class="bub-err" id="logMsg" role="alert" hidden></p>
+  <div class="log-body">
+    <div class="log-table-wrap">
+      <table class="log-table">
+        <thead><tr><th scope="col">Time</th><th scope="col">Kind</th><th scope="col">Project</th><th scope="col">Agent</th><th scope="col">What</th></tr></thead>
+        <tbody id="logRows"></tbody>
+      </table>
+      <p class="log-empty" id="logEmpty" hidden>No entries match.</p>
+    </div>
+    <section class="log-detail" id="logDetail" aria-labelledby="logDetailH" hidden>
+      <h3 id="logDetailH">Entry</h3>
+      <div class="log-transcript" id="logTranscriptRow">
+        <span class="lbl">Transcript</span>
+        <code id="logTranscript"></code>
+        <button class="btn" id="logCopy" type="button">Copy path</button>
+        <span class="conn" id="logCopyNote" role="status"></span>
+      </div>
+      <pre class="log-json" id="logJson" tabindex="0" aria-label="Entry as JSON"></pre>
+    </section>
+  </div>
+</dialog>
 
 <script type="module" src="/ui/main.js"></script>
 </body>

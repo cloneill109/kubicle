@@ -4,7 +4,8 @@
 // Screenshots land in test-results/live-*.png for a human look. Run with `npm run test:e2e`.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -57,6 +58,8 @@ type Office = {
   editRooms(): { id: string; name: string; division?: string; band: 'top' | 'bottom'; width: number }[] | null;
   /** Client coordinates of a room's body (its center) or its resize handle, scrolling the map box to it. */
   editPoint(id: string, part: 'body' | 'resize'): { x: number; y: number; unit: number };
+  /** Agent ids with the Bubbles "B" mark on the last frame. */
+  bubblesMarks(): string[];
 };
 declare global { interface Window { __office: Office } }
 
@@ -811,4 +814,260 @@ test('CLI parity: kubicle edits show up live in the office, and UI saves show in
   assert.equal(stale.status, 3);
   assert.ok(stale.stderr.includes(CONFLICT));
   await page.close();
+});
+
+// ---------------------------------------------------------------- Bubbles in the office (Task 9)
+/** A hook event through the private socket, as the real hook script sends it. */
+function sockHook(body: Record<string, unknown>, transcript: string): Promise<{ status: number; text: string }> {
+  const payload = JSON.stringify({ transcript_path: transcript, ...body });
+  return new Promise((resolve, reject) => {
+    const r = httpRequest({
+      socketPath: srv!.hookSocket, path: '/hooks', method: 'POST',
+      headers: {
+        'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'x-kubicle-token': srv!.ingestToken,
+        ...(body.hook_event_name === 'PermissionRequest' ? { 'x-kubicle-hook-kind': 'perm' } : {}),
+      },
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') }));
+    });
+    r.on('error', reject);
+    r.end(payload);
+  });
+}
+const decisionOf = (text: string) => (JSON.parse(text.trim()) as { hookSpecificOutput: { decision: { behavior: string } } }).hookSpecificOutput.decision.behavior;
+const logKinds = (page: Page) => page.$$eval('#logRows tr', (trs) => trs.map((tr) => (tr as HTMLElement).dataset.kind));
+
+test('Bubbles: Lobby card, protected push notes, Log view, B marker, escaping, CLI confirmation, panel', async () => {
+  await srv?.close();
+  const home = join(tmp, 'home-bub');
+  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, { openBrowser: false });
+  const eps = repo('epsilon');
+  const S = 'eeeeeeee-0000-4000-8000-000000000005';
+  const transcript = join(tmp, 'eps-transcript.jsonl');
+  writeFileSync(transcript, '');
+  // Async: the server runs in this process, and the CLI talks to it over the socket (spawnSync would deadlock).
+  const kubicle = (args: string[]) => new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
+    execFile(join(root, 'bin', 'kubicle'), args, { cwd: eps, encoding: 'utf8', env: { ...process.env, KUBICLE_HOME: home } },
+      (err, stdout, stderr) => resolve({ status: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr }));
+  });
+
+  const ctx = await browser.newContext({ viewport: { width: 1400, height: 1000 }, permissions: ['clipboard-read', 'clipboard-write'] });
+  const page = await ctx.newPage();
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+  page.on('console', (m) => { if (m.type() === 'error' && !/fonts\.(googleapis|gstatic)|Failed to load resource/.test(m.text())) errors.push(m.text()); });
+  await page.goto(srv.loginUrl);
+  await page.waitForFunction(() => !!window.__office && document.body.dataset.conn === 'open', null, { timeout: 10000 });
+
+  // ---- 2. the Lobby shows Bubbles "on" (avatar, status, detail, calls), above the floor list; the header dot too ----
+  const card = page.locator('#bubblesCard');
+  await card.waitFor({ state: 'visible', timeout: 3000 });
+  assert.equal(await card.getAttribute('data-state'), 'on');
+  assert.match(await card.innerText(), /Bubbles/);
+  assert.match(await card.locator('.bub-state').innerText(), /^On$/);
+  assert.match(await card.locator('.bub-detail').innerText(), /Bubbles is on\./);
+  assert.match(await card.locator('.bub-calls').innerText(), /calls today 0 \/ 300/);
+  assert.equal(await card.locator('canvas').count(), 1, 'a pixel avatar');
+  assert.ok(await page.evaluate(() => { const c = document.querySelector('#bubblesCard canvas') as HTMLCanvasElement; const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data; for (let i = 0; i < d.length; i += 4) if (d[i] === 0xf2 && d[i + 1] === 0xb8 && d[i + 2] === 0x4b) return true; return false; }), 'the avatar wears coordinator gold');
+  assert.equal(await page.locator('#bubblesDot').getAttribute('data-state'), 'on');
+  assert.match(await page.locator('#bubblesDot').getAttribute('aria-label') ?? '', /Bubbles: On/);
+  await page.screenshot({ path: join(outDir, 'live-bubbles-lobby.png') });
+
+  // ---- 3. a PermissionRequest for `git push origin main` through the socket ----
+  await sockHook({ session_id: S, hook_event_name: 'SessionStart', cwd: eps, source: 'startup' }, transcript);
+  await page.waitForFunction(() => window.__office.floor() !== 'lobby', null, { timeout: 5000 });
+  const pushed = sockHook({ session_id: S, hook_event_name: 'PermissionRequest', cwd: eps, tool_name: 'Bash', tool_input: { command: 'git push origin main' }, tool_use_id: 'tp1' }, transcript);
+  // ---- 4. the approval card: the protected notice and Bubbles' reason ----
+  await page.locator('#approve').waitFor({ state: 'visible', timeout: 10000 });
+  assert.equal(await page.locator('#iBubblesProtected').innerText(), 'Protected branch — only you can approve this.');
+  const reason = await page.locator('#iBubblesReason').innerText();
+  assert.match(reason, /^Bubbles: \S/);
+  assert.ok(await page.locator('#iBubblesRec').isHidden(), 'no recommendation for a rule hit');
+  await page.screenshot({ path: join(outDir, 'live-bubbles-approval.png') });
+  await page.locator('#iPending').screenshot({ path: join(outDir, 'live-bubbles-approval-card.png') });
+  // ---- 5. approve ----
+  await page.locator('#approve').click();
+  const pres = await pushed;
+  assert.equal(decisionOf(pres.text), 'allow');
+  await page.waitForFunction(() => /0 need you/.test(document.getElementById('counts')!.innerText), null, { timeout: 5000 });
+
+  // ---- 6. the Log view: escalation and owner-answer rows, filters, details, copy ----
+  await page.locator('#logBtn').click();
+  await page.locator('#logView').waitFor({ state: 'visible', timeout: 3000 });
+  await page.waitForFunction(() => { const k = [...document.querySelectorAll<HTMLElement>('#logRows tr')].map((t) => t.dataset.kind); return k.includes('escalation') && k.includes('owner-answer'); }, null, { timeout: 5000 });
+  const kinds = await logKinds(page);
+  assert.equal(kinds.indexOf('owner-answer') < kinds.indexOf('escalation'), true, `newest first: ${kinds.join()}`);
+  const seqs = await page.$$eval('#logRows tr', (trs) => trs.map((tr) => Number((tr as HTMLElement).dataset.seq)));
+  assert.deepEqual(seqs, [...seqs].sort((a, b) => b - a));
+  await page.locator('#logKind').selectOption('escalation');
+  await page.waitForFunction(() => { const k = [...document.querySelectorAll<HTMLElement>('#logRows tr')].map((t) => t.dataset.kind); return k.length > 0 && k.every((x) => x === 'escalation'); }, null, { timeout: 3000 });
+  await page.locator('#logGrep').fill('no such text anywhere');
+  await page.waitForFunction(() => document.querySelectorAll('#logRows tr').length === 0, null, { timeout: 3000 });
+  await page.locator('#logGrep').fill('origin MAIN');
+  await page.waitForFunction(() => document.querySelectorAll('#logRows tr').length === 1, null, { timeout: 3000 });
+  await page.locator('#logRows tr').first().click();
+  await page.locator('#logDetail').waitFor({ state: 'visible', timeout: 3000 });
+  const json = JSON.parse(await page.locator('#logJson').innerText()) as { kind: string; outcome: string; reason: string };
+  assert.equal(json.kind, 'escalation');
+  assert.equal(json.outcome, 'protected');
+  assert.equal(`Bubbles: ${json.reason}`, reason, 'the card shows the logged reason');
+  assert.equal(await page.locator('#logTranscript').innerText(), transcript);
+  await page.locator('#logCopy').click();
+  await page.waitForFunction(() => /Copied/.test(document.getElementById('logCopyNote')!.textContent ?? ''), null, { timeout: 3000 });
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), transcript);
+  // live prepends: only entries that match the current filters
+  await page.locator('#logGrep').fill('');
+  await page.locator('#logKind').selectOption('');
+  await page.waitForFunction(() => document.querySelectorAll('#logRows tr').length >= 3, null, { timeout: 3000 });
+  await page.locator('#logKind').selectOption('toggle');
+  await page.waitForFunction(() => document.querySelectorAll('#logRows tr').length === 0, null, { timeout: 3000 });
+  const off = await page.evaluate(() => fetch('/api/bubbles/enabled', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'X-Kubicle-CSRF': '1' }, body: JSON.stringify({ enabled: false }) }).then((r) => r.status));
+  assert.equal(off, 204);
+  await page.waitForFunction(() => [...document.querySelectorAll<HTMLElement>('#logRows tr')].map((t) => t.dataset.kind).join() === 'toggle', null, { timeout: 3000 });
+  await page.waitForFunction(() => document.getElementById('bubblesDot')!.dataset.state === 'off', null, { timeout: 3000 });
+  await page.locator('#logKind').selectOption('');
+  await page.waitForFunction(() => document.querySelectorAll('#logRows tr').length >= 4, null, { timeout: 3000 });
+  await page.locator('#logRows tr', { has: page.locator('td', { hasText: /^escalation$/ }) }).first().click();
+  await page.waitForTimeout(150);
+  await page.screenshot({ path: join(outDir, 'live-bubbles-log.png') });
+  await page.keyboard.press('Escape');
+  await page.locator('#logView').waitFor({ state: 'hidden', timeout: 3000 });
+  assert.equal(await page.evaluate(() => document.activeElement?.id), 'logBtn', 'focus back on the Log button');
+  const on = await page.evaluate(() => fetch('/api/bubbles/enabled', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'X-Kubicle-CSRF': '1' }, body: JSON.stringify({ enabled: true }) }).then((r) => r.status));
+  assert.equal(on, 204);
+  await page.waitForFunction(() => document.getElementById('bubblesDot')!.dataset.state === 'on', null, { timeout: 3000 });
+
+  // ---- the B marker while Bubbles looks at a request, in all four styles ----
+  process.env.FAKE_CLAUDE_DELAY = '4000';
+  await settle(page);
+  const slow = sockHook({ session_id: S, hook_event_name: 'PermissionRequest', cwd: eps, tool_name: 'Bash', tool_input: { command: 'echo fake-mode:slow-escalate' }, tool_use_id: 'tp2' }, transcript);
+  for (const st of STYLES) {
+    await page.locator(`#styleTabs button[data-style="${st}"]`).click();
+    await page.waitForFunction((id) => window.__office.bubblesMarks().includes(id), S, { timeout: 3000 });
+    await page.waitForTimeout(100);
+    await page.locator('#mapWrap').screenshot({ path: join(outDir, `live-bubbles-mark-${st}.png`) });
+  }
+  await page.locator('#styleTabs button[data-style="pixel"]').click();
+  assert.match(await page.locator('#iBubblesThinking').innerText(), /Bubbles is looking at this request/);
+  await page.locator('#approve').waitFor({ state: 'visible', timeout: 15000 });
+  await page.waitForFunction(() => !window.__office.bubblesMarks().length, null, { timeout: 3000 });
+  assert.equal(await page.locator('#iBubblesReason').innerText(), 'Bubbles: fake escalate at 0.9');
+  assert.ok(await page.locator('#iBubblesProtected').isHidden(), 'no protected notice for an ordinary escalation');
+  await page.locator('#deny').click();
+  assert.equal(decisionOf((await slow).text), 'deny');
+  delete process.env.FAKE_CLAUDE_DELAY;
+
+  // ---- escaping: model text that looks like markup is shown as text, everywhere ----
+  await page.waitForFunction(() => /0 need you/.test(document.getElementById('counts')!.innerText), null, { timeout: 5000 });
+  const xss = sockHook({ session_id: S, hook_event_name: 'PermissionRequest', cwd: eps, tool_name: 'Bash', tool_input: { command: 'echo fake-mode:escalate-xss' }, tool_use_id: 'tp3' }, transcript);
+  await page.waitForFunction(() => /onerror/.test(document.getElementById('iBubblesReason')!.textContent ?? ''), null, { timeout: 10000 });
+  assert.equal(await page.locator('#iBubblesReason').innerText(), 'Bubbles: odd <img src=x onerror="window.__xss=1"> request');
+  assert.equal(await page.locator('#iBubblesRec').innerText(), 'Recommends: deny <b>it</b><img src=y onerror="window.__xss=2">');
+  assert.equal(await page.locator('img').count(), 0, 'no img element was created');
+  assert.equal(await page.locator('#iBubbles b').count(), 0, 'no b element either');
+  await page.locator('#iPending').screenshot({ path: join(outDir, 'live-bubbles-escaped.png') });
+  await page.locator('#deny').click();
+  assert.equal(decisionOf((await xss).text), 'deny');
+  // the inspector's Bubbles section lists this session's entries (as text, too)
+  await page.waitForFunction(() => /escalation/.test(document.getElementById('iBubLog')!.textContent ?? '') && /onerror/.test(document.getElementById('iBubLog')!.textContent ?? ''), null, { timeout: 5000 });
+  await page.locator('#logBtn').click();
+  await page.waitForFunction(() => /onerror/.test(document.getElementById('logRows')!.textContent ?? ''), null, { timeout: 5000 });
+  assert.equal(await page.locator('img').count(), 0, 'the log view created no img either');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.evaluate(() => (window as unknown as { __xss?: number }).__xss), undefined, 'no handler ran');
+
+  // ---- CLI confirmation: kubicle grant push → Waiting for you → Confirm → under Grants ----
+  const g = await kubicle(['grant', 'push', '--project', eps]);
+  assert.equal(g.status, 0, g.stderr);
+  assert.match(g.stdout, /confirm in the office/);
+  await page.locator('#bubblesDot').click();
+  const panel = page.locator('#bubblesPanel');
+  await panel.waitFor({ state: 'visible', timeout: 3000 });
+  const want = 'Grant: push to any protected branch in epsilon, 1 use, for 1 h';
+  await page.waitForFunction((t) => (document.getElementById('bubblesPending')!.textContent ?? '').includes(t), want, { timeout: 3000 });
+  assert.equal(await page.locator('#bubblesGrants li.grant').count(), 0);
+  await page.screenshot({ path: join(outDir, 'live-bubbles-panel.png') });
+  await page.locator('#bubblesPending li', { hasText: want }).locator('button', { hasText: 'Confirm' }).click();
+  await page.waitForFunction(() => document.querySelectorAll('#bubblesPending li.change').length === 0, null, { timeout: 3000 });
+  await page.waitForFunction(() => document.querySelectorAll('#bubblesGrants li.grant').length === 1, null, { timeout: 3000 });
+  const grantText = await page.locator('#bubblesGrants li.grant').innerText();
+  assert.match(grantText, /epsilon/); assert.match(grantText, /push/); assert.match(grantText, /any protected branch/); assert.match(grantText, /1 use left/); assert.match(grantText, /until/);
+  // a rejected CLI request goes away and changes nothing
+  assert.equal((await kubicle(['instruct', 'never push on Fridays'])).status, 0);
+  await page.waitForFunction(() => document.querySelectorAll('#bubblesPending li.change').length === 1, null, { timeout: 3000 });
+  await page.locator('#bubblesPending li.change button', { hasText: 'Reject' }).click();
+  await page.waitForFunction(() => document.querySelectorAll('#bubblesPending li.change').length === 0, null, { timeout: 3000 });
+  assert.equal(await page.locator('#bubblesInstructions li.instr').count(), 0);
+
+  // ---- standing instructions: add (this project), revoke ----
+  await page.locator('#instrText').fill('Ask before touching CI <script>x</script>');
+  await page.locator('#instrScope').selectOption({ label: 'epsilon' });
+  await page.locator('#instrAdd').click();
+  await page.waitForFunction(() => document.querySelectorAll('#bubblesInstructions li.instr').length === 1, null, { timeout: 3000 });
+  assert.match(await page.locator('#bubblesInstructions li.instr').innerText(), /Ask before touching CI <script>x<\/script>/);
+  assert.match(await page.locator('#bubblesInstructions li.instr').innerText(), /epsilon/);
+  assert.equal(await page.locator('#instrText').inputValue(), '', 'cleared after adding');
+  await page.locator('#bubblesInstructions li.instr button', { hasText: 'Revoke' }).click();
+  await page.waitForFunction(() => document.querySelectorAll('#bubblesInstructions li.instr').length === 0, null, { timeout: 3000 });
+
+  // ---- new grant form: merge, branch, unlimited, 1 d; a server 400 shows inline verbatim ----
+  await page.route('**/api/bubbles/grants', (r) => r.fulfill({ status: 400, contentType: 'text/plain', body: 'branch must be a name or null' }));
+  await page.locator('#grantAction').selectOption('merge');
+  await page.locator('#grantBranch').fill('release');
+  await page.locator('#grantUses').selectOption('unlimited');
+  await page.locator('#grantTtl').selectOption({ label: '1 d' });
+  await page.locator('#grantAdd').click();
+  await page.waitForFunction(() => document.getElementById('grantMsg')!.textContent === 'branch must be a name or null', null, { timeout: 3000 });
+  await page.unroute('**/api/bubbles/grants');
+  const gr = page.waitForRequest((r) => r.url().endsWith('/api/bubbles/grants'));
+  await page.locator('#grantAdd').click();
+  assert.deepEqual(JSON.parse((await gr).postData() ?? '{}'), { projectId: await projectId(page, 'epsilon'), action: 'merge', branch: 'release', uses: null, ttlMs: 86_400_000 });
+  await page.waitForFunction(() => document.querySelectorAll('#bubblesGrants li.grant').length === 2, null, { timeout: 3000 });
+  assert.ok(await page.locator('#grantMsg').isHidden(), 'the error clears after a good save');
+  assert.match(await page.locator('#bubblesGrants').innerText(), /merge[\s\S]*release[\s\S]*unlimited/);
+  await page.locator('#bubblesGrants li.grant', { hasText: 'release' }).locator('button', { hasText: 'Revoke' }).click();
+  await page.waitForFunction(() => document.querySelectorAll('#bubblesGrants li.grant').length === 1, null, { timeout: 3000 });
+
+  // ---- recent decisions, and the on/off toggle in the panel ----
+  const recent = await page.$$eval('#bubblesRecent li', (lis) => lis.length);
+  assert.ok(recent > 0 && recent <= 20, `recent decisions: ${recent}`);
+  await page.locator('#bubblesEnabled').uncheck();
+  await page.waitForFunction(() => document.getElementById('bubblesDot')!.dataset.state === 'off', null, { timeout: 3000 });
+  await page.locator('#bubblesEnabled').check();
+  await page.waitForFunction(() => document.getElementById('bubblesDot')!.dataset.state === 'on', null, { timeout: 3000 });
+  await page.screenshot({ path: join(outDir, 'live-bubbles-panel-grants.png') });
+  await page.keyboard.press('Escape');
+  await panel.waitFor({ state: 'hidden', timeout: 3000 });
+  assert.equal(await page.evaluate(() => document.activeElement?.id), 'bubblesDot', 'focus back on the opener');
+
+  // ---- the Lobby card opens the panel; so does #bubbles ----
+  await goFloor(page, 'Lobby');
+  await page.locator('#bubblesCard').click();
+  await panel.waitFor({ state: 'visible', timeout: 3000 });
+  await page.keyboard.press('Escape');
+  await panel.waitFor({ state: 'hidden', timeout: 3000 });
+  await page.goto(`${srv.url}/#bubbles`);
+  await page.waitForFunction(() => !!window.__office && document.body.dataset.conn === 'open', null, { timeout: 10000 });
+  await panel.waitFor({ state: 'visible', timeout: 3000 });
+  await page.keyboard.press('Escape');
+
+  // ---- 400px: the panel and the log fit ----
+  await page.setViewportSize({ width: 400, height: 900 });
+  await page.locator('#bubblesDot').click();
+  await panel.waitFor({ state: 'visible', timeout: 3000 });
+  const pb = await panel.boundingBox();
+  assert.ok(pb && pb.x >= 0 && pb.x + pb.width <= 400, `panel inside the viewport ${JSON.stringify(pb)}`);
+  await page.screenshot({ path: join(outDir, 'live-bubbles-panel-400.png') });
+  await page.keyboard.press('Escape');
+  await page.locator('#logBtn').click();
+  const lb = await page.locator('#logView').boundingBox();
+  assert.ok(lb && lb.x >= 0 && lb.x + lb.width <= 400, `log inside the viewport ${JSON.stringify(lb)}`);
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'no horizontal page scroll at 400px');
+  await page.screenshot({ path: join(outDir, 'live-bubbles-log-400.png') });
+  await page.keyboard.press('Escape');
+
+  assert.deepEqual(errors, [], 'no page errors');
+  await ctx.close();
 });

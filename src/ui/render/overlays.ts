@@ -10,6 +10,9 @@ export interface SignRect { roomId: string; x: number; y: number; w: number; h: 
 
 export const UNKNOWN_DIVISION = 'Unknown division';
 
+/** Agent ids that got the Bubbles "B" mark on the last drawOverlays call (for tests). */
+export const bubblesMarks: string[] = [];
+
 const isPix = (s: StyleId) => s === 'pixel' || s === 'iso';
 const signFont = (s: StyleId) => isPix(s) ? '600 12px "Pixelify Sans", monospace' : s === 'blueprint' ? '500 10.5px "IBM Plex Mono", monospace' : '600 11px "IBM Plex Sans", sans-serif';
 const tagFont = (s: StyleId) => s === 'blueprint' ? '500 11px "IBM Plex Mono", monospace' : s === 'cozy' ? '600 11.5px "IBM Plex Sans", sans-serif' : '500 13px "Pixelify Sans", monospace';
@@ -30,6 +33,7 @@ const overlaps = (a: SignRect, b: SignRect) => a.x < b.x + b.w && b.x < a.x + a.
  */
 export function drawOverlays(ctx: CanvasRenderingContext2D, R: Renderer, style: StyleId, world: World, agents: SimAgent[], roomOf: (a: SimAgent) => string, selected: string | undefined, hovered: string | undefined, now: number, cw: number): SignRect[] {
   const u = R.unit(), pix = isPix(style);
+  bubblesMarks.length = 0;
   ctx.save();
   // ---- door signs ----
   ctx.font = signFont(style);
@@ -86,6 +90,8 @@ export function drawOverlays(ctx: CanvasRenderingContext2D, R: Renderer, style: 
       ctx.beginPath(); ctx.ellipse(f.x, cy, Math.max(11, u * 0.7), Math.max(7, u * (pix ? 0.38 : 0.7)), 0, 0, 7); ctx.stroke(); ctx.setLineDash([]);
     }
     let y = t.y - 5;
+    // Bubbles is triaging this agent's permission request: a small "B" beside the head (next to any "!").
+    if (a.view.bubblesThinking && a.anim !== 'leaving') { bMark(ctx, style, t.x + 10, y); bubblesMarks.push(a.view.id); }
     if (st === 'waiting') {
       const b = Math.round(Math.sin(now * 5) * 2), s = 16;
       ctx.fillStyle = '#f2b84b';
@@ -103,6 +109,30 @@ export function drawOverlays(ctx: CanvasRenderingContext2D, R: Renderer, style: 
   }
   ctx.restore();
   return signs;
+}
+
+/** The Bubbles mark: a 14px badge with a "B" in coordinator gold, styled per renderer. (x, bottom) = its left edge, baseline. */
+function bMark(ctx: CanvasRenderingContext2D, style: StyleId, x: number, bottom: number): void {
+  const s = 14, bx = Math.round(x), by = Math.round(bottom - s);
+  const prevFont = ctx.font;
+  ctx.font = `700 10px ${style === 'blueprint' ? '"IBM Plex Mono", monospace' : style === 'cozy' ? '"IBM Plex Sans", sans-serif' : '"Pixelify Sans", monospace'}`;
+  if (style === 'cozy') {
+    ctx.fillStyle = '#2b2f3a'; ctx.beginPath(); ctx.arc(bx + s / 2, by + s / 2, s / 2, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#f2b84b'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = '#f2b84b';
+  } else if (style === 'blueprint') {
+    ctx.fillStyle = BLUEPRINT_BG; ctx.fillRect(bx, by, s, s);
+    ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.strokeRect(bx + .5, by + .5, s - 1, s - 1);
+    ctx.fillStyle = INK;
+  } else {
+    ctx.fillStyle = '#f2b84b'; ctx.fillRect(bx, by, s, s);
+    ctx.fillStyle = '#1d1b26'; ctx.fillRect(bx + 2, by + 2, s - 4, s - 4);
+    ctx.fillStyle = '#f2b84b';
+  }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('B', bx + s / 2, by + s / 2 + 1);
+  ctx.textAlign = 'left';
+  ctx.font = prevFont;
 }
 
 function zzz(ctx: CanvasRenderingContext2D, style: StyleId, x: number, y: number, now: number): void {
