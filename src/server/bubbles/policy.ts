@@ -9,6 +9,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import type { BubblesLog } from './log.ts';
 import type { Grant } from './rules.ts';
+import { isGitSafeBranch } from './config.ts';
 
 export type { Grant };
 
@@ -237,7 +238,9 @@ export class Policy {
 function validateGrant(g: GrantInput): { projectId: string; action: 'push' | 'merge'; branch: string | null; uses: number | null; ttlMs: number } {
   if (typeof g.projectId !== 'string' || !g.projectId) throw new PolicyError('projectId is required');
   if (g.action !== 'push' && g.action !== 'merge') throw new PolicyError(`unknown action: ${String(g.action)} (expected push or merge)`);
-  if (g.branch !== null && (typeof g.branch !== 'string' || !g.branch)) throw new PolicyError('branch must be a name or null');
+  if (g.branch !== null && !isGitSafeBranch(g.branch)) {
+    throw new PolicyError('branch must be null (any protected branch) or a git-safe branch name (no spaces, "..", invisible characters or leading "-")');
+  }
   const uses = g.uses === undefined ? 1 : g.uses;
   if (uses !== null && (!Number.isInteger(uses) || uses < 1)) throw new PolicyError('uses must be a positive integer or null');
   const ttlMs = g.ttlMs === undefined ? GRANT_DEFAULT_TTL_MS : g.ttlMs;
@@ -246,9 +249,21 @@ function validateGrant(g: GrantInput): { projectId: string; action: 'push' | 'me
   return { projectId: g.projectId, action: g.action, branch: g.branch, uses, ttlMs };
 }
 
+/**
+ * Characters that hide or reorder text on screen while Bubbles still reads them: C0/C1 controls other than tab,
+ * newline and carriage return; every format character (\p{Cf}: zero-width, joiners, word joiner, BOM, soft hyphen,
+ * bidi marks/overrides/isolates, Unicode tags U+E0000-E007F); variation selectors (U+FE00-FE0F, U+E0100-E01EF).
+ */
+const HIDDEN_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\p{Cf}\u{E0000}-\u{E007F}\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u;
+
 function validateInstruction(text: unknown): string {
   if (typeof text !== 'string' || text.length < 1 || text.length > INSTRUCTION_MAX) {
     throw new PolicyError(`instruction text must be 1-${INSTRUCTION_MAX} characters`);
+  }
+  const bad = HIDDEN_TEXT.exec(text);
+  if (bad) {
+    const cp = bad[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0');
+    throw new PolicyError(`instruction text contains an invisible, format or control character (U+${cp}); Bubbles would read text you cannot see. Remove it and try again.`);
   }
   return text;
 }

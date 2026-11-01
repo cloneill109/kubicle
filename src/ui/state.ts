@@ -240,15 +240,17 @@ export function durationText(ms: number): string {
   return `${m} min`;
 }
 
-// Bidi overrides/isolates (Trojan Source), marks, and C0/C1 controls other than tab and newline.
-const UNSAFE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+// C0/C1 controls other than tab and newline, and every format character (\p{Cf}: bidi overrides/isolates/marks as in
+// Trojan Source, zero-width spaces/joiners, word joiner, BOM, soft hyphen, Unicode tags U+E0000-E007F), plus variation
+// selectors: all of these hide or reorder text the owner reads while Bubbles still sees it.
+const UNSAFE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\p{Cf}\u{E0000}-\u{E007F}\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/gu;
 
 /** Agent/model/CLI-writable text for display: bidi and control characters removed. */
 export const cleanText = (s: unknown): string => String(s ?? '').replace(UNSAFE, '');
 
 /** Same characters, shown as visible <U+XXXX> tokens (for verbatim views: tool input, raw JSON). */
 export const revealText = (s: unknown): string =>
-  String(s ?? '').replace(UNSAFE, (ch) => `<U+${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}>`);
+  String(s ?? '').replace(UNSAFE, (ch) => `<U+${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}>`);
 
 const hhmm = (ts: number): string => { const d = new Date(ts); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
 const usesText = (n: number | null, left: boolean): string =>
@@ -259,7 +261,8 @@ const usesText = (n: number | null, left: boolean): string =>
  * from `current` (the live grants and instructions), since its id alone says nothing to the owner.
  */
 export function describeChange(c: PendingChange['change'], projectName: (id: string) => string, current?: Pick<BubblesState, 'grants' | 'instructions'> | null): string {
-  return cleanText(describe(c, projectName, current));
+  // Revealed, not stripped: the owner confirms exactly the text Bubbles would read, hidden characters included.
+  return revealText(describe(c, projectName, current));
 }
 function describe(c: PendingChange['change'], projectName: (id: string) => string, current?: Pick<BubblesState, 'grants' | 'instructions'> | null): string {
   switch (c.type) {

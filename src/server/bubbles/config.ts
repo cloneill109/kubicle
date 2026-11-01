@@ -16,6 +16,11 @@ export interface BubblesConfig {
 const KNOWN = new Set(['enabled', 'models', 'daily_call_cap', 'protected_branches', 'strict_scripts']);
 const BRANCH = /^[A-Za-z0-9_][A-Za-z0-9._\/+@-]*$/;
 
+/** A git-safe branch name: ASCII word characters and `._/+@-`, no leading `-`, no `..`, no trailing `.` / `/`, no `.lock`. */
+export function isGitSafeBranch(x: unknown): x is string {
+  return typeof x === 'string' && BRANCH.test(x) && !x.includes('..') && !/[.\/]$/.test(x) && !x.endsWith('.lock');
+}
+
 export function defaultBubblesConfig(): BubblesConfig {
   return { enabled: true, models: { fast: 'haiku', strong: 'sonnet' }, dailyCallCap: 300, protectedBranches: [], strictScripts: false };
 }
@@ -58,7 +63,7 @@ export function loadBubblesConfig(home: string): { config: BubblesConfig; warnin
   }
   if ('protected_branches' in doc) {
     const b = doc.protected_branches;
-    if (!Array.isArray(b) || !b.every((x) => typeof x === 'string' && BRANCH.test(x) && !x.includes('..') && !/[.\/]$/.test(x) && !x.endsWith('.lock'))) {
+    if (!Array.isArray(b) || !b.every(isGitSafeBranch)) {
       bad('protected_branches', 'an array of git-safe branch names (no spaces, "..", or leading "-")');
     } else config.protectedBranches = [...b] as string[];
   }

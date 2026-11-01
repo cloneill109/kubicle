@@ -4,7 +4,7 @@
 import type { BubblesState, Grant, Instruction, LogEntry, PendingChange } from '../shared/protocol.ts';
 import { sprite } from './render/sprite.ts';
 import type { SimAgent } from './render/types.ts';
-import { LOBBY, cleanText, describeChange, liveFloors, logSummary, statusLabel, type OfficeState } from './state.ts';
+import { LOBBY, cleanText, describeChange, liveFloors, logSummary, revealText, statusLabel, type OfficeState } from './state.ts';
 import { getApi, post } from './panel.ts';
 
 const RECENT = 20;
@@ -245,7 +245,7 @@ export class BubblesUi {
         const li = el('li', 'instr'); li.dataset.key = i.id;
         const scope = i.projectId === null ? 'All projects' : this.#o.projectName(i.projectId);
         const body = el('div', 'body');
-        body.append(el('p', 'text', i.text), el('p', 'meta', `${scope} · v${i.version} · added ${timeText(i.createdAt)}`));
+        body.append(el('p', 'text', revealText(i.text)), el('p', 'meta', `${scope} · v${i.version} · added ${timeText(i.createdAt)}`));
         li.append(body, this.#revokeBtn('instruction', i.id, `Revoke instruction: ${cleanText(i.text).slice(0, 80)}`));
         const st = this.#items.get(i.id);
         if (st?.msg) { const m = el('p', 'bub-err', st.msg); m.setAttribute('role', 'alert'); li.append(m); }
@@ -267,7 +267,7 @@ export class BubblesUi {
         const li = el('li', 'grant'); li.dataset.key = g.id;
         const body = el('div', 'body');
         const what = el('p', 'text');
-        what.append(el('b', '', g.action), ` to ${g.branch ?? 'any protected branch'} · ${this.#o.projectName(g.projectId)}`);
+        what.append(el('b', '', g.action), ` to ${g.branch === null ? 'any protected branch' : revealText(g.branch)} · ${this.#o.projectName(g.projectId)}`);
         const uses = g.usesLeft === null ? 'unlimited uses' : `${g.usesLeft} use${g.usesLeft === 1 ? '' : 's'} left`;
         body.append(what, el('p', 'meta', `${uses} · ${untilText(g.expiresAt)}`));
         li.append(body, this.#revokeBtn('grant', g.id, `Revoke grant: ${g.action} to ${g.branch ?? 'any protected branch'} in ${this.#o.projectName(g.projectId)}`));
