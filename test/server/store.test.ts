@@ -187,7 +187,7 @@ test('migration user_version 0 -> 1: every project becomes office once; a later 
     stage1Db(file, [{ id: '/p/a', name: 'a', wing: 0 }, { id: '/p/b', name: 'b', wing: 1 }]);
     let st = openStore(file);
     assert.deepEqual(st.listProjects().map((p) => p.approvals), ['office', 'office']);
-    assert.equal((st.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 1);
+    assert.equal((st.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 2);
     const a = st.listProjects()[0]!;
     st.upsertProject({ ...a, approvals: 'off' });
     st.close();
@@ -195,4 +195,36 @@ test('migration user_version 0 -> 1: every project becomes office once; a later 
     assert.deepEqual(st.listProjects().map((p) => p.approvals), ['off', 'office']);
     st.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('bubbles room persists across reopen', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kb-'));
+  const f = join(dir, 'o.db');
+  const a = openStore(f);
+  assert.equal(a.getSessionBubblesRoom('s1'), null);
+  a.setSessionBubblesRoom('s1', 'fe');
+  a.close();
+  const b = openStore(f);
+  assert.equal(b.getSessionBubblesRoom('s1'), 'fe');
+  b.setSessionBubblesRoom('s1', null);
+  assert.equal(b.getSessionBubblesRoom('s1'), null);
+  b.close();
+  rmSync(dir, { recursive: true });
+});
+
+test('a v1 database migrates to v2 without losing room labels', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kb-'));
+  const f = join(dir, 'o.db');
+  const raw = new DatabaseSync(f);
+  raw.exec(`CREATE TABLE session_settings (session_id TEXT PRIMARY KEY, approvals TEXT NOT NULL, room TEXT);
+    INSERT INTO session_settings VALUES ('s1','','lab'); PRAGMA user_version = 1;`);
+  raw.close();
+  const s = openStore(f);
+  assert.equal(s.getSessionRoom('s1'), 'lab');
+  s.setSessionBubblesRoom('s1', 'fe');
+  assert.equal(s.getSessionBubblesRoom('s1'), 'fe');
+  assert.equal(s.getSessionRoom('s1'), 'lab');
+  assert.equal((s.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 2);
+  s.close();
+  rmSync(dir, { recursive: true });
 });

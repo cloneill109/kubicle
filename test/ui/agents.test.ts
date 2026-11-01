@@ -319,3 +319,14 @@ test('a session revived while leaving brings its subagent back next to it', () =
   assert.equal(p.desk?.room, 'imagegen');
   assert.ok(Math.hypot(s.x - p.x, s.y - p.y) < 2.5, `subagent next to revived parent (${s.x},${s.y} vs ${p.x},${p.y})`);
 });
+
+test('a subagent with its own room resolves by its division, not its parent', () => {
+  const sim = new Sim(floor());
+  sim.upsert(view({ id: 'p', division: 'frontend' }), 0, { place: true });
+  sim.upsert(view({ id: 'p:x', kind: 'subagent', parentId: 'p', division: 'backend', ownRoom: true }), 0, { place: true });
+  sim.upsert(view({ id: 'p:y', kind: 'subagent', parentId: 'p' }), 0, { place: true });
+  assert.equal(sim.roomOf(get(sim, 'p:x')!), 'backend');
+  assert.equal(sim.roomOf(get(sim, 'p:y')!), 'frontend');
+  sim.upsert(view({ id: 'q', bubblesRoom: 'animation' }), 0, { place: true });
+  assert.equal(sim.roomOf(get(sim, 'q')!), 'animation');
+});

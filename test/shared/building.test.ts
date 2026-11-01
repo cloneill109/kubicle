@@ -99,3 +99,15 @@ test('M4/M5: division must be absent or an id; name must be 1–40 characters', 
     assert.ok(errs({ name: name as unknown as string }).includes('name of "a" must be 1–40 characters'), String(name));
   }
 });
+
+test('resolveRoom: assigned comes after label, room and division', () => {
+  const f: FloorDef = { revision: 0, source: 'default', rooms: [
+    { id: 'bullpen', name: 'Bullpen', band: 'bottom', width: 12 },
+    { id: 'fe', name: 'FE', division: 'frontend', band: 'top', width: 12 },
+    { id: 'be', name: 'BE', division: 'backend', band: 'top', width: 12 },
+  ] };
+  assert.equal(resolveRoom(f, { assigned: 'be' }), 'be');
+  assert.equal(resolveRoom(f, { label: 'fe', assigned: 'be' }), 'fe');
+  assert.equal(resolveRoom(f, { division: 'frontend', assigned: 'be' }), 'fe');
+  assert.equal(resolveRoom(f, { assigned: 'gone' }), 'bullpen');
+});

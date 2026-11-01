@@ -182,13 +182,13 @@ export class Sim {
 
   /** Room id for a view's hints on this floor (label, then room, then division, else the Bullpen), or null if that room isn't here. */
   #resolve(v: AgentView): string | null {
-    const id = resolveRoom(this.#floor, { label: v.roomLabel, room: v.room, division: v.division });
+    const id = resolveRoom(this.#floor, { label: v.roomLabel, room: v.room, division: v.division, assigned: v.bubblesRoom });
     return this.#world.rooms.some((r) => r.id === id) ? id : null;
   }
 
   /** The room an agent belongs in. Subagents follow their parent once it is on the floor. */
   #roomOf(a: Mover): string | null {
-    const p = a.view.kind === 'subagent' && a.view.parentId ? this.#agents.get(a.view.parentId) : undefined;
+    const p = a.view.kind === 'subagent' && !a.view.ownRoom && a.view.parentId ? this.#agents.get(a.view.parentId) : undefined;
     return this.#resolve(p ? p.view : a.view);
   }
 

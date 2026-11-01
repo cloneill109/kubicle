@@ -57,6 +57,12 @@ export interface AgentView {
   room?: string;
   /** Owner-set room (id) for this session; subagents follow their parent. */
   roomLabel?: string;
+  /** Room (id) Bubbles assigned from the session's first prompt; the owner's roomLabel outranks it. */
+  bubblesRoom?: string;
+  /** A subagent placed by its type: it sits in its division's room instead of following its parent. */
+  ownRoom?: boolean;
+  /** What Bubbles said about the first prompt (sessions only). */
+  bubblesNote?: { subagents: { specialty: string; job: string }[]; questions: string[] };
   approvals: 'off' | 'office'; // effective mode (session setting ?? project setting)
   /** Bubbles is triaging this agent's permission request right now. */
   bubblesThinking?: boolean;

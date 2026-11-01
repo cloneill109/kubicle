@@ -6,6 +6,7 @@ import { loadConfig } from '../../src/server/config.ts';
 import { Registry } from '../../src/server/registry.ts';
 import { nameFor } from '../../src/server/names.ts';
 import type { AgentEvent } from '../../src/shared/events.ts';
+import { resolveRoom, type FloorDef } from '../../src/shared/building.ts';
 
 const MIN = 60_000;
 let seq = 0;
@@ -403,4 +404,91 @@ test('room label and approvals settings do not clobber each other', () => {
   store.setSessionApprovals('s1', 'office');
   assert.equal(store.getSessionRoom('s1'), 'lab');
   assert.equal(store.getSessionApprovals('s1'), 'office');
+});
+
+function mkDiv() {
+  const store = openStore(':memory:');
+  const reg = new Registry(new Projects(store), store, loadConfig({}), undefined, {
+    divisions: () => [{ id: 'backend', name: 'Back end', color: '#000', harness: {}, revision: 1 }],
+  });
+  return { store, reg };
+}
+
+test('assignByBubbles sets bubblesRoom and note on session and subagents; bullpen clears the room', () => {
+  const { reg, store } = mkDiv();
+  reg.apply(ev('SessionStart', { ts: 1, cwd: '/tmp' }));
+  reg.apply(ev('SubagentStart', { ts: 2, agentId: 'a1', agentType: 'Explore' }));
+  const note = { subagents: [{ specialty: 'qa', job: 'test' }], questions: ['q?'] };
+  const out = reg.assignByBubbles('s1', 'fe', note);
+  assert.equal(out.length, 2);
+  assert.equal(reg.get('s1')!.bubblesRoom, 'fe');
+  assert.equal(reg.get('s1:a1')!.bubblesRoom, 'fe');
+  assert.deepEqual(reg.get('s1')!.bubblesNote, note);
+  assert.equal(store.getSessionBubblesRoom('s1'), 'fe');
+  reg.assignByBubbles('s1', 'bullpen', { subagents: [], questions: [] });
+  assert.equal(reg.get('s1')!.bubblesRoom, undefined);
+  assert.equal(reg.get('s1:a1')!.bubblesRoom, undefined);
+  assert.equal(store.getSessionBubblesRoom('s1'), null);
+  assert.deepEqual(reg.get('s1')!.bubblesNote, { subagents: [], questions: [] });
+  assert.deepEqual(reg.assignByBubbles('nope', 'fe', note), []);
+});
+
+test('bubblesRoom is restored from the store for a new registry', () => {
+  const { reg, store } = mkDiv();
+  reg.apply(ev('SessionStart', { ts: 1 }));
+  reg.assignByBubbles('s1', 'fe', { subagents: [], questions: [] });
+  const reg2 = new Registry(new Projects(store), store, loadConfig({}));
+  reg2.apply(ev('SessionStart', { ts: 5 }));
+  assert.equal(reg2.get('s1')!.bubblesRoom, 'fe');
+});
+
+test('typed subagents get their division and their own room; others inherit', () => {
+  const { reg } = mkDiv();
+  reg.apply(ev('SessionStart', { ts: 1, cwd: '/tmp' }));
+  reg.setRoomLabel('s1', 'fe');
+  reg.assignByBubbles('s1', 'fe2', { subagents: [], questions: [] });
+  for (const [i, t] of ['back-end', 'Back end', 'back_end', 'backend', 'BACKEND'].entries()) {
+    reg.apply(ev('SubagentStart', { ts: 2, agentId: `t${i}`, agentType: t }));
+    const s = reg.get(`s1:t${i}`)!;
+    assert.deepEqual([s.division, s.ownRoom, s.roomLabel, s.bubblesRoom, s.room], ['backend', true, undefined, undefined, undefined], t);
+  }
+  reg.apply(ev('SubagentStart', { ts: 2, agentId: 'e', agentType: 'Explore' }));
+  const e = reg.get('s1:e')!;
+  assert.deepEqual([e.roomLabel, e.bubblesRoom, e.ownRoom], ['fe', 'fe2', undefined]);
+  // later moves do not drag an own-room subagent along
+  reg.setRoomLabel('s1', 'zz');
+  reg.assignByBubbles('s1', 'yy', { subagents: [], questions: [] });
+  assert.equal(reg.get('s1:t0')!.roomLabel, undefined);
+  assert.equal(reg.get('s1:t0')!.bubblesRoom, undefined);
+  assert.equal(reg.get('s1:e')!.roomLabel, 'zz');
+});
+
+test('owner label and Bubbles room coexist; the label wins in resolveRoom', () => {
+  const { reg } = mkDiv();
+  reg.apply(ev('SessionStart', { ts: 1 }));
+  reg.setRoomLabel('s1', 'be');
+  reg.assignByBubbles('s1', 'fe', { subagents: [], questions: [] });
+  const v = reg.get('s1')!;
+  assert.deepEqual([v.roomLabel, v.bubblesRoom], ['be', 'fe']);
+  const f: FloorDef = { revision: 0, source: 'default', rooms: [
+    { id: 'bullpen', name: 'B', band: 'bottom', width: 12 },
+    { id: 'fe', name: 'FE', band: 'top', width: 12 },
+    { id: 'be', name: 'BE', band: 'top', width: 12 },
+  ] };
+  assert.equal(resolveRoom(f, { label: v.roomLabel, room: v.room, division: v.division, assigned: v.bubblesRoom }), 'be');
+});
+
+test('promptCount and lastPromptAt count session prompts only', () => {
+  const { reg } = mkDiv();
+  assert.equal(reg.promptCount('s1'), 0);
+  assert.equal(reg.lastPromptAt('s1'), undefined);
+  reg.apply(ev('SessionStart', { ts: 1 }));
+  reg.apply(ev('UserPromptSubmit', { ts: 10 }));
+  reg.apply(ev('SubagentStart', { ts: 11, agentId: 'a', agentType: 'Explore' }));
+  reg.apply(ev('UserPromptSubmit', { ts: 12, agentId: 'a' }));
+  reg.apply(ev('UserPromptSubmit', { ts: 20 }));
+  assert.equal(reg.promptCount('s1'), 2);
+  assert.equal(reg.lastPromptAt('s1'), 20);
+  reg.apply(ev('SessionEnd', { ts: 30 }));
+  assert.equal(reg.promptCount('s1'), 0);
 });

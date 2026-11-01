@@ -18,6 +18,8 @@ export interface Store {
   setSessionApprovals(sessionId: string, mode: 'off' | 'office'): void;
   getSessionRoom(sessionId: string): string | null;
   setSessionRoom(sessionId: string, roomId: string | null): void;
+  getSessionBubblesRoom(sessionId: string): string | null;
+  setSessionBubblesRoom(sessionId: string, roomId: string | null): void;
   prune(olderThanTs: number): void;
   close(): void;
 }
@@ -73,6 +75,20 @@ function initSchema(db: DatabaseSync, file: string): void {
   if (!(db.prepare('PRAGMA table_info(session_settings)').all() as { name: string }[]).some((c) => c.name === 'room')) {
     db.exec('ALTER TABLE session_settings ADD COLUMN room TEXT');
   }
+  // user_version 1 -> 2 (placement): the room Bubbles assigned to a session, kept apart from the owner's label.
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 2) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      if (!(db.prepare('PRAGMA table_info(session_settings)').all() as { name: string }[]).some((c) => c.name === 'bubbles_room')) {
+        db.exec('ALTER TABLE session_settings ADD COLUMN bubbles_room TEXT');
+      }
+      db.exec('PRAGMA user_version = 2');
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+  }
   if (file !== ':memory:') {
     // Main file plus WAL/SHM sidecars must not be world-readable.
     for (const f of [file, file + '-wal', file + '-shm']) {
@@ -104,6 +120,10 @@ function storeOn(db: DatabaseSync): Store {
   const upRoom = lazy(
     `INSERT INTO session_settings (session_id, approvals, room) VALUES (?,'',?)
      ON CONFLICT(session_id) DO UPDATE SET room=excluded.room`);
+  const selBRoom = lazy('SELECT bubbles_room FROM session_settings WHERE session_id = ?');
+  const upBRoom = lazy(
+    `INSERT INTO session_settings (session_id, approvals, bubbles_room) VALUES (?,'',?)
+     ON CONFLICT(session_id) DO UPDATE SET bubbles_room=excluded.bubbles_room`);
   const delOld = lazy('DELETE FROM events WHERE ts < ?');
 
   const parse = (rows: unknown[]): AgentEvent[] =>
@@ -145,6 +165,11 @@ function storeOn(db: DatabaseSync): Store {
       return r?.room ?? null;
     },
     setSessionRoom(sessionId, roomId) { upRoom().run(sessionId, roomId); },
+    getSessionBubblesRoom(sessionId) {
+      const r = selBRoom().get(sessionId) as { bubbles_room: string | null } | undefined;
+      return r?.bubbles_room ?? null;
+    },
+    setSessionBubblesRoom(sessionId, roomId) { upBRoom().run(sessionId, roomId); },
     prune(ts) { delOld().run(ts); },
     close() { db.close(); },
   };

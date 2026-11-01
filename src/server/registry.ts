@@ -3,6 +3,7 @@ import type { AgentEvent } from '../shared/events.ts';
 import type { AgentStatus, AgentView, FeedItem, PendingApproval } from '../shared/protocol.ts';
 import type { Config } from './config.ts';
 import type { Projects } from './projects.ts';
+import type { DivisionDef } from '../shared/building.ts';
 import type { Store } from './store.ts';
 import { nameFor } from './names.ts';
 
@@ -36,9 +37,12 @@ function defaultStat(p: string): number | null {
   try { return statSync(p).mtimeMs; } catch { return null; }
 }
 
+const normType = (s: string): string => s.toLowerCase().replace(/[\s_-]/g, '');
+
 function snap(a: AgentView): AgentView {
   const c: AgentView = { ...a, log: [...a.log] };
   if (a.pending) c.pending = { ...a.pending };
+  if (a.bubblesNote) c.bubblesNote = { subagents: a.bubblesNote.subagents.map((s) => ({ ...s })), questions: [...a.bubblesNote.questions] };
   return c;
 }
 
@@ -51,8 +55,14 @@ export class Registry {
   #transcripts = new Map<string, string>();
   #quietMtime = new Map<string, number | null>();
   #lastEventTs = 0;
+  #divisions: () => DivisionDef[];
+  #prompts = new Map<string, { count: number; last: number }>();
 
-  constructor(projects: Projects, store: Store, cfg: Config, statMtime?: (p: string) => number | null) {
+  constructor(
+    projects: Projects, store: Store, cfg: Config, statMtime?: (p: string) => number | null,
+    opts: { divisions?: () => DivisionDef[] } = {},
+  ) {
+    this.#divisions = opts.divisions ?? (() => []);
     this.#projects = projects;
     this.#store = store;
     this.#cfg = cfg;
@@ -111,15 +121,32 @@ export class Registry {
       a.agentId = e.agentId!;
       a.parentId = parent!.id;
       if (parent!.cwd) a.cwd = parent!.cwd;
-      if (parent!.division) a.division = parent!.division;
-      if (parent!.room) a.room = parent!.room;
-      if (parent!.roomLabel) a.roomLabel = parent!.roomLabel;
+      const div = e.agentType ? this.#divisionFor(e.agentType) : undefined;
+      if (div) {
+        // A specialist works in its division's room, not wherever its parent sits.
+        a.division = div;
+        a.ownRoom = true;
+      } else {
+        if (parent!.division) a.division = parent!.division;
+        if (parent!.room) a.room = parent!.room;
+        if (parent!.roomLabel) a.roomLabel = parent!.roomLabel;
+        if (parent!.bubblesRoom) a.bubblesRoom = parent!.bubblesRoom;
+      }
     } else {
       const label = this.#store.getSessionRoom(id);
       if (label) a.roomLabel = label;
+      const assigned = this.#store.getSessionBubblesRoom(id);
+      if (assigned) a.bubblesRoom = assigned;
     }
     this.#agents.set(id, a);
     return a;
+  }
+
+  /** Division id whose id or name matches an agent type (case, spaces, '-' and '_' ignored). */
+  #divisionFor(agentType: string): string | undefined {
+    const t = normType(agentType);
+    if (!t) return undefined;
+    return this.#divisions().find((d) => normType(d.id) === t || normType(d.name) === t)?.id;
   }
 
   #pushLog(a: AgentView, line: string): void {
@@ -190,6 +217,10 @@ export class Registry {
           t.pending = undefined;
           break;
         case 'UserPromptSubmit':
+          if (t.kind === 'session') {
+            const p = this.#prompts.get(t.sessionId);
+            this.#prompts.set(t.sessionId, { count: (p?.count ?? 0) + 1, last: e.ts });
+          }
           setStatus(t, 'working');
           t.pending = undefined;
           break;
@@ -250,6 +281,7 @@ export class Registry {
           }
           break;
         case 'SessionEnd':
+          this.#prompts.delete(e.sessionId);
           for (const [id, a] of [...this.#agents]) {
             if (a.sessionId === e.sessionId) {
               this.#agents.delete(id);
@@ -365,10 +397,35 @@ export class Registry {
     const out: AgentView[] = [];
     for (const x of this.#agents.values()) {
       if (x !== a && x.parentId !== a.id) continue;
+      if (x.ownRoom) continue;
       if (roomId) x.roomLabel = roomId; else delete x.roomLabel;
       out.push(snap(x));
     }
     return out;
+  }
+
+  /** Bubbles picked a room for a session from its first prompt. Returns the views changed (session, its followers). */
+  assignByBubbles(sessionId: string, roomId: string, note: NonNullable<AgentView['bubblesNote']>): AgentView[] {
+    const a = this.#agents.get(sessionId);
+    if (!a || a.kind !== 'session') return [];
+    const room = roomId === 'bullpen' ? null : roomId;
+    this.#store.setSessionBubblesRoom(sessionId, room);
+    a.bubblesNote = { subagents: note.subagents.map((s) => ({ ...s })), questions: [...note.questions] };
+    const out: AgentView[] = [];
+    for (const x of this.#agents.values()) {
+      if (x !== a && (x.parentId !== a.id || x.ownRoom)) continue;
+      if (room) x.bubblesRoom = room; else delete x.bubblesRoom;
+      out.push(snap(x));
+    }
+    return out;
+  }
+
+  lastPromptAt(sessionId: string): number | undefined {
+    return this.#prompts.get(sessionId)?.last;
+  }
+
+  promptCount(sessionId: string): number {
+    return this.#prompts.get(sessionId)?.count ?? 0;
   }
 
   refreshApprovals(): AgentView[] {
@@ -387,6 +444,7 @@ export class Registry {
     this.#agents.clear();
     this.#transcripts.clear();
     this.#quietMtime.clear();
+    this.#prompts.clear();
     this.#lastEventTs = 0;
     const sorted = events.map((e, i) => ({ e, i })).sort((x, y) => x.e.ts - y.e.ts || x.i - y.i);
     for (const { e } of sorted) this.apply(e);

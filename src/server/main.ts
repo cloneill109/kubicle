@@ -120,7 +120,8 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   const ingestToken = ensureIngestToken(cfg.home);
   const store = openStore(join(cfg.home, 'office.db'));
   const projects = new Projects(store);
-  const registry = new Registry(projects, store, cfg);
+  const building = new BuildingService(cfg.home);
+  const registry = new Registry(projects, store, cfg, undefined, { divisions: () => building.snapshot().divisions });
   const writer = new EventWriter(store);
   registry.rebuild(store.eventsSince(Date.now() - cfg.expireMs));
 
@@ -162,7 +163,6 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   let badTokenCount = 0;
   let staleHookAt = -Infinity; // last PreToolUse from a hook line without the `pre` kind (guard not running)
   let staleHookLogged = false;
-  const building = new BuildingService(cfg.home);
   const setBanner = (now: number) => {
     const hooks = now - badTokenAt < cfg.bannerMs ? BAD_TOKEN_BANNER : now - staleHookAt < cfg.bannerMs ? STALE_HOOKS_BANNER : staleBanner;
     const next = composeBanner(hooks, building.snapshot().warnings,

@@ -64,7 +64,7 @@ export function validateFloor(f: FloorDef, _divisionIds: Set<string>): string[] 
   return errs;
 }
 
-export function resolveRoom(floor: FloorDef, hint: { label?: string; room?: string; division?: string }): string {
+export function resolveRoom(floor: FloorDef, hint: { label?: string; room?: string; division?: string; assigned?: string }): string {
   const has = (id: string | undefined): id is string => !!id && floor.rooms.some((r) => r.id === id);
   if (has(hint.label)) return hint.label;
   if (has(hint.room)) return hint.room;
@@ -72,5 +72,6 @@ export function resolveRoom(floor: FloorDef, hint: { label?: string; room?: stri
     const r = floor.rooms.find((x) => x.division === hint.division);
     if (r) return r.id;
   }
+  if (has(hint.assigned)) return hint.assigned;
   return BULLPEN;
 }
