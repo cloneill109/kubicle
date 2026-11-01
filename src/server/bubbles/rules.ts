@@ -602,42 +602,64 @@ const PM_TEXT = /\b(push|merge|rebase|subtree|update-ref|sync)\b|refs\/|api\.git
  *  - CLOSED GRAMMAR: every segment of the whole command is (i) an allowed heredoc receiver, (ii) an INERT command
  *    (ls, cat, echo, mkdir, cp, ..., `git status|diff|log|show`), (iii) exactly `<shell> -n FILE`, or (iv) exactly
  *    `node|python|python3 FILE`. Enumerating executors failed open (awk system(), sed e, at, git hooks, npm scripts,
- *    ninja ...), so anything not listed falls back;
+ *    ninja ...), so anything not listed falls back. A closed-grammar segment also has no env-assignment prefix or
+ *    wrapper word (`BASH_ENV=x cat`, `env`, `command`, `time` ...), no word or redirect target containing `.git`
+ *    (`cp s .git/hooks/x`, `sort -o .git/...`), no file/program option on sort/grep/diff (`-o`, `-f`,
+ *    `--compress-program`, ...), and no `-c`/`-C`/`-o`/`--output`/`--ext-diff`/`--textconv`/`--exec` on git;
  *  - every segment reading a pipe is a pure-data command (an interpreter reading a pipe runs it);
- *  - a body written to a file is not referenced again (writtenFilesInert), and is not written under `.git/`.
+ *  - a file written by any segment (`>`, `>>`, `tee`) is not referenced again (writtenFilesInert).
  */
 const FILE_INTERP = new Set(['python', 'python3', 'node']);
 const PURE_DATA = new Set(['cat', 'tee', 'wc', 'grep', 'head', 'tail', 'sort', 'uniq', 'diff', 'base64']);
 const INERT = new Set([...PURE_DATA, 'ls', 'echo', 'printf', 'mkdir', 'cp', 'mv', 'chmod', 'touch', 'pwd', 'true', 'test', '[']);
 const INERT_GIT = new Set(['status', 'diff', 'log', 'show']);
+// sort/grep/diff options that read or write a named file or run a program: `-f`/`-o` (also attached `-ofile` or
+// combined `-nf`), and the long forms with any abbreviation getopt_long accepts (`--out`, `--comp`, `--fi`).
+const FILE_OPT_CMDS = new Set(['sort', 'grep', 'diff']);
+const FILE_LONG = ['file', 'from-file', 'to-file', 'output', 'compress'];
+// git status/diff/log/show options that run a program or write a file; long forms also abbreviated (`--ext`, `--out`).
+const GIT_RUN_SHORT = /^-[cCo]/;
+const GIT_RUN_LONG = ['output', 'ext-diff', 'textconv', 'exec'];
+/** `--name[=v]` is `target`, an abbreviation of it, or an extension of it (`--files0-from`, `--output-indicator-new`). */
+const longOpt = (x: string, targets: string[]): boolean => {
+  if (!x.startsWith('--') || x === '--') return false;
+  const n = lc(x.slice(2).split('=')[0]);
+  return targets.some(t => t.startsWith(n) || n.startsWith(t));
+};
+const fileOpt = (x: string): boolean => (/^-[^-]/.test(x) && /[fo]/i.test(x)) || longOpt(x, FILE_LONG);
 /** The closed grammar of segments a heredoc cut may sit beside (see heredocVerdict). */
 function closedGrammarSeg(s: Segment, receivers: Segment[]): boolean {
-  const w = stripPrefix(s.words);
+  const w = s.words; // NOT stripPrefix: an env assignment or wrapper word (env, command, time, nice, ...) falls back
   const c = w[0];
-  if (c === undefined || /[$`*?\[{\/]/.test(c) && c !== '[') return false; // opaque, glob, or a path
+  if (c === undefined || stripPrefix(w).length !== w.length) return false;
+  if (/[$`*?\[{\/]/.test(c) && c !== '[') return false; // opaque, glob, or a path
+  if ([...w, ...s.redirs.map(d => d.target)].some(x => lc(x).includes('.git'))) return false; // hooks, config
+  if (FILE_OPT_CMDS.has(c) && w.slice(1).some(fileOpt)) return false;
   if (s.pipeIn && !PURE_DATA.has(c)) return false;
   if (receivers.includes(s)) return true; // already passed dataReceiver
   if (INERT.has(c)) return true;
   if (c === 'git') {
     let j = 1;
     while (j < w.length && GRANT_GIT_GLOBAL.has(w[j])) j++;
-    return INERT_GIT.has(w[j]);
+    return INERT_GIT.has(w[j]) && !w.slice(j + 1).some(x => GIT_RUN_SHORT.test(x) || longOpt(x, GIT_RUN_LONG));
   }
-  if (noexecShell(s.words)) return true;
-  return s.words.length === 2 && FILE_INTERP.has(s.words[0]) && !/^[-+]/.test(s.words[1]);
+  if (noexecShell(w)) return true;
+  return w.length === 2 && FILE_INTERP.has(w[0]) && !/^[-+]/.test(w[1]);
 }
 /**
- * A heredoc body written to a file (`> f`, `>> f`, `tee f`) must not be run later in the same command: no other word
+ * A file written by any segment (`> f`, `>> f`, `tee f`) must not be run later in the same command: no other word
  * may name the file (its path or basename, even inside a word) except as the sole argument of python/python3/node
  * (the accepted interpreter residual), and nothing may find it another way (xargs, make, a changed PATH).
  */
-function writtenFilesInert(segs: Segment[], receivers: Segment[]): boolean {
+function writtenFilesInert(segs: Segment[]): boolean {
   const files: string[] = [];
-  const own = new Set<string>(); // the receivers' own file operands: not a later reference
-  for (const r of new Set(receivers)) {
-    for (const d of r.redirs) if (d.op.includes('>')) { files.push(d.target); own.add(d.target); }
-    const w = stripPrefix(r.words);
-    if (w[0] === 'tee') for (const a of w.slice(1)) if (!a.startsWith('-')) { files.push(a); own.add(a); }
+  const own = new Map<Segment, Set<string>>(); // each segment's own write targets: not a later reference
+  for (const s of segs) { // every segment, not only receivers: `echo x > t; bash -n t`
+    const mine = new Set<string>();
+    for (const d of s.redirs) if (d.op.includes('>')) mine.add(d.target);
+    const w = stripPrefix(s.words);
+    if (w[0] === 'tee') for (const a of w.slice(1)) if (!a.startsWith('-')) mine.add(a);
+    if (mine.size) { own.set(s, mine); files.push(...mine); }
   }
   if (files.length === 0) return true;
   if (files.some(f => comps(f).includes('.git'))) return false; // hooks, config aliases, remote.*.push
@@ -652,7 +674,7 @@ function writtenFilesInert(segs: Segment[], receivers: Segment[]): boolean {
       const interp = w.length === 2 && FILE_INTERP.has(w[0]) && w[1] === f;
       const words = [...s.words, ...s.redirs.map(d => d.target)];
       for (const x of words) {
-        if (own.has(x) && receivers.includes(s)) continue;
+        if (own.get(s)?.has(x)) continue;
         if (names.some(n => x.includes(n)) && !(interp && x === f)) return false;
       }
     }
@@ -671,7 +693,7 @@ function heredocVerdict(cmd: string, ctx: RulesCtx): Protected | null | undefine
   const receivers = segs.flatMap(s => s.redirs.filter(r => HEREDOC_OP.test(r.op)).map(() => s));
   if (receivers.length !== cut.bodies.length || !receivers.every(dataReceiver)) return undefined;
   if (!segs.every(s => closedGrammarSeg(s, receivers))) return undefined;
-  if (!writtenFilesInert(segs, receivers)) return undefined;
+  if (!writtenFilesInert(segs)) return undefined;
   for (let k = 0; k < cut.bodies.length; k++) {
     const body = lc(cut.bodies[k].body.replace(/['"\\]/g, ''));
     const gh = /(^|[^\w-])gh(?![\w-])/.test(body) && /(^|[^\w-])api(?![\w-])/.test(body);

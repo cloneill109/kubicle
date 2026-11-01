@@ -702,6 +702,68 @@ describe('heredoc bodies', () => {
     assert.equal(pm(`cat > out.txt <<'EOF'\n${O}\nEOF\nls && git --no-pager log -1 && echo done`), null);
   });
 
+  test('fix round 4: no wrappers, env prefixes, .git paths or file options in the closed grammar', () => {
+    const O = 'G=git; $G $(printf pu)sh origin main';
+    const H = `cat <<'EOF'\n${O}\nEOF\n`;
+    for (const c of [
+      // (1) env-assignment prefix or wrapper word on any segment
+      `BASH_ENV=x cat <<'EOF'\n${O}\nEOF`,
+      `env X=1 cat <<'EOF'\n${O}\nEOF`,
+      `command cat <<'EOF'\n${O}\nEOF`,
+      `builtin cat <<'EOF'\n${O}\nEOF`,
+      `nice -n 5 tee out.txt <<'EOF'\n${O}\nEOF`,
+      H + 'time ls',
+      H + 'exec echo x',
+      H + 'X=1 ls',
+      // (2) a .git path in any argument or redirect target
+      `cat > s <<'EOF'\n${O}\nEOF\ncp s .git/hooks/pre-commit`,
+      `cat > out.txt <<'EOF'\n${O}\nEOF\ncp other .git/hooks/pre-commit`,
+      `cat > out.txt <<'EOF'\n${O}\nEOF\nmv other .GIT/config`,
+      `cat > out.txt <<'EOF'\n${O}\nEOF\nchmod +x .git/hooks/pre-commit`,
+      `cat > out.txt <<'EOF'\n${O}\nEOF\ntouch .git/x && mkdir -p .git/hooks`,
+      `sort -o .git/hooks/x <<'EOF'\n${O}\nEOF`,
+      `sort --output=.git/hooks/x <<'EOF'\n${O}\nEOF`,
+      H + 'echo x > .git/config',
+      H + 'echo x >> .git/hooks/pre-commit',
+      // non-receiver redirect targets get the written-file checks
+      H + 'printf x > t && node t x',
+      H + 'echo x > t; bash -n t',
+      H + 'echo x | tee t; cat t',
+      // (3) file options on sort / grep / diff
+      `sort --compress-program=x <<'EOF'\n${O}\nEOF`,
+      `sort --compress=x <<'EOF'\n${O}\nEOF`,
+      `sort --comp x <<'EOF'\n${O}\nEOF`,
+      `sort -ofile <<'EOF'\n${O}\nEOF`,
+      `sort -no file <<'EOF'\n${O}\nEOF`,
+      `sort --out file <<'EOF'\n${O}\nEOF`,
+      `grep -f s <<'EOF'\n${O}\nEOF`,
+      `grep -if s <<'EOF'\n${O}\nEOF`,
+      `grep --file=s <<'EOF'\n${O}\nEOF`,
+      `diff --from-file=a - <<'EOF'\n${O}\nEOF`,
+      `diff --to-file=a - <<'EOF'\n${O}\nEOF`,
+      H + 'sort -o out.txt in.txt',
+      // (4) program-running / file-writing options on the inert git subcommands
+      H + 'git diff --ext-diff',
+      H + 'git diff --ext',
+      H + 'git log --output=x',
+      H + 'git log --out=x',
+      H + 'git show --textconv HEAD',
+      H + 'git -c a=b diff',
+      H + 'git -C .. status',
+      H + 'git diff -c',
+      H + 'git log -C x',
+      H + 'git status --exec=x',
+      H + 'git log -ox',
+    ]) assert.equal(pm(c)?.hit.kind, 'push', c);
+    // still inert
+    for (const c of [
+      H + 'git diff --stat && git log --oneline -1 && git status -s',
+      H + 'sort -n in.txt | uniq -c | head -5',
+      H + 'grep -n x in.txt',
+      `cat > out.txt <<'EOF'\n${O}\nEOF\necho done > log.txt`,
+    ]) assert.equal(pm(c), null, c);
+  });
+
   test('an unterminated heredoc is classified as commands', () => {
     assert.equal(pm('cat <<EOF\ngit push origin main')?.hit.kind, 'push');
     assert.equal(pm('cat <<EOF\ngit push origin main\nEOF2')?.hit.kind, 'push');
