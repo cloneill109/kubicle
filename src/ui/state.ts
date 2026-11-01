@@ -293,7 +293,24 @@ function describe(c: PendingChange['change'], projectName: (id: string) => strin
 /** One line for a log entry: outcome · reason (or detail, or the request), display-safe. */
 export function logSummary(e: LogEntry): string {
   const text = e.reason || e.detail || e.request || '';
-  return cleanText([e.outcome, text].filter(Boolean).join(' · '));
+  // An intake row leads with where Bubbles put the session and how sure it was.
+  const placed = e.kind === 'intake' ? [e.decision, typeof e.confidence === 'number' ? e.confidence.toFixed(2) : ''] : [];
+  return cleanText([...placed, e.outcome, text].filter(Boolean).join(' · '));
+}
+
+/** Inspector text for a session Bubbles placed: only when the owner has not picked a room themselves. */
+export function placedByBubblesText(v: AgentView, roomName: (id: string) => string): string {
+  if (!v.bubblesRoom || v.roomLabel) return '';
+  return `${cleanText(roomName(v.bubblesRoom))} · placed by Bubbles`;
+}
+
+/** Inspector lines for Bubbles' intake note: suggested subagents as `[specialty] job`, then its questions. */
+export function bubblesNoteLines(v: AgentView): { suggested: string[]; asks: string[] } {
+  const n = v.bubblesNote;
+  return {
+    suggested: (n?.subagents ?? []).map((s) => `[${cleanText(s.specialty)}] ${cleanText(s.job)}`),
+    asks: (n?.questions ?? []).map((q) => cleanText(q)),
+  };
 }
 
 const answerableId = (a: AgentView | undefined): string | undefined => (a?.pending?.answerable ? a.pending.id : undefined);

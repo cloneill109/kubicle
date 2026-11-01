@@ -45,7 +45,7 @@ after(async () => {
 
 type Office = {
   renderer(): { center(a: unknown): { x: number; y: number } };
-  sim: { agents(): { view: { id: string; name: string; status: string; roomLabel?: string }; anim: string; x: number; y: number }[] };
+  sim: { agents(): { view: { id: string; name: string; status: string; roomLabel?: string; bubblesRoom?: string }; anim: string; x: number; y: number }[] };
   state: { projects: { id: string; name: string; order: number; archived: boolean }[]; building: { floors: Record<string, { revision: number } | undefined> } };
   floor(): string;
   glow(): boolean;
@@ -833,6 +833,7 @@ function sockHook(body: Record<string, unknown>, transcript: string): Promise<{ 
       headers: {
         'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'x-kubicle-token': srv!.ingestToken,
         ...(body.hook_event_name === 'PermissionRequest' ? { 'x-kubicle-hook-kind': 'perm' } : {}),
+        ...(body.hook_event_name === 'UserPromptSubmit' ? { 'x-kubicle-hook-kind': 'prompt' } : {}),
       },
     }, (res) => {
       const chunks: Buffer[] = [];
@@ -1083,6 +1084,56 @@ test('Bubbles: Lobby card, protected push notes, Log view, B marker, escaping, C
   await page.screenshot({ path: join(outDir, 'live-bubbles-log-400.png') });
   await page.keyboard.press('Escape');
 
+  assert.deepEqual(errors, [], 'no page errors');
+  await ctx.close();
+});
+
+test('Bubbles intake: the inspector says who placed the session and shows suggestions; the Log view lists the intake row', async () => {
+  await srv?.close();
+  const home = join(tmp, 'home-intake');
+  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, { openBrowser: false });
+  const zeta = repo('zeta');
+  const S = 'ffffffff-0000-4000-8000-000000000006';
+  const transcript = join(tmp, 'zeta-transcript.jsonl');
+  writeFileSync(transcript, '');
+  const ctx = await browser.newContext({ viewport: { width: 1400, height: 1000 } });
+  const page = await ctx.newPage();
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+  page.on('console', (m) => { if (m.type() === 'error' && !/fonts\.(googleapis|gstatic)|Failed to load resource/.test(m.text())) errors.push(m.text()); });
+  await page.goto(srv.loginUrl);
+  await page.waitForFunction(() => !!window.__office && document.body.dataset.conn === 'open', null, { timeout: 10000 });
+  await page.locator('#styleTabs button[data-style="pixel"]').click();
+
+  await sockHook({ session_id: S, hook_event_name: 'SessionStart', cwd: zeta, source: 'startup' }, transcript);
+  await page.waitForFunction(() => window.__office.floor() !== 'lobby', null, { timeout: 5000 });
+  const r = await sockHook({ session_id: S, hook_event_name: 'UserPromptSubmit', cwd: zeta, prompt: 'fake-mode:intake-asks build the nav bar' }, transcript);
+  assert.equal(r.status, 200);
+  await page.waitForFunction((id) => window.__office.sim.agents().find((a) => a.view.id === id)?.view.bubblesRoom === 'frontend', S, { timeout: 5000 });
+  await settle(page);
+  await clickAgent(page, S);
+  await page.locator('#iMoveRow').waitFor({ state: 'visible', timeout: 3000 });
+  assert.equal(await page.locator('#iPlaced').innerText(), 'Front end · placed by Bubbles');
+  const note = await page.locator('#iBubblesNote').innerText();
+  assert.match(note, /Bubbles suggested/i);
+  assert.match(note, /\[backend\] check the API/);
+  assert.match(note, /Bubbles asks/i);
+  assert.match(note, /Which "nav" \\ layout\?/);
+  await page.locator('#inspector').screenshot({ path: join(outDir, 'live-bubbles-intake-inspector.png') });
+  // an explicit move by the owner replaces the "placed by Bubbles" line
+  await page.locator('#iRoom').selectOption('qa');
+  await page.waitForFunction(() => document.getElementById('iPlaced')!.hidden, null, { timeout: 3000 });
+
+  await page.locator('#logBtn').click();
+  await page.locator('#logView').waitFor({ state: 'visible', timeout: 3000 });
+  assert.ok((await page.$$eval('#logKind option', (os) => os.map((o) => (o as HTMLOptionElement).value))).includes('intake'));
+  await page.locator('#logKind').selectOption('intake');
+  await page.waitForFunction(() => [...document.querySelectorAll<HTMLElement>('#logRows tr')].some((t) => t.dataset.kind === 'intake'), null, { timeout: 5000 });
+  const row = await page.locator('#logRows tr[data-kind="intake"]').first().innerText();
+  assert.match(row, /frontend/);
+  assert.match(row, /0\.9/);
+  assert.match(row, /Focus on src\/ui/);
+  await page.keyboard.press('Escape');
   assert.deepEqual(errors, [], 'no page errors');
   await ctx.close();
 });

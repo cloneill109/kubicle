@@ -3,7 +3,7 @@
 import type { AgentView, LogEntry } from '../shared/protocol.ts';
 import type { SimAgent } from './render/types.ts';
 import { ROLE, sprite } from './render/sprite.ts';
-import { cleanText, logSummary, revealText, type OfficeState } from './state.ts';
+import { bubblesNoteLines, cleanText, logSummary, placedByBubblesText, revealText, type OfficeState } from './state.ts';
 
 export const LINK_TEXT = 'Started in a terminal. You can watch it and answer approvals here when routing is on.';
 export const TOO_LONG_TEXT = 'Too long to review here — answer in the terminal.';
@@ -191,6 +191,18 @@ export class Inspector {
       sel.disabled = this.#roomBusy;
       setText($('iRoomNote'), this.#roomNote);
     }
+    // ---- Bubbles' placement and intake note (model text: textContent only, via cleanText) ----
+    const rooms = this.#rooms(v.projectId);
+    const placed = placedByBubblesText(v, (id) => rooms.find((r) => r.id === id)?.name ?? (id === 'bullpen' ? 'Bullpen' : id));
+    $('iPlaced').hidden = !placed;
+    setText($('iPlaced'), placed);
+    const lines = bubblesNoteLines(v);
+    const fill = (id: string, items: string[]) => {
+      $(id).replaceChildren(...items.map((t) => { const li = document.createElement('li'); li.textContent = t; return li; }));
+      $(id).hidden = $(id + 'H').hidden = !items.length;
+    };
+    fill('iBubblesSug', lines.suggested); fill('iBubblesAsk', lines.asks);
+    $('iBubblesNote').hidden = !lines.suggested.length && !lines.asks.length;
 
     // ---- recent activity ----
     const logKey = v.log.slice(0, 8).join('\n');

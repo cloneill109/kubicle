@@ -1,6 +1,6 @@
 #!/bin/bash
 # Real-session smoke test: runs one `claude -p` session (with a subagent) against a throwaway
-# server, repo, home and settings file, then checks Bubbles triage (real `claude`; at most 3 `claude -p` runs in all: the session, then up to 2 for the triage). Never touches ~/.claude, ~/.kubicle or port 4317; hooks
+# server, repo, home and settings file, then checks Bubbles triage (real `claude`; a handful of `claude -p` runs in all: the session, up to 2 for the triage, a second session and its intake call). Never touches ~/.claude, ~/.kubicle or port 4317; hooks
 # reach the throwaway server over its Unix socket in the temp home (the port is only for the UI).
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -38,6 +38,16 @@ mkdir -p "$REPO/.claude" "$HOME_DIR"
 git -C "$REPO" init -q
 echo hello > "$REPO/a.txt"
 echo '{}' > "$REPO/.claude/settings.local.json"
+# The floor the building service reads for this repo (<repo>/.kubicle/floor.yaml): a frontend room for the intake check.
+mkdir -p "$REPO/.kubicle"
+cat > "$REPO/.kubicle/floor.yaml" <<'YAML'
+revision: 1
+rooms:
+  - { id: qa, name: QA, division: qa, band: top, width: 12 }
+  - { id: frontend, name: Front end, division: frontend, band: top, width: 12 }
+  - { id: bullpen, name: Bullpen, band: bottom, width: 14 }
+  - { id: backend, name: Back end, division: backend, band: bottom, width: 12 }
+YAML
 
 export KUBICLE_HOME="$HOME_DIR" KUBICLE_PORT="$PORT"
 unset KUBICLE_CLAUDE_BIN   # Bubbles must use the real claude here
@@ -133,5 +143,46 @@ BCHECK="$(printf '%s' "$LOGJSON" | node -e '
 echo "$BCHECK"
 case "$BCHECK" in *PASS*) ;; *) echo "$LOGJSON" >&2; fail "bubbles log assertions not met" ;; esac
 VERIFY="$($KUB log verify)" || fail "kubicle log verify failed: $VERIFY"
+echo "log verify: $VERIFY"
+
+# --- Bubbles intake: a second real session whose first prompt is about the front end ---
+SEEN2="$TMP/seen2.jsonl"
+: > "$SEEN2"
+(
+  while true; do
+    curl -s -m 2 -b "$JAR" -H "Origin: http://127.0.0.1:$PORT" "http://127.0.0.1:$PORT/api/debug/agents" >> "$SEEN2"
+    echo >> "$SEEN2"
+    sleep 0.3
+  done
+) &
+POLL_PID=$!
+echo "Running claude -p (haiku) intake session in $REPO ..."
+( cd "$REPO" && perl -e 'alarm 180; exec @ARGV' -- claude -p "Review the front end of this app" \
+    --model claude-haiku-5-5 --max-turns 2 --allowedTools "Bash(ls:*),Glob,Read" ) >"$TMP/claude2.out" 2>&1
+echo "claude exit: $?"
+sleep 1
+kill "$POLL_PID" 2>/dev/null; wait "$POLL_PID" 2>/dev/null
+LOGJSON="$($KUB log --json --limit 500)" || fail "kubicle log failed"
+INTAKE="$(printf '%s' "$LOGJSON" | node -e '
+  const fs = require("fs");
+  const first = new Set(JSON.parse(process.argv[1]).map((a) => a.id));
+  const sessions = new Map();
+  for (const line of fs.readFileSync(process.argv[2], "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try { for (const a of JSON.parse(line)) if (a.kind === "session" && !first.has(a.id)) sessions.set(a.id, { ...sessions.get(a.id), ...a }); } catch {}
+  }
+  let s = ""; process.stdin.on("data", (c) => s += c).on("end", () => {
+    const e = s.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const ids = [...sessions.keys()];
+    const rows = e.filter((x) => x.kind === "intake" && ids.includes(x.sessionId));
+    const briefed = rows.find((x) => x.outcome === "briefed");
+    const placed = [...sessions.values()].map((a) => a.bubblesRoom).find(Boolean);
+    console.log(`new_sessions=${ids.length} intake_rows=${rows.map((x) => x.outcome).join(",") || "none"} room=${briefed?.decision ?? "-"} confidence=${briefed?.confidence ?? "-"} bubblesRoom=${placed ?? "-"}`);
+    if (briefed) console.log(`briefing: ${briefed.reason}`);
+    if (briefed && placed && placed !== "bullpen") console.log("PASS");
+  });' "$AGENTS" "$SEEN2")"
+echo "$INTAKE"
+case "$INTAKE" in *PASS*) ;; *) echo "$LOGJSON" | grep '"intake"' >&2; fail "intake assertions not met (need a briefed intake entry and a non-bullpen bubblesRoom on the session)" ;; esac
+VERIFY="$($KUB log verify)" || fail "kubicle log verify failed after intake: $VERIFY"
 echo "log verify: $VERIFY"
 echo "SMOKE OK"

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { OfficeState, titleFor, moveFloor, FEED_MAX, LOG_MAX, pickNeedsYou, shouldAutoSelect, logMatches, describeChange, logSummary, statusLabel, cleanText, revealText } from '../../src/ui/state.ts';
+import { OfficeState, titleFor, moveFloor, FEED_MAX, LOG_MAX, pickNeedsYou, shouldAutoSelect, logMatches, describeChange, logSummary, statusLabel, cleanText, revealText, placedByBubblesText, bubblesNoteLines } from '../../src/ui/state.ts';
 import type { AgentView, BubblesState, LogEntry, ProjectRow } from '../../src/shared/protocol.ts';
 
 const BUB: BubblesState = { status: { state: 'on', detail: '', callsToday: 0, cap: 300, thinking: 0 }, instructions: [], grants: [], pending: [] };
@@ -160,6 +160,7 @@ test('describeChange / logSummary / statusLabel give the owner the exact change 
   assert.equal(logSummary(entry(1, { kind: 'escalation', outcome: 'protected', reason: 'push to main' })), 'protected · push to main');
   assert.equal(logSummary(entry(1, { kind: 'owner-answer', outcome: 'allow', detail: 'answered in the office' })), 'allow · answered in the office');
   assert.equal(logSummary(entry(1, { kind: 'toggle' })), '');
+  assert.equal(logSummary(entry(1, { kind: 'intake', decision: 'frontend', confidence: 0.9, outcome: 'briefed', reason: 'Focus on src/ui.' })), 'frontend · 0.90 · briefed · Focus on src/ui.');
   assert.deepEqual(['on', 'off', 'off-duty', 'failing', 'unavailable'].map((s) => statusLabel(s as never)), ['On', 'Off', 'Off duty', 'Failing', 'Unavailable']);
 });
 
@@ -206,4 +207,17 @@ test('final I2: tag characters, zero-width/format characters and variation selec
   assert.match(shown, /<U\+E0061>/);
   assert.equal(describeChange({ type: 'grant', projectId: '/p', action: 'push', branch: 'ma​in', uses: 1, ttlMs: 3_600_000 }, (id) => id),
     'Grant: push to ma<U+200B>in in /p, 1 use, for 1 h');
+});
+
+test('placedByBubblesText and bubblesNoteLines: placement label, owner pick wins, text is cleaned', () => {
+  const base = { id: 's', kind: 'session' } as AgentView;
+  const name = (id: string) => (id === 'fe' ? 'Front end' : id);
+  assert.equal(placedByBubblesText({ ...base, bubblesRoom: 'fe' }, name), 'Front end · placed by Bubbles');
+  assert.equal(placedByBubblesText({ ...base, bubblesRoom: 'fe', roomLabel: 'qa' }, name), '');
+  assert.equal(placedByBubblesText(base, name), '');
+  assert.equal(placedByBubblesText({ ...base, bubblesRoom: 'x‮y' }, name), 'xy · placed by Bubbles');
+  assert.deepEqual(bubblesNoteLines(base), { suggested: [], asks: [] });
+  assert.deepEqual(
+    bubblesNoteLines({ ...base, bubblesNote: { subagents: [{ specialty: 'backend', job: 'check‮ the API' }], questions: ['Which nav?'] } }),
+    { suggested: ['[backend] check the API'], asks: ['Which nav?'] });
 });
