@@ -10,7 +10,9 @@ npm run install-hooks    # adds 14 hook entries to ~/.claude/settings.json (back
 npm start                # builds the UI, starts the server, opens the login link
 ```
 
-Both have `kubicle` equivalents (`kubicle install-hooks`, `kubicle start`). Run `npm link` once to get `kubicle` on your PATH; `bin/kubicle` resolves its real location, so it works through the symlink.
+Start with `npm start` (or `./bin/kubicle start`). Both steps have `kubicle` equivalents (`kubicle install-hooks`, `kubicle start`); run `npm link` once to get a global `kubicle` on your PATH (`bin/kubicle` resolves its real location, so it works through the symlink).
+
+**Upgrading:** re-run `npm run install-hooks`, then restart the office. The hooks now use the private socket and the PreToolUse guard, and an old office with the new hooks receives nothing.
 
 The server listens on `127.0.0.1:4317` (override with `KUBICLE_PORT`). It prints `Kubicle: <login link>` and opens it. The link works once; restart the server for a new one. Set `KUBICLE_NO_OPEN=1` to skip opening the browser.
 
@@ -96,13 +98,23 @@ kubicle division show <id>
 
 ## Approval routing
 
-Off by default. Opt a session or a whole project in from the inspector. For an opted-in session, a permission prompt appears in the office with the tool's full input (up to 8192 characters) and Approve / Deny. Click the "need you" count in the header to jump to the agent that has waited longest.
+On by default (Bubbles triages first, see below). Opt a session or a whole project out from the inspector. For a session that has not opted out, a permission prompt appears in the office with the tool's full input (up to 8192 characters) and Approve / Deny. Click the "need you" count in the header to jump to the agent that has waited longest.
 
 While the office waits for your answer (up to 2 minutes), the terminal prompt does not appear. If you do not answer in that time, the hook returns no decision and the normal prompt appears in the terminal. With no browser connected, or the server down, the terminal prompt appears at once.
 
 An input longer than 8192 characters cannot be approved from the office. For those the terminal prompt appears immediately (the office does not wait), and the office shows the input with "Answer this in the terminal".
 
-Sessions that are not opted in still show their permission prompts in the office (full input included), marked "Answer this in the terminal".
+Sessions that opted out still show their permission prompts in the office (full input included), marked "Answer this in the terminal".
+
+## Bubbles
+
+Bubbles is the office's coordinator. Every permission request first goes to Bubbles, which asks a headless `claude -p` whether the action is routine for the task. It approves clear cases and escalates the rest to you (office, or the terminal prompt if no browser is open). Every decision is logged.
+
+- **Subscription only.** Bubbles runs `claude -p` under your own Claude login, never an API key (Kubicle strips `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from those calls). Calls count against your subscription limits. The daily cap is 300 calls (`daily_call_cap` in `bubbles.yaml`), and a usage-limit response puts Bubbles off duty until midnight (everything then goes to you).
+- **The main-branch rule.** A PreToolUse guard runs on every session: a push or merge to a protected branch (main, master, and any `protected_branches` in `bubbles.yaml`) is stopped and asked about. In headless `claude -p` sessions there is no prompt, so a guarded push is denied. A grant covers a single plain push to `origin` and needs your confirmation in the office. Known limits: scripts and programs that call git internally, inline interpreter code, GitHub Enterprise hosts and other VCS can get past a text-based guard. **Enable GitHub branch protection on main; that is the real backstop.**
+- **Grants, instructions and the on/off switch are proposals from the CLI.** `kubicle grant`, `kubicle instruct`, `kubicle revoke` and `kubicle bubbles on|off` only queue a proposal; nothing changes until you confirm it in the office (Lobby, Bubbles).
+- **The log.** An append-only, hash-chained record of triage verdicts (what Bubbles was shown, model, reason), escalations, your answers, guard decisions, grants, instructions and toggles. Read it with `kubicle log` (filters: `--project --session --kind --since --grep --limit --json`) or the office Log view. `kubicle log verify` checks the chain. JSONL mirror files are in `~/.kubicle/log/`.
+- **Turning it off.** Use the toggle in the office, `kubicle bubbles off` (then confirm in the office), or set `enabled: false` in `~/.kubicle/bubbles.yaml` and restart. Per session or project, you can also opt out of office approvals from the inspector.
 
 ## Tests
 
@@ -113,7 +125,7 @@ npm run typecheck
 npm run smoke       # real `claude -p` session against a throwaway server/repo/settings; prints SMOKE OK
 ```
 
-The smoke test uses a temp home, a temp git repo with hooks in its `.claude/settings.local.json`, and port 4399. It does not touch `~/.claude` or `~/.kubicle`. It costs one short haiku run.
+The smoke test uses a temp home, a temp git repo with hooks in its `.claude/settings.local.json`, and port 4399. It does not touch `~/.claude` or `~/.kubicle`. It uses the real `claude` and your subscription: one short haiku session plus one routine Bubbles triage (at most 3 model calls). It also sends a protected push and asserts it is never allowed, and that `kubicle log verify` is ok.
 
 ## Owner check (manual, with real terminals)
 

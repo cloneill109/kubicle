@@ -1,6 +1,6 @@
 #!/bin/bash
 # Real-session smoke test: runs one `claude -p` session (with a subagent) against a throwaway
-# server, repo, home and settings file. Never touches ~/.claude, ~/.kubicle or port 4317; hooks
+# server, repo, home and settings file, then checks Bubbles triage (real `claude`, at most 2 calls). Never touches ~/.claude, ~/.kubicle or port 4317; hooks
 # reach the throwaway server over its Unix socket in the temp home (the port is only for the UI).
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -40,6 +40,7 @@ echo hello > "$REPO/a.txt"
 echo '{}' > "$REPO/.claude/settings.local.json"
 
 export KUBICLE_HOME="$HOME_DIR" KUBICLE_PORT="$PORT"
+unset KUBICLE_CLAUDE_BIN   # Bubbles must use the real claude here
 
 # Server: debug route on, no browser, stdout captured for the login URL.
 KUBICLE_DEBUG=1 KUBICLE_NO_OPEN=1 \
@@ -99,4 +100,38 @@ RESULT="$(printf '%s' "$AGENTS" | node -e '
     if (sess.length >= 1 && subs.length >= 1 && proj) console.log("PASS");
   });' "$BASE")"
 echo "$RESULT"
-case "$RESULT" in *PASS*) echo "SMOKE OK" ;; *) fail "assertions not met" ;; esac
+case "$RESULT" in *PASS*) ;; *) fail "assertions not met" ;; esac
+
+# --- Bubbles triage: one routine request and one protected push through the hook socket ---
+# Sent with the real shim (no UI connected, so an escalation prints nothing). Only an allow/deny
+# decision JSON is ever printed by the shim.
+perm_json() { # session id, command
+  node -e 'console.log(JSON.stringify({session_id: process.argv[1], cwd: process.argv[3], permission_mode: "default",
+    hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: {command: process.argv[2]}}))' "$1" "$2" "$REPO"
+}
+echo "Bubbles: routine request (ls) ..."
+OUT_LS="$(perm_json smoke-bubbles-ls 'ls' | "$ROOT/bin/kubicle-hook" 120 perm)"
+echo "  shim output: ${OUT_LS:-<empty: escalated>}"
+echo "Bubbles: protected push ..."
+OUT_PUSH="$(perm_json smoke-bubbles-push 'git push origin main' | "$ROOT/bin/kubicle-hook" 120 perm)"
+echo "  shim output: ${OUT_PUSH:-<empty: escalated>}"
+case "$OUT_PUSH" in *'"behavior":"allow"'*) fail "protected push was ALLOWED" ;; esac
+
+KUB="$ROOT/bin/kubicle"
+LOGJSON="$($KUB log --json --limit 200)" || fail "kubicle log failed"
+BCHECK="$(printf '%s' "$LOGJSON" | node -e '
+  let s = ""; process.stdin.on("data", (c) => s += c).on("end", () => {
+    const e = s.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const of = (id) => e.filter((x) => x.sessionId === id);
+    const ls = of("smoke-bubbles-ls"), push = of("smoke-bubbles-push");
+    const lsOk = ls.some((x) => (x.kind === "escalation" && x.reason) || (x.kind === "triage" && x.decision === "approve" && x.reason));
+    const pushAllow = push.some((x) => x.decision === "approve" || x.outcome === "approved" || x.outcome === "allow");
+    const pushEsc = push.some((x) => x.kind === "escalation" && x.reason);
+    console.log(`ls_entries=${ls.length} ls_reason=${lsOk} push_entries=${push.length} push_allow=${pushAllow} push_escalated=${pushEsc}`);
+    if (lsOk && !pushAllow && pushEsc) console.log("PASS");
+  });')"
+echo "$BCHECK"
+case "$BCHECK" in *PASS*) ;; *) echo "$LOGJSON" >&2; fail "bubbles log assertions not met" ;; esac
+VERIFY="$($KUB log verify)" || fail "kubicle log verify failed: $VERIFY"
+echo "log verify: $VERIFY"
+echo "SMOKE OK"

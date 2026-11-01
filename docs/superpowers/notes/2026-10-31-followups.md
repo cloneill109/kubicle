@@ -43,3 +43,23 @@ Deferred minor findings from per-task and final reviews (not blocking). Triage b
 - Task 11: minor (deferred): signed-out state terminal until reload; any 401/403 from / reported as restart
 - Task 12: minor (deferred): smoke `wait` can hang if server close hangs (add kill -9 fallback); Read tool unscoped in smoke; README backup filename/"first backup kept" + global-edit warning; smoke depends on live haiku + free port 4399
 - Final: minor (deferred): README:26 squatter wording overclaims; bidi/zero-width chars not escaped in approval card; Approve clickable without scrolling input tail; wrong-token banner raisable by any local process
+
+## Bubbles part 1
+
+Deferred minors and parked items from the Bubbles part 1 build, one line each.
+
+- Task 1: minor (deferred): final flag set (with --setting-sources "") not re-checked for 0 office rows.
+- Task 1: minor (deferred): notes summarize rather than paste check-3 outputs; "runs E, I" unlabeled; spike.md:54 wording ("owner decides in terminal") wrong for -p.
+- Task 1: minor (deferred): auto-memory index keyed by cwd may appear for <home>/bubbles (Bubbles has no tools, can't write memory).
+- Task 2: minor (deferred): stale-socket probe TIMEOUT branch unlinks a possibly-live socket (main.ts:367-371; comment wrong) — fix: treat timeout as "already running".
+- Task 2: minor (deferred): socket setup failure after listen leaks sockServer + file (main.ts:449-459).
+- Task 2: minor (deferred): close() unlinks socket without ownership check (main.ts:485).
+- Task 3: parked — `$(case x in x) git push origin main;; esac)` hides a push (pre-existing; $( ) extractor closes at the case-arm `)`) — Ruling: real, exotic, nothing downstream builds on it; carry to final review fix wave (simple fix: escalate any $( body containing `case`) — cost if wrong: one contrived bypass of a defense-in-depth guard.
+- Task 3: complete (commits dc31775..bb5cf09, 1 parked)
+- Task 4: minor (deferred): usage/nested values not redacted; NaN ts throws; existing log dir mode not enforced; no pure RED captured.
+- Task 4: minor (deferred): deep() would turn non-plain objects (Date) into {} — latent.
+- Task 5: minor (deferred): confirmed revoke of a vanished target returns ok w/o log; replacing a revoked instruction id revives it; append-after-commit could leave an unlogged change if append throws; reject of unknown id silent; non-string revoke id → TypeError not PolicyError; expired pending rows never purged; grant branch/projectId not validated; useGrant no changed-flag/log.
+- Task 6: minor (deferred): orphan-END redaction swallows prose back to nearest punctuation (fail-safe).
+- Task 7: minor (deferred): call cap in memory only (restart resets); in-flight triage not cancelled on close; each escalation writes 3 entries carrying request text; checkRead accepts missing Origin (CSRF header present).
+- Task 8: minor (deferred): --json leaves raw C1 (U+0080-009F) chars; server error text in CliError unsanitized; some enum/id fields uncleaned (cosmetic).
+- Task 9: minor (deferred): Log view misses entries across a websocket outage until refilter; panels modal (close to answer approvals); revealText ambiguity with literal "<U+202E>"; older views (floor/agent names) not sanitized.
