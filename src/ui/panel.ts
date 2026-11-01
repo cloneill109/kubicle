@@ -3,7 +3,7 @@
 import type { AgentView, LogEntry } from '../shared/protocol.ts';
 import type { SimAgent } from './render/types.ts';
 import { ROLE, sprite } from './render/sprite.ts';
-import { logSummary, type OfficeState } from './state.ts';
+import { cleanText, logSummary, revealText, type OfficeState } from './state.ts';
 
 export const LINK_TEXT = 'Started in a terminal. You can watch it and answer approvals here when routing is on.';
 export const TOO_LONG_TEXT = 'Too long to review here — answer in the terminal.';
@@ -137,7 +137,7 @@ export class Inspector {
       // The whole input, exactly as the agent sent it (C1). Agent-provided: textContent only.
       const pre = $('iPendingInput');
       pre.hidden = !p?.input;
-      setText(pre, p?.input ?? '');
+      setText(pre, revealText(p?.input)); // bidi/control characters shown as <U+XXXX>, never acted on
       const answerable = !!p && p.answerable;
       const tooLong = !!p?.inputTruncated;
       $('iPendingBtns').hidden = !answerable;
@@ -149,9 +149,9 @@ export class Inspector {
       // Why Bubbles handed it over (model text: textContent only).
       const nb = p?.bubbles;
       $('iBubbles').hidden = !nb;
-      setText($('iBubblesReason'), nb ? `Bubbles: ${nb.reason}` : '');
+      setText($('iBubblesReason'), nb ? `Bubbles: ${cleanText(nb.reason)}` : '');
       $('iBubblesRec').hidden = !nb?.recommendation;
-      setText($('iBubblesRec'), nb?.recommendation ? `Recommends: ${nb.recommendation}` : '');
+      setText($('iBubblesRec'), nb?.recommendation ? `Recommends: ${cleanText(nb.recommendation)}` : '');
       $('iBubblesProtected').hidden = nb?.why !== 'protected';
     }
     $('iBubblesThinking').hidden = !v.bubblesThinking;

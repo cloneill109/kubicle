@@ -994,6 +994,14 @@ test('Bubbles: Lobby card, protected push notes, Log view, B marker, escaping, C
   await page.waitForFunction(() => document.querySelectorAll('#bubblesGrants li.grant').length === 1, null, { timeout: 3000 });
   const grantText = await page.locator('#bubblesGrants li.grant').innerText();
   assert.match(grantText, /epsilon/); assert.match(grantText, /push/); assert.match(grantText, /any protected branch/); assert.match(grantText, /1 use left/); assert.match(grantText, /until/);
+  // a CLI revoke names what it would revoke (not just an id); rejecting it keeps the grant
+  const gid = await page.evaluate(() => (window.__office.state as unknown as { bubbles: { grants: { id: string }[] } }).bubbles.grants[0]!.id);
+  assert.equal((await kubicle(['revoke', 'grant', gid])).status, 0);
+  await page.waitForFunction(() => document.querySelectorAll('#bubblesPending li.change').length === 1, null, { timeout: 3000 });
+  assert.match(await page.locator('#bubblesPending li.change .what').innerText(), /^Revoke grant: push to any protected branch in epsilon, 1 use left, until \d\d:\d\d$/);
+  await page.locator('#bubblesPending li.change button', { hasText: 'Reject' }).click();
+  await page.waitForFunction(() => document.querySelectorAll('#bubblesPending li.change').length === 0, null, { timeout: 3000 });
+  assert.equal(await page.locator('#bubblesGrants li.grant').count(), 1, 'rejected: the grant stays');
   // a rejected CLI request goes away and changes nothing
   assert.equal((await kubicle(['instruct', 'never push on Fridays'])).status, 0);
   await page.waitForFunction(() => document.querySelectorAll('#bubblesPending li.change').length === 1, null, { timeout: 3000 });

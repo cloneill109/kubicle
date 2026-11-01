@@ -4,7 +4,7 @@
 import type { BubblesState, Grant, Instruction, LogEntry, PendingChange } from '../shared/protocol.ts';
 import { sprite } from './render/sprite.ts';
 import type { SimAgent } from './render/types.ts';
-import { LOBBY, describeChange, liveFloors, logSummary, statusLabel, type OfficeState } from './state.ts';
+import { LOBBY, cleanText, describeChange, liveFloors, logSummary, statusLabel, type OfficeState } from './state.ts';
 import { getApi, post } from './panel.ts';
 
 const RECENT = 20;
@@ -12,7 +12,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text?: string): HTMLElementTagNameMap[K] => {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
+  if (text !== undefined) e.textContent = cleanText(text); // all display text: no bidi/control characters
   return e;
 };
 
@@ -132,7 +132,7 @@ export class BubblesUi {
     glow.hidden = pending === 0;
     glow.textContent = String(pending);
     dot.setAttribute('aria-label', `Bubbles: ${label}${pending ? `, ${pending} waiting for you` : ''}. Open the Bubbles panel`);
-    dot.title = st ? `Bubbles: ${label}. ${st.detail}` : 'Bubbles';
+    dot.title = st ? `Bubbles: ${label}. ${cleanText(st.detail)}` : 'Bubbles';
     // Lobby card
     this.card.dataset.state = st?.state ?? '';
     this.#set(this.card, '.bub-state', label);
@@ -141,23 +141,30 @@ export class BubblesUi {
     const cb = this.card.querySelector<HTMLElement>('.needbadge')!;
     cb.hidden = pending === 0;
     cb.textContent = `${pending} waiting for you`;
-    this.card.setAttribute('aria-label', `Bubbles, ${label}. ${st?.detail ?? ''}${pending ? ` ${pending} waiting for you.` : ''} Open the Bubbles panel`);
+    this.card.setAttribute('aria-label', `Bubbles, ${label}. ${cleanText(st?.detail)}${pending ? ` ${pending} waiting for you.` : ''} Open the Bubbles panel`);
     if (!this.#dlg.open) return;
     // panel
     $('bubStatus').dataset.state = st?.state ?? '';
     $('bubState').textContent = label;
     $('bubCalls').textContent = st ? `calls today ${st.callsToday} / ${st.cap}${st.thinking ? ` · looking at ${st.thinking} now` : ''}` : '';
-    $('bubDetail').textContent = st?.detail ?? '';
+    $('bubDetail').textContent = cleanText(st?.detail);
     const sw = $<HTMLInputElement>('bubblesEnabled');
     if (!this.#enabledBusy) sw.checked = !!st && st.state !== 'off';
     sw.disabled = this.#enabledBusy || !st;
     this.#renderProjects();
+    if (b) this.#prune(b);
     if (b) { this.#renderPending(b); this.#renderInstructions(b.instructions); this.#renderGrants(b.grants); }
     this.#renderRecent();
   }
 
-  #set(root: HTMLElement, sel: string, text: string): void {
-    const e = root.querySelector<HTMLElement>(sel)!;
+  /** Forgets per-item state (errors) for CLI requests, grants and instructions that are gone. */
+  #prune(b: BubblesState): void {
+    const ids = new Set([...b.pending.map((p) => p.id), ...b.grants.map((g) => g.id), ...b.instructions.map((i) => i.id)]);
+    for (const [id, st] of this.#items) if (!st.busy && !ids.has(id)) this.#items.delete(id);
+  }
+
+  #set(root: HTMLElement, sel: string, raw: string): void {
+    const e = root.querySelector<HTMLElement>(sel)!, text = cleanText(raw);
     if (e.textContent !== text) e.textContent = text;
   }
 
@@ -197,7 +204,8 @@ export class BubblesUi {
   #renderPending(b: BubblesState): void {
     const list = $('bubblesPending');
     const live = b.pending.filter((p) => p.createdAt + 15 * 60_000 > Date.now());
-    const key = JSON.stringify([live.map((p) => [p.id, p.change, this.#itemKey(p.id)]), this.#state.projects.map((p) => p.name)]);
+    // Keyed on the text shown: a revoke's description follows the grant/instruction it targets.
+    const key = JSON.stringify(live.map((p) => [p.id, describeChange(p.change, this.#o.projectName, b), this.#itemKey(p.id)]));
     if (key === this.#keys.pending) return;
     this.#keys.pending = key;
     this.#keepFocus(list, () => {
@@ -208,7 +216,7 @@ export class BubblesUi {
 
   #pendingLi(p: PendingChange): HTMLLIElement {
     const li = el('li', 'change'); li.dataset.key = p.id;
-    const what = describeChange(p.change, this.#o.projectName);
+    const what = describeChange(p.change, this.#o.projectName, this.#state.bubbles);
     const st = this.#items.get(p.id);
     const mins = Math.max(1, Math.ceil((p.createdAt + 15 * 60_000 - Date.now()) / 60_000));
     li.append(el('p', 'what', what), el('p', 'meta', `From the command line at ${timeText(p.createdAt)} · expires in ${mins} min`));
@@ -238,7 +246,7 @@ export class BubblesUi {
         const scope = i.projectId === null ? 'All projects' : this.#o.projectName(i.projectId);
         const body = el('div', 'body');
         body.append(el('p', 'text', i.text), el('p', 'meta', `${scope} · v${i.version} · added ${timeText(i.createdAt)}`));
-        li.append(body, this.#revokeBtn('instruction', i.id, `Revoke instruction: ${i.text.slice(0, 80)}`));
+        li.append(body, this.#revokeBtn('instruction', i.id, `Revoke instruction: ${cleanText(i.text).slice(0, 80)}`));
         const st = this.#items.get(i.id);
         if (st?.msg) { const m = el('p', 'bub-err', st.msg); m.setAttribute('role', 'alert'); li.append(m); }
         return li;

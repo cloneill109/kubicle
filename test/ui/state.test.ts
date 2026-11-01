@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { OfficeState, titleFor, moveFloor, FEED_MAX, LOG_MAX, pickNeedsYou, shouldAutoSelect, logMatches, describeChange, logSummary, statusLabel } from '../../src/ui/state.ts';
+import { OfficeState, titleFor, moveFloor, FEED_MAX, LOG_MAX, pickNeedsYou, shouldAutoSelect, logMatches, describeChange, logSummary, statusLabel, cleanText, revealText } from '../../src/ui/state.ts';
 import type { AgentView, BubblesState, LogEntry, ProjectRow } from '../../src/shared/protocol.ts';
 
 const BUB: BubblesState = { status: { state: 'on', detail: '', callsToday: 0, cap: 300, thinking: 0 }, instructions: [], grants: [], pending: [] };
@@ -155,10 +155,42 @@ test('describeChange / logSummary / statusLabel give the owner the exact change 
     'Grant: merge to main in alpha, unlimited uses, for 30 min');
   assert.equal(describeChange({ type: 'instruction', projectId: null, text: 'no force pushes' }, name), 'Standing instruction (all projects): no force pushes');
   assert.equal(describeChange({ type: 'instruction', projectId: '/p', text: 'x' }, name), 'Standing instruction (alpha): x');
-  assert.equal(describeChange({ type: 'revoke', target: 'grant', id: 'g1' }, name), 'Revoke grant g1');
+  assert.equal(describeChange({ type: 'revoke', target: 'grant', id: 'g1' }, name), 'Revoke grant g1 (no longer exists)', 'no state: the id, flagged');
   assert.equal(describeChange({ type: 'toggle', enabled: false }, name), 'Turn Bubbles off');
   assert.equal(logSummary(entry(1, { kind: 'escalation', outcome: 'protected', reason: 'push to main' })), 'protected · push to main');
   assert.equal(logSummary(entry(1, { kind: 'owner-answer', outcome: 'allow', detail: 'answered in the office' })), 'allow · answered in the office');
   assert.equal(logSummary(entry(1, { kind: 'toggle' })), '');
   assert.deepEqual(['on', 'off', 'off-duty', 'failing', 'unavailable'].map((s) => statusLabel(s as never)), ['On', 'Off', 'Off duty', 'Failing', 'Unavailable']);
+});
+
+test('describeChange: a revoke names what it targets, from the current state', () => {
+  const name = (id: string) => (id === '/p' ? 'alpha' : id);
+  const until = new Date(2026, 9, 31, 14, 5).getTime();
+  const st = {
+    grants: [{ id: 'g1', projectId: '/p', action: 'push' as const, branch: 'main', usesLeft: 2, expiresAt: until, createdAt: 0, confirmedAt: 0, revokedAt: null },
+      { id: 'g2', projectId: '/p', action: 'merge' as const, branch: null, usesLeft: null, expiresAt: until, createdAt: 0, confirmedAt: 0, revokedAt: null }],
+    instructions: [{ id: 'i1', projectId: null, text: 'no force pushes', version: 2, createdAt: 0, revokedAt: null },
+      { id: 'i2', projectId: '/p', text: 'ask about CI', version: 1, createdAt: 0, revokedAt: null }],
+  };
+  assert.equal(describeChange({ type: 'revoke', target: 'grant', id: 'g1' }, name, st), 'Revoke grant: push to main in alpha, 2 uses left, until 14:05');
+  assert.equal(describeChange({ type: 'revoke', target: 'grant', id: 'g2' }, name, st), 'Revoke grant: merge to any protected branch in alpha, unlimited uses, until 14:05');
+  assert.equal(describeChange({ type: 'revoke', target: 'instruction', id: 'i1' }, name, st), 'Revoke instruction (all projects): "no force pushes"');
+  assert.equal(describeChange({ type: 'revoke', target: 'instruction', id: 'i2' }, name, st), 'Revoke instruction (alpha): "ask about CI"');
+  assert.equal(describeChange({ type: 'revoke', target: 'grant', id: 'gone' }, name, st), 'Revoke grant gone (no longer exists)');
+  assert.equal(describeChange({ type: 'revoke', target: 'instruction', id: 'i9' }, name, null), 'Revoke instruction i9 (no longer exists)');
+});
+
+test('describeChange: a grant without uses/ttl reads as the server defaults (1 use, 1 h)', () => {
+  const c = { type: 'grant', projectId: '/p', action: 'push', branch: null } as unknown as Parameters<typeof describeChange>[0];
+  assert.equal(describeChange(c, (id) => id), 'Grant: push to any protected branch in /p, 1 use, for 1 h');
+});
+
+test('cleanText strips bidi and control characters; revealText makes them visible', () => {
+  const evil = 'ok‮gnp.exe⁦x⁩\u0007\u009b[31m‏end';
+  assert.equal(cleanText(evil), 'okgnp.exex[31mend');
+  assert.equal(cleanText('two\nlines\tand tab'), 'two\nlines\tand tab', 'newline and tab stay');
+  assert.equal(revealText('a‮b\u0007c\nd'), 'a<U+202E>b<U+0007>c\nd');
+  // the displayed log summary and change text go through it
+  assert.equal(logSummary(entry(1, { outcome: 'x', reason: 'r‮ev' })), 'x · rev');
+  assert.equal(describeChange({ type: 'instruction', projectId: null, text: 'a⁧b' }, (id) => id), 'Standing instruction (all projects): ab');
 });

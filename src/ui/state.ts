@@ -240,25 +240,57 @@ export function durationText(ms: number): string {
   return `${m} min`;
 }
 
-/** The exact change a CLI request proposes, in words (names via `projectName`). */
-export function describeChange(c: PendingChange['change'], projectName: (id: string) => string): string {
+// Bidi overrides/isolates (Trojan Source), marks, and C0/C1 controls other than tab and newline.
+const UNSAFE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
+/** Agent/model/CLI-writable text for display: bidi and control characters removed. */
+export const cleanText = (s: unknown): string => String(s ?? '').replace(UNSAFE, '');
+
+/** Same characters, shown as visible <U+XXXX> tokens (for verbatim views: tool input, raw JSON). */
+export const revealText = (s: unknown): string =>
+  String(s ?? '').replace(UNSAFE, (ch) => `<U+${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}>`);
+
+const hhmm = (ts: number): string => { const d = new Date(ts); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+const usesText = (n: number | null, left: boolean): string =>
+  n === null ? 'unlimited uses' : `${n} use${n === 1 ? '' : 's'}${left ? ' left' : ''}`;
+
+/**
+ * The exact change a CLI request proposes, in words (names via `projectName`). A revoke names its target
+ * from `current` (the live grants and instructions), since its id alone says nothing to the owner.
+ */
+export function describeChange(c: PendingChange['change'], projectName: (id: string) => string, current?: Pick<BubblesState, 'grants' | 'instructions'> | null): string {
+  return cleanText(describe(c, projectName, current));
+}
+function describe(c: PendingChange['change'], projectName: (id: string) => string, current?: Pick<BubblesState, 'grants' | 'instructions'> | null): string {
   switch (c.type) {
-    case 'grant':
-      return `Grant: ${c.action} to ${c.branch ?? 'any protected branch'} in ${projectName(c.projectId)}, ${c.uses === null ? 'unlimited uses' : `${c.uses} use${c.uses === 1 ? '' : 's'}`}, for ${durationText(c.ttlMs)}`;
+    case 'grant': {
+      // Missing fields are what the server would apply: 1 use, 1 hour.
+      const uses = c.uses === undefined ? 1 : c.uses;
+      const ttl = typeof c.ttlMs === 'number' && Number.isFinite(c.ttlMs) ? c.ttlMs : 3_600_000;
+      return `Grant: ${c.action} to ${c.branch ?? 'any protected branch'} in ${projectName(c.projectId)}, ${usesText(uses, false)}, for ${durationText(ttl)}`;
+    }
     case 'instruction':
       return `Standing instruction (${c.projectId === null ? 'all projects' : projectName(c.projectId)}): ${c.text}`;
-    case 'revoke':
-      return `Revoke ${c.target} ${c.id}`;
+    case 'revoke': {
+      if (c.target === 'grant') {
+        const g = current?.grants.find((x) => x.id === c.id);
+        if (!g) return `Revoke grant ${c.id} (no longer exists)`;
+        return `Revoke grant: ${g.action} to ${g.branch ?? 'any protected branch'} in ${projectName(g.projectId)}, ${usesText(g.usesLeft, true)}, until ${hhmm(g.expiresAt)}`;
+      }
+      const i = current?.instructions.find((x) => x.id === c.id);
+      if (!i) return `Revoke instruction ${c.id} (no longer exists)`;
+      return `Revoke instruction (${i.projectId === null ? 'all projects' : projectName(i.projectId)}): "${i.text}"`;
+    }
     case 'toggle':
       return `Turn Bubbles ${c.enabled ? 'on' : 'off'}`;
   }
   return 'Unknown change';
 }
 
-/** One line for a log entry: outcome · reason (or detail, or the request). */
+/** One line for a log entry: outcome · reason (or detail, or the request), display-safe. */
 export function logSummary(e: LogEntry): string {
   const text = e.reason || e.detail || e.request || '';
-  return [e.outcome, text].filter(Boolean).join(' · ');
+  return cleanText([e.outcome, text].filter(Boolean).join(' · '));
 }
 
 const answerableId = (a: AgentView | undefined): string | undefined => (a?.pending?.answerable ? a.pending.id : undefined);

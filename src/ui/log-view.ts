@@ -3,7 +3,7 @@
 // full entry as JSON and its transcript path with a copy button. Entry text is model/agent text:
 // textContent only, never markup.
 import type { LogEntry } from '../shared/protocol.ts';
-import { logMatches, logSummary, type LogFilter, type OfficeState } from './state.ts';
+import { cleanText, logMatches, logSummary, revealText, type LogFilter, type OfficeState } from './state.ts';
 import { timeText } from './bubbles-panel.ts';
 import { getApi } from './panel.ts';
 
@@ -122,28 +122,39 @@ export class LogView {
   onLog(fresh: LogEntry[]): void {
     if (!this.#dlg.open) return;
     const f = this.#filter(), have = new Set(this.#rows.map((e) => e.seq));
-    const add = fresh.filter((e) => !have.has(e.seq) && logMatches(e, f));
+    const add = fresh.filter((e) => !have.has(e.seq) && logMatches(e, f)).sort((a, b) => b.seq - a.seq);
     if (!add.length) return;
-    this.#rows = [...add, ...this.#rows].sort((a, b) => b.seq - a.seq).slice(0, MAX_ROWS);
-    this.#renderRows();
+    // Insert just the new rows where their seq belongs (almost always the top), then trim the tail.
+    const body = $('logRows');
+    for (const e of add) {
+      const i = this.#rows.findIndex((x) => x.seq < e.seq);
+      const at = i < 0 ? this.#rows.length : i;
+      this.#rows.splice(at, 0, e);
+      body.insertBefore(this.#row(e), body.children[at] ?? null);
+    }
+    while (this.#rows.length > MAX_ROWS) { this.#rows.pop(); body.lastElementChild?.remove(); }
+    if (this.#selected !== null && !this.#rows.some((e) => e.seq === this.#selected)) this.#select(null);
+    $('logEmpty').hidden = this.#rows.length > 0;
+  }
+
+  #row(e: LogEntry): HTMLTableRowElement {
+    const td = (text: string, cls = '') => { const c = document.createElement('td'); c.textContent = cleanText(text); if (cls) c.className = cls; return c; };
+    const tr = document.createElement('tr');
+    tr.dataset.seq = String(e.seq);
+    tr.dataset.kind = e.kind;
+    tr.tabIndex = 0;
+    if (e.seq === this.#selected) tr.setAttribute('aria-current', 'true');
+    const summary = logSummary(e) || '—';
+    tr.setAttribute('aria-label', `${e.kind}, ${timeText(e.ts)}: ${summary.slice(0, 160)}. Show details`);
+    const k = td(e.kind, 'k'); k.dataset.k = e.kind;
+    tr.append(td(timeText(e.ts), 't'), k, td(e.projectId ? this.#projectName(e.projectId) : '—', 'p'), td(agentText(e), 'a'), td(summary, 'd'));
+    return tr;
   }
 
   #renderRows(): void {
     const body = $('logRows');
     const focusedSeq = body.contains(document.activeElement) ? (document.activeElement as HTMLElement).closest('tr')?.dataset.seq : undefined;
-    const td = (text: string, cls = '') => { const c = document.createElement('td'); c.textContent = text; if (cls) c.className = cls; return c; };
-    body.replaceChildren(...this.#rows.map((e) => {
-      const tr = document.createElement('tr');
-      tr.dataset.seq = String(e.seq);
-      tr.dataset.kind = e.kind;
-      tr.tabIndex = 0;
-      tr.setAttribute('aria-selected', String(e.seq === this.#selected));
-      const summary = logSummary(e) || '—';
-      tr.setAttribute('aria-label', `${e.kind}, ${timeText(e.ts)}: ${summary.slice(0, 160)}. Show details`);
-      const k = td(e.kind, 'k'); k.dataset.k = e.kind;
-      tr.append(td(timeText(e.ts), 't'), k, td(e.projectId ? this.#projectName(e.projectId) : '—', 'p'), td(agentText(e), 'a'), td(summary, 'd'));
-      return tr;
-    }));
+    body.replaceChildren(...this.#rows.map((e) => this.#row(e)));
     $('logEmpty').hidden = this.#rows.length > 0;
     if (focusedSeq) body.querySelector<HTMLElement>(`tr[data-seq="${focusedSeq}"]`)?.focus();
   }
@@ -153,7 +164,7 @@ export class LogView {
     const seq = Number(tr?.dataset.seq);
     if (!tr || !Number.isFinite(seq)) return;
     this.#select(seq);
-    for (const r of $('logRows').querySelectorAll('tr')) r.setAttribute('aria-selected', String(r === tr));
+    for (const r of $('logRows').querySelectorAll('tr')) { if (r === tr) r.setAttribute('aria-current', 'true'); else r.removeAttribute('aria-current'); }
   }
 
   #select(seq: number | null): void {
@@ -162,9 +173,9 @@ export class LogView {
     $('logDetail').hidden = !e;
     if (!e) return;
     $('logDetailH').textContent = `Entry #${e.seq} · ${e.kind}`;
-    $('logJson').textContent = JSON.stringify(e, null, 2);
+    $('logJson').textContent = revealText(JSON.stringify(e, null, 2)); // bidi characters visible as <U+XXXX>
     $('logTranscriptRow').hidden = !e.transcriptPath;
-    $('logTranscript').textContent = e.transcriptPath ?? '';
+    $('logTranscript').textContent = cleanText(e.transcriptPath);
     $('logCopyNote').textContent = '';
     if (matchMedia('(max-width: 900px)').matches) $('logDetail').scrollIntoView({ block: 'nearest' });
   }
