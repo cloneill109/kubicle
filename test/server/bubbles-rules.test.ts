@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
@@ -614,4 +614,43 @@ test('final I1: a case statement inside a command substitution is opaque', () =>
 test('final I1: the word "case" in a commit message body does not make a commit opaque', () => {
   assert.equal(bash(`git commit -m "$(cat <<'EOF'\nfix: edge case in parser\n\nhandles the case where x\nEOF\n)"`), null);
   assert.equal(bash('git log --grep="$(echo use case)"'), null);
+});
+
+describe('heredoc bodies', () => {
+  test('a body fed to a non-shell is data, not commands', () => {
+    for (const c of [
+      `python3 - <<'EOF'\np='bin/kubicle-hook'\ns=open(p).read()\ns=s.replace("curl -s --unix-socket","curl -q --config <(printf 'header = x') --unix-socket")\nopen(p,'w').write(s)\nEOF\nbash -n bin/kubicle-hook && git diff --stat`,
+      `mkdir -p /tmp/x && cp ~/notes/db* /tmp/x/ && cat > /tmp/x/m.mjs <<'EOF'\nconsole.log(q("select count(*) n from events"));\nEOF\nnode /tmp/x/m.mjs`,
+      'cat > notes.md <<EOF\nremember to run tests\nEOF',
+      'cat <<-EOF > a.txt\n\tcount(*) x\n\tEOF\ngit status',
+      'cat <<A <<"B" > a.txt\n$(x) y\nA\nselect *\nB\ngit status',
+    ]) assert.equal(pm(c), null, c);
+  });
+
+  test('a body fed to a shell, or with push/merge text, is still protected', () => {
+    for (const c of [
+      'bash <<EOF\ngit push origin main\nEOF',
+      "sh -s <<'X'\ngit push origin HEAD:main\nX",
+      "python3 - <<EOF\nimport subprocess; subprocess.run(['git','push','origin','main'])\nEOF",
+      'cat <<EOF | bash\ngit push origin main\nEOF',
+      'git push origin main <<EOF\nx\nEOF',
+      '/bin/bash <<EOF\nG=git; $G $(printf pu)sh origin main\nEOF',
+      'sudo -u root bash <<EOF\nG=git; $G $(printf pu)sh origin main\nEOF',
+      '{ cat <<EOF\nG=git; $G $(printf pu)sh origin main\nEOF\n} | bash',
+      'cat <<EOF |\nG=git; $G $(printf pu)sh origin main\nEOF\nbash',
+      'echo hi # <<EOF\nG=git; $G $(printf pu)sh origin main\nEOF',
+      'x=$(cat <<EOF\nG=git; $G $(printf pu)sh origin main\nEOF\n)',
+    ]) assert.equal(pm(c)?.hit.kind, 'push', c);
+    assert.match(pm("python3 - <<EOF\nimport subprocess; subprocess.run(['git','push','origin','main'])\nEOF")!.hit.reason,
+      /push or merge text in a heredoc fed to python3/);
+  });
+
+  test('an unterminated heredoc is classified as commands', () => {
+    assert.equal(pm('cat <<EOF\ngit push origin main')?.hit.kind, 'push');
+    assert.equal(pm('cat <<EOF\ngit push origin main\nEOF2')?.hit.kind, 'push');
+  });
+
+  test('a here-string is not a heredoc', () => {
+    assert.equal(pm('cat <<<x\ngit push origin main\nx')?.hit.kind, 'push');
+  });
 });

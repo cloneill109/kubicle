@@ -149,10 +149,11 @@ function segmentsOf(cmd: string, depth = 0): Segment[] {
   const endSeg = (i: number, nextPipe: boolean) => {
     endWord();
     if (words[0] === 'esac' && caseDepth > 0) caseDepth--;
-    if (words.length || redirs.length) out.push({ words, raw: cmd.slice(rawStart, i), redirs, pipeIn });
+    const empty = !words.length && !redirs.length;
+    if (!empty) out.push({ words, raw: cmd.slice(rawStart, i), redirs, pipeIn });
     words = []; redirs = []; pendingOp = null;
     rawStart = i + 1;
-    pipeIn = nextPipe;
+    pipeIn = nextPipe || (empty && pipeIn); // `a |\nb`, `a | (b)`: b still reads the pipe
   };
   const sub = (body: string) => { out.push(...segmentsOf(body, depth + 1)); };
   const closeParen = (from: number): number => {
@@ -473,6 +474,123 @@ const SINKS = new Set(['tee']);
 export const MAX_COMMAND_LEN = 16 * 1024;
 /** A `case` keyword in command position somewhere after a `$(` or backtick. */
 const SUBST_CASE = /(?:\$\(|`)(?:[\s\S]*?(?:\$\(|`|[;&|(){\n]|\s(?:then|do|else|elif|if|while|until)\s))?\s*case\s/;
+
+// ----- heredoc bodies -----
+
+/**
+ * Cut every heredoc body (`<<W`, `<<-W`, `<<'W'`, `<<"W"`) out of `cmd`; the operator itself stays on its line.
+ * Bodies are returned in order. Null (= classify the whole text as commands, as before) when there is no heredoc
+ * or any doubt: an operator inside parens / `$(` / backticks, a comment, `$'...'`, a `$(` or backtick inside double
+ * quotes, an unterminated quote, an odd terminator word, or a body with no terminator line.
+ */
+function cutHeredocs(cmd: string): { text: string; bodies: string[] } | null {
+  let out = '';
+  const bodies: string[] = [];
+  const pending: { delim: string; strip: boolean }[] = [];
+  let depth = 0;
+  let tick = false;
+  let complex = false; // a `$(` or backtick inside double quotes: nesting we do not track
+  let i = 0;
+  while (i < cmd.length) {
+    const c = cmd[i];
+    if (c === '\\') { out += cmd.slice(i, i + 2); i += 2; continue; }
+    if (c === '$' && cmd[i + 1] === "'") return null;
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      for (; j < cmd.length && cmd[j] !== c; j++) {
+        if (c === '"' && cmd[j] === '\\') j++;
+        else if (c === '"' && (cmd[j] === '`' || (cmd[j] === '$' && cmd[j + 1] === '('))) complex = true;
+      }
+      if (j >= cmd.length) return null;
+      out += cmd.slice(i, j + 1); i = j + 1; continue;
+    }
+    if (c === '#' && (i === 0 || /[\s;&|()]/.test(cmd[i - 1]))) return null;
+    if (c === '`') tick = !tick;
+    else if (c === '(') depth++;
+    else if (c === ')') depth--;
+    if (c === '<' && cmd.startsWith('<<<', i)) { out += '<<<'; i += 3; continue; }
+    if (c === '<' && cmd[i + 1] === '<') {
+      if (depth !== 0 || tick || complex) return null;
+      let j = i + 2;
+      const strip = cmd[j] === '-';
+      if (strip) j++;
+      while (cmd[j] === ' ' || cmd[j] === '\t') j++;
+      let delim = '';
+      for (; j < cmd.length && !/[\s;&|<>()]/.test(cmd[j]); j++) {
+        const ch = cmd[j];
+        if (ch === '$' || ch === '`') return null;
+        if (ch === '\\') { if (j + 1 >= cmd.length) return null; delim += cmd[++j]; continue; }
+        if (ch === "'" || ch === '"') {
+          const e = cmd.indexOf(ch, j + 1);
+          if (e < 0) return null;
+          const q = cmd.slice(j + 1, e);
+          if (ch === '"' && /[$`\\]/.test(q)) return null;
+          delim += q; j = e; continue;
+        }
+        delim += ch;
+      }
+      if (delim === '') return null;
+      pending.push({ delim, strip });
+      out += cmd.slice(i, j); i = j; continue;
+    }
+    if (c === '\n' && pending.length) {
+      if (depth !== 0 || tick) return null;
+      let pos = i + 1;
+      for (const h of pending) {
+        const start = pos;
+        for (;;) {
+          if (pos >= cmd.length) return null; // no terminator line
+          const nl = cmd.indexOf('\n', pos);
+          const end = nl < 0 ? cmd.length : nl;
+          const line = cmd.slice(pos, end);
+          const next = nl < 0 ? cmd.length : nl + 1;
+          if ((h.strip ? line.replace(/^\t+/, '') : line) === h.delim) { bodies.push(cmd.slice(start, pos)); pos = next; break; }
+          pos = next;
+        }
+      }
+      pending.length = 0;
+      out += '\n'; i = pos; continue;
+    }
+    out += c; i++;
+  }
+  if (pending.length || bodies.length === 0) return null;
+  return { text: out, bodies };
+}
+
+// receivers that run their stdin as shell commands (also by path: `/bin/bash`)
+const STDIN_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh', 'eval', 'source', '.', 'su', 'ssh']);
+/** A segment that may run shell commands: a shell word anywhere, an opaque/glob command word, or none at all (`sudo -s`). */
+function shellSeg(s: Segment): boolean {
+  const w = stripPrefix(s.words);
+  if (w.length === 0 || /[$`*?\[{]/.test(w[0])) return true;
+  return s.words.some(x => STDIN_SHELLS.has(lc(basename(x))));
+}
+const HEREDOC_OP = /^\d*<<-?$/;
+const PM_TEXT = /\b(push|merge|rebase|subtree|update-ref|sync)\b|refs\/|api\.github\.com|github\.com\/api\b/;
+
+/**
+ * Push/merge verdict with heredoc bodies treated as data. Returns undefined to mean "classify the full text as
+ * commands" (no heredoc, any doubt, or a body that may reach a shell: the receiver is a shell, or anything in the
+ * command pipes into a shell, e.g. `cat <<EOF | bash`, `{ cat <<EOF; } | bash`).
+ */
+function heredocVerdict(cmd: string, ctx: RulesCtx): Protected | null | undefined {
+  const cut = cutHeredocs(cmd);
+  if (!cut) return undefined;
+  const text = cut.text.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' ');
+  const segs = segmentsOf(text);
+  if (segs.some(s => s.pipeIn && shellSeg(s))) return undefined;
+  const receivers = segs.flatMap(s => s.redirs.filter(r => HEREDOC_OP.test(r.op)).map(() => s));
+  if (receivers.length !== cut.bodies.length || receivers.some(shellSeg)) return undefined;
+  for (let k = 0; k < cut.bodies.length; k++) {
+    const body = lc(cut.bodies[k].replace(/['"\\]/g, ''));
+    const gh = /(^|[^\w-])gh(?![\w-])/.test(body) && /(^|[^\w-])api(?![\w-])/.test(body);
+    if (PM_TEXT.test(body) || gh) {
+      const word = basename(stripPrefix(receivers[k].words)[0]);
+      return { kind: 'push', branch: null, reason: `push or merge text in a heredoc fed to ${word}` };
+    }
+  }
+  return pushMergeVerdict(text, lc(text.replace(/['"\\]/g, '')), segs, ctx);
+}
 
 function pushMergeVerdict(cmd: string, nm: string, segs: Segment[], ctx: RulesCtx): Protected | null {
   const mergeKind = (): 'push' | 'merge' => (nm.includes('merge') ? 'merge' : 'push');
@@ -1074,9 +1192,14 @@ function classify(toolName: string, input: unknown, ctx: RulesCtx, mode: 'all' |
     const nm = lc(cmd.replace(/['"\\]/g, ''));
     // fd duplication and /dev/null redirects are harmless; every other redirect stays visible as a word
     const segs = segmentsOf(cmd.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' '));
-    if (mode === 'pm') shellHit = pushMergeVerdict(cmd, nm, segs, ctx);
+    // heredoc bodies fed to non-shells are data for the push/merge verdict (self/script checks still see the full text)
+    const pmVerdict = (): Protected | null => {
+      const h = heredocVerdict(cmd, ctx);
+      return h !== undefined ? h : pushMergeVerdict(cmd, nm, segs, ctx);
+    };
+    if (mode === 'pm') shellHit = pmVerdict();
     else if (mode === 'rest') shellHit = selfBash(cmd, nm, segs, ctx) ?? (ctx.strictScripts ? scriptBash(segs) : null);
-    else shellHit = selfBash(cmd, nm, segs, ctx) ?? pushMergeVerdict(cmd, nm, segs, ctx) ?? (ctx.strictScripts ? scriptBash(segs) : null);
+    else shellHit = selfBash(cmd, nm, segs, ctx) ?? pmVerdict() ?? (ctx.strictScripts ? scriptBash(segs) : null);
     // an MCP tool that runs a command is still checked by name below
     if (shellHit || !toolName.startsWith('mcp__')) return shellHit;
   }
