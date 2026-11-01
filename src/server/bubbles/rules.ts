@@ -483,10 +483,11 @@ const SUBST_CASE = /(?:\$\(|`)(?:[\s\S]*?(?:\$\(|`|[;&|(){\n]|\s(?:then|do|else|
  * or any doubt: an operator inside parens / `$(` / backticks, a comment, `$'...'`, a `$(` or backtick inside double
  * quotes, an unterminated quote, an odd terminator word, or a body with no terminator line.
  */
-function cutHeredocs(cmd: string): { text: string; bodies: string[] } | null {
+interface HereBody { body: string; quoted: boolean }
+function cutHeredocs(cmd: string): { text: string; bodies: HereBody[] } | null {
   let out = '';
-  const bodies: string[] = [];
-  const pending: { delim: string; strip: boolean }[] = [];
+  const bodies: HereBody[] = [];
+  const pending: { delim: string; strip: boolean; quoted: boolean }[] = [];
   let depth = 0;
   let tick = false;
   let complex = false; // a `$(` or backtick inside double quotes: nesting we do not track
@@ -516,21 +517,22 @@ function cutHeredocs(cmd: string): { text: string; bodies: string[] } | null {
       if (strip) j++;
       while (cmd[j] === ' ' || cmd[j] === '\t') j++;
       let delim = '';
+      let quoted = false; // a quoted delimiter: bash expands nothing in the body
       for (; j < cmd.length && !/[\s;&|<>()]/.test(cmd[j]); j++) {
         const ch = cmd[j];
         if (ch === '$' || ch === '`') return null;
-        if (ch === '\\') { if (j + 1 >= cmd.length) return null; delim += cmd[++j]; continue; }
+        if (ch === '\\') { if (j + 1 >= cmd.length) return null; delim += cmd[++j]; quoted = true; continue; }
         if (ch === "'" || ch === '"') {
           const e = cmd.indexOf(ch, j + 1);
           if (e < 0) return null;
           const q = cmd.slice(j + 1, e);
           if (ch === '"' && /[$`\\]/.test(q)) return null;
-          delim += q; j = e; continue;
+          delim += q; quoted = true; j = e; continue;
         }
         delim += ch;
       }
       if (delim === '') return null;
-      pending.push({ delim, strip });
+      pending.push({ delim, strip, quoted });
       out += cmd.slice(i, j); i = j; continue;
     }
     if (c === '\n' && pending.length) {
@@ -544,7 +546,7 @@ function cutHeredocs(cmd: string): { text: string; bodies: string[] } | null {
           const end = nl < 0 ? cmd.length : nl;
           const line = cmd.slice(pos, end);
           const next = nl < 0 ? cmd.length : nl + 1;
-          if ((h.strip ? line.replace(/^\t+/, '') : line) === h.delim) { bodies.push(cmd.slice(start, pos)); pos = next; break; }
+          if ((h.strip ? line.replace(/^\t+/, '') : line) === h.delim) { bodies.push({ body: cmd.slice(start, pos), quoted: h.quoted }); pos = next; break; }
           pos = next;
         }
       }
@@ -557,35 +559,67 @@ function cutHeredocs(cmd: string): { text: string; bodies: string[] } | null {
   return { text: out, bodies };
 }
 
-// receivers that run their stdin as shell commands (also by path: `/bin/bash`)
-const STDIN_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh', 'eval', 'source', '.', 'su', 'ssh']);
-/** A segment that may run shell commands: a shell word anywhere, an opaque/glob command word, or none at all (`sudo -s`). */
-function shellSeg(s: Segment): boolean {
+// Words that may run shell code: as a command word, or anywhere in a segment (`sudo -u x bash`, `busybox ash`).
+const SHELL_WORDS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash', 'mksh', 'yash', 'posh', 'fish', 'csh', 'tcsh', 'busybox',
+  'eval', 'source', '.', 'su', 'ssh']);
+const NOEXEC_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
+/** `bash -n FILE`: parse only, runs nothing. */
+const noexecShell = (w: string[]): boolean => {
+  if (!NOEXEC_SHELLS.has(lc(basename(w[0])))) return false;
+  for (const a of w.slice(1)) { if (!a.startsWith('-')) return false; if (a === '-n') return true; }
+  return false;
+};
+/**
+ * A segment that may run code from data written earlier: a shell word anywhere (except a bare `sh -n` syntax
+ * check), an opaque/glob command word, a path as the command word (`./s`, `/tmp/s`), or no command word (`sudo -s`).
+ */
+function runsCode(s: Segment): boolean {
   const w = stripPrefix(s.words);
-  if (w.length === 0 || /[$`*?\[{]/.test(w[0])) return true;
-  return s.words.some(x => STDIN_SHELLS.has(lc(basename(x))));
+  if (w.length === 0 || /[$`*?\[{]/.test(w[0]) || w[0].includes('/') && !SHELL_WORDS.has(lc(basename(w[0])))) return true;
+  if (noexecShell(w)) return false;
+  return s.words.some(x => SHELL_WORDS.has(lc(basename(x))));
+}
+// Receivers that only read their stdin as data. Interpreters run it, but are let through on the push-text scan
+// (inline interpreter code is an accepted residual, see the header).
+const DATA_RECEIVERS = new Set(['cat', 'tee', 'wc', 'grep', 'head', 'tail', 'sort', 'uniq', 'diff', 'base64', 'python', 'python3', 'node']);
+function dataReceiver(s: Segment): boolean {
+  const w = stripPrefix(s.words);
+  if (w.length === 0) return false;
+  const c = w[0];
+  if (c.includes('/') || /[$`*?\[{]/.test(c)) return false;
+  if (DATA_RECEIVERS.has(c)) return true;
+  // `git commit -F -` / `--file=-`: the body is the commit message
+  return c === 'git' && w[1] === 'commit'
+    && w.some((x, i) => x === '--file=-' || x === '-F-' || (x === '-F' && w[i + 1] === '-'));
 }
 const HEREDOC_OP = /^\d*<<-?$/;
 const PM_TEXT = /\b(push|merge|rebase|subtree|update-ref|sync)\b|refs\/|api\.github\.com|github\.com\/api\b/;
 
 /**
- * Push/merge verdict with heredoc bodies treated as data. Returns undefined to mean "classify the full text as
- * commands" (no heredoc, any doubt, or a body that may reach a shell: the receiver is a shell, or anything in the
- * command pipes into a shell, e.g. `cat <<EOF | bash`, `{ cat <<EOF; } | bash`).
+ * Push/merge verdict with heredoc bodies treated as data. Prove safe, else protected: a body is cut out only when
+ * EVERY condition below holds; otherwise undefined = classify the full text as commands, exactly as before.
+ *  - every receiver is on the DATA_RECEIVERS allowlist (a deny-list of shells fails open: ash, at, awk system(), ...);
+ *  - each body is inert: a quoted delimiter, or no `$(`, backtick, `${`, `$[` and no line ending in `\`;
+ *  - the text outside the bodies has no `${`, `$[`, process substitution or `{ ...; }` group (the cutter does not
+ *    parse those the way the shell does);
+ *  - no segment anywhere can run code (a shell, eval, source, ., a script path, an opaque command word), so data
+ *    written to a file or a variable cannot be run later in the same command.
  */
 function heredocVerdict(cmd: string, ctx: RulesCtx): Protected | null | undefined {
   const cut = cutHeredocs(cmd);
   if (!cut) return undefined;
+  if (/\$[{[]|[<>]\(/.test(cut.text)) return undefined;
+  if (cut.bodies.some(b => !b.quoted && (/\$[([{]|`/.test(b.body) || /\\\n|\\$/.test(b.body)))) return undefined;
   const text = cut.text.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' ');
   const segs = segmentsOf(text);
-  if (segs.some(s => s.pipeIn && shellSeg(s))) return undefined;
+  if (segs.some(s => runsCode(s) || s.words.some(w => w === '{' || w === '}'))) return undefined;
   const receivers = segs.flatMap(s => s.redirs.filter(r => HEREDOC_OP.test(r.op)).map(() => s));
-  if (receivers.length !== cut.bodies.length || receivers.some(shellSeg)) return undefined;
+  if (receivers.length !== cut.bodies.length || !receivers.every(dataReceiver)) return undefined;
   for (let k = 0; k < cut.bodies.length; k++) {
-    const body = lc(cut.bodies[k].replace(/['"\\]/g, ''));
+    const body = lc(cut.bodies[k].body.replace(/['"\\]/g, ''));
     const gh = /(^|[^\w-])gh(?![\w-])/.test(body) && /(^|[^\w-])api(?![\w-])/.test(body);
     if (PM_TEXT.test(body) || gh) {
-      const word = basename(stripPrefix(receivers[k].words)[0]);
+      const word = stripPrefix(receivers[k].words)[0];
       return { kind: 'push', branch: null, reason: `push or merge text in a heredoc fed to ${word}` };
     }
   }

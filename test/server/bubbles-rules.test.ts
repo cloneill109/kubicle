@@ -623,7 +623,8 @@ describe('heredoc bodies', () => {
       `mkdir -p /tmp/x && cp ~/notes/db* /tmp/x/ && cat > /tmp/x/m.mjs <<'EOF'\nconsole.log(q("select count(*) n from events"));\nEOF\nnode /tmp/x/m.mjs`,
       'cat > notes.md <<EOF\nremember to run tests\nEOF',
       'cat <<-EOF > a.txt\n\tcount(*) x\n\tEOF\ngit status',
-      'cat <<A <<"B" > a.txt\n$(x) y\nA\nselect *\nB\ngit status',
+      'cat <<\'A\' <<"B" > a.txt\n$(x) y\nA\nselect *\nB\ngit status',
+      'git commit -F - <<\'EOF\'\nfix: parser edge\nEOF',
     ]) assert.equal(pm(c), null, c);
   });
 
@@ -643,6 +644,34 @@ describe('heredoc bodies', () => {
     ]) assert.equal(pm(c)?.hit.kind, 'push', c);
     assert.match(pm("python3 - <<EOF\nimport subprocess; subprocess.run(['git','push','origin','main'])\nEOF")!.hit.reason,
       /push or merge text in a heredoc fed to python3/);
+  });
+
+  test('fix round 1: only inert bodies fed to allowlisted data receivers are cut', () => {
+    const O = 'G=git; $G $(printf pu)sh origin main';
+    for (const c of [
+      // an unquoted delimiter expands $( ), backticks and ${ } in the body
+      'cat <<A <<"B" > a.txt\n$(x) y\nA\nselect *\nB\ngit status',
+      `cat <<EOF\n$(${O})\nEOF`,
+      `cat <<EOF\n\`${O}\`\nEOF`,
+      'cat <<EOF\n${x:=$(git pu\\sh origin main)}\nEOF',
+      // the cutter must not parse differently from the shell
+      `echo $[1<<3]\n${O}\n3]`,
+      `echo \${x:-<<E}\n${O}\nE}`,
+      `cat <<EOF\nhello\nE\\\nOF\n${O}\nEOF`,
+      // receivers not on the data allowlist
+      ...['ash', 'mksh', 'busybox ash', 'at now', 'parallel', 'script -q /dev/null', "awk '{system($0)}'", 'sed e',
+        'env -i PATH=/bin sh', 'exec bash', 'xargs -I{} sh -c {}', 'read c'].map(r => `${r} <<EOF\n${O}\nEOF`),
+      `cat > >(bash) <<EOF\n${O}\nEOF`,
+      `tee >(sh) <<EOF\n${O}\nEOF`,
+      // data that becomes code later in the same command
+      `cat > /tmp/s <<EOF\n${O}\nEOF\nbash /tmp/s`,
+      `cat > /tmp/s <<EOF\n${O}\nEOF\nbash < /tmp/s`,
+      `cat > /tmp/s <<EOF\n${O}\nEOF\n. /tmp/s`,
+      `cat > /tmp/s <<'EOF'\n${O}\nEOF\nchmod +x /tmp/s && /tmp/s`,
+      `tee /tmp/s <<EOF\n${O}\nEOF\nsh /tmp/s`,
+      `read c <<EOF\n${O}\nEOF\neval "$c"`,
+      'read a b c <<EOF\ngit pu sh\nEOF\n$a $b$c origin main',
+    ]) assert.equal(pm(c)?.hit.kind, 'push', c);
   });
 
   test('an unterminated heredoc is classified as commands', () => {
