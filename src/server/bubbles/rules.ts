@@ -599,10 +599,33 @@ const PM_TEXT = /\b(push|merge|rebase|subtree|update-ref|sync)\b|refs\/|api\.git
  *  - each body is inert: a quoted delimiter, or no `$(`, backtick, `${`, `$[` and no line ending in `\`;
  *  - the text outside the bodies has no `${`, `$[`, process substitution or `{ ...; }` group (the cutter does not
  *    parse those the way the shell does);
- *  - no segment anywhere can run code (a shell, eval, source, ., a script path, an opaque command word), so data
- *    written to a file or a variable cannot be run later in the same command.
+ *  - CLOSED GRAMMAR: every segment of the whole command is (i) an allowed heredoc receiver, (ii) an INERT command
+ *    (ls, cat, echo, mkdir, cp, ..., `git status|diff|log|show`), (iii) exactly `<shell> -n FILE`, or (iv) exactly
+ *    `node|python|python3 FILE`. Enumerating executors failed open (awk system(), sed e, at, git hooks, npm scripts,
+ *    ninja ...), so anything not listed falls back;
+ *  - every segment reading a pipe is a pure-data command (an interpreter reading a pipe runs it);
+ *  - a body written to a file is not referenced again (writtenFilesInert), and is not written under `.git/`.
  */
 const FILE_INTERP = new Set(['python', 'python3', 'node']);
+const PURE_DATA = new Set(['cat', 'tee', 'wc', 'grep', 'head', 'tail', 'sort', 'uniq', 'diff', 'base64']);
+const INERT = new Set([...PURE_DATA, 'ls', 'echo', 'printf', 'mkdir', 'cp', 'mv', 'chmod', 'touch', 'pwd', 'true', 'test', '[']);
+const INERT_GIT = new Set(['status', 'diff', 'log', 'show']);
+/** The closed grammar of segments a heredoc cut may sit beside (see heredocVerdict). */
+function closedGrammarSeg(s: Segment, receivers: Segment[]): boolean {
+  const w = stripPrefix(s.words);
+  const c = w[0];
+  if (c === undefined || /[$`*?\[{\/]/.test(c) && c !== '[') return false; // opaque, glob, or a path
+  if (s.pipeIn && !PURE_DATA.has(c)) return false;
+  if (receivers.includes(s)) return true; // already passed dataReceiver
+  if (INERT.has(c)) return true;
+  if (c === 'git') {
+    let j = 1;
+    while (j < w.length && GRANT_GIT_GLOBAL.has(w[j])) j++;
+    return INERT_GIT.has(w[j]);
+  }
+  if (noexecShell(s.words)) return true;
+  return s.words.length === 2 && FILE_INTERP.has(s.words[0]) && !/^[-+]/.test(s.words[1]);
+}
 /**
  * A heredoc body written to a file (`> f`, `>> f`, `tee f`) must not be run later in the same command: no other word
  * may name the file (its path or basename, even inside a word) except as the sole argument of python/python3/node
@@ -617,6 +640,7 @@ function writtenFilesInert(segs: Segment[], receivers: Segment[]): boolean {
     if (w[0] === 'tee') for (const a of w.slice(1)) if (!a.startsWith('-')) { files.push(a); own.add(a); }
   }
   if (files.length === 0) return true;
+  if (files.some(f => comps(f).includes('.git'))) return false; // hooks, config aliases, remote.*.push
   for (const s of segs) {
     if (s.words.some(x => /^(xargs|make|gmake)$/.test(lc(basename(x))) || x.includes('PATH='))) return false;
     if (ENV_SETTERS.has(s.words[0] ?? '') && s.words.some(x => /^PATH(=|$)/.test(x))) return false;
@@ -646,6 +670,7 @@ function heredocVerdict(cmd: string, ctx: RulesCtx): Protected | null | undefine
   if (segs.some(s => runsCode(s) || s.words.some(w => w === '{' || w === '}'))) return undefined;
   const receivers = segs.flatMap(s => s.redirs.filter(r => HEREDOC_OP.test(r.op)).map(() => s));
   if (receivers.length !== cut.bodies.length || !receivers.every(dataReceiver)) return undefined;
+  if (!segs.every(s => closedGrammarSeg(s, receivers))) return undefined;
   if (!writtenFilesInert(segs, receivers)) return undefined;
   for (let k = 0; k < cut.bodies.length; k++) {
     const body = lc(cut.bodies[k].body.replace(/['"\\]/g, ''));

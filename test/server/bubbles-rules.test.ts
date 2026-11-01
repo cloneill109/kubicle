@@ -686,6 +686,22 @@ describe('heredoc bodies', () => {
     assert.equal(pm("cat > out.txt <<'EOF'\nx\nEOF\nbash -n hook"), null);
   });
 
+  test('fix round 3: a closed grammar of segments beside a heredoc cut', () => {
+    const O = 'G=git; $G $(printf pu)sh origin main';
+    for (const c of [
+      ...[`awk '{system($0)}'`, 'sed e', 'at now', 'parallel', 'script -q /dev/null', `perl -ne 'system($_)'`, 'python3', 'node']
+        .map(r => `cat <<'EOF' | ${r}\n${O}\nEOF`),
+      `tee s <<'EOF' | at now\n${O}\nEOF`,
+      `tee s <<'EOF' | awk '{system($0)}'\n${O}\nEOF`,
+      `cat >> .git/hooks/pre-commit <<'EOF'\n${O}\nEOF\ngit commit -m x`,
+      `cat >> .git/hooks/pre-commit <<'EOF'\n${O}\nEOF`,
+      `cat > package.json <<'EOF'\n{"scripts":{"test":"${O}"}}\nEOF\nnpm test`,
+      `cat > build.ninja <<'EOF'\nrule r\n  command = ${O}\nbuild x: r\nEOF\nninja`,
+      `cat > out.txt <<'EOF'\n${O}\nEOF\ngit -c alias.st=x status`,
+    ]) assert.equal(pm(c)?.hit.kind, 'push', c);
+    assert.equal(pm(`cat > out.txt <<'EOF'\n${O}\nEOF\nls && git --no-pager log -1 && echo done`), null);
+  });
+
   test('an unterminated heredoc is classified as commands', () => {
     assert.equal(pm('cat <<EOF\ngit push origin main')?.hit.kind, 'push');
     assert.equal(pm('cat <<EOF\ngit push origin main\nEOF2')?.hit.kind, 'push');
