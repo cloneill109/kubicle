@@ -607,7 +607,9 @@ const PM_TEXT = /\b(push|merge|rebase|subtree|update-ref|sync)\b|refs\/|api\.git
  *    (`cp s .git/hooks/x`, `sort -o .git/...`), no file/program option on sort/grep/diff (`-o`, `-f`,
  *    `--compress-program`, ...), and no `-c`/`-C`/`-o`/`--output`/`--ext-diff`/`--textconv`/`--exec` on git;
  *  - every segment reading a pipe is a pure-data command (an interpreter reading a pipe runs it);
- *  - a file written by any segment (`>`, `>>`, `tee`) is not referenced again (writtenFilesInert).
+ *  - a file written by any segment (`>`, `>>`, `tee`, `base64 -o`, `sort -o`, `uniq IN OUT`) is not referenced
+ *    again, and a command that writes any file (those, or cp/mv/touch/chmod/mkdir) has no git segment at all
+ *    (writtenFilesInert): git reads config and hooks from paths we cannot see (core.hooksPath, ~/.config/git).
  */
 const FILE_INTERP = new Set(['python', 'python3', 'node']);
 const PURE_DATA = new Set(['cat', 'tee', 'wc', 'grep', 'head', 'tail', 'sort', 'uniq', 'diff', 'base64']);
@@ -651,16 +653,56 @@ function closedGrammarSeg(s: Segment, receivers: Segment[]): boolean {
  * may name the file (its path or basename, even inside a word) except as the sole argument of python/python3/node
  * (the accepted interpreter residual), and nothing may find it another way (xargs, make, a changed PATH).
  */
+const STD_DEV = new Set(['/dev/null', '/dev/stdout', '/dev/stderr']);
+const WRITERS = new Set(['cp', 'mv', 'touch', 'chmod', 'mkdir']);
+/** The file named by an output option at w[i] (`-o F`, `-oF`, `-Do F`, `--output=F`, `--out F`): '' if unreadable, null if w[i] is no such option. */
+function outOperand(w: string[], i: number): string | null {
+  const x = w[i];
+  if (x.startsWith('--')) {
+    if (!longOpt(x, ['output'])) return null;
+    const eq = x.indexOf('=');
+    return eq >= 0 ? x.slice(eq + 1) : (w[i + 1] ?? '');
+  }
+  const k = x.indexOf('o');
+  if (!/^-[^-]/.test(x) || k < 0) return null;
+  return x.length > k + 1 ? x.slice(k + 1) : (w[i + 1] ?? '');
+}
+/**
+ * What a segment writes: `writes` is true for any file write (`>`/`>>` other than /dev/null|stdout|stderr, `tee F`,
+ * `base64 -o`, `sort -o`, `uniq IN OUT`, cp/mv/touch/chmod/mkdir); `targets` are the files the written-file checks follow.
+ */
+function segWrites(s: Segment): { writes: boolean; targets: string[] } {
+  const targets: string[] = [];
+  for (const d of s.redirs) if (d.op.includes('>') && !STD_DEV.has(d.target)) targets.push(d.target);
+  const w = stripPrefix(s.words);
+  const c = w[0] ?? '';
+  let writes = WRITERS.has(c);
+  if (c === 'tee') for (const a of w.slice(1)) if (!a.startsWith('-')) targets.push(a);
+  if (c === 'base64' || c === 'sort') {
+    for (let i = 1; i < w.length; i++) {
+      const o = outOperand(w, i);
+      if (o !== null) { writes = true; if (o) targets.push(o); }
+    }
+  }
+  if (c === 'uniq') {
+    const ops = w.slice(1).filter(a => !a.startsWith('-') || a === '-');
+    if (ops.length >= 2) targets.push(ops[ops.length - 1]);
+  }
+  return { writes: writes || targets.length > 0, targets };
+}
+/** git loads config and hooks from arbitrary paths (~/.config/git/config, core.hooksPath, core.fsmonitor). */
+const gitSeg = (s: Segment): boolean => s.words.some(x => lc(basename(x)) === 'git');
 function writtenFilesInert(segs: Segment[]): boolean {
   const files: string[] = [];
   const own = new Map<Segment, Set<string>>(); // each segment's own write targets: not a later reference
+  let writes = false;
   for (const s of segs) { // every segment, not only receivers: `echo x > t; bash -n t`
-    const mine = new Set<string>();
-    for (const d of s.redirs) if (d.op.includes('>')) mine.add(d.target);
-    const w = stripPrefix(s.words);
-    if (w[0] === 'tee') for (const a of w.slice(1)) if (!a.startsWith('-')) mine.add(a);
+    const sw = segWrites(s);
+    writes ||= sw.writes;
+    const mine = new Set(sw.targets);
     if (mine.size) { own.set(s, mine); files.push(...mine); }
   }
+  if (writes && segs.some(gitSeg)) return false; // no write is provably inert next to git
   if (files.length === 0) return true;
   if (files.some(f => comps(f).includes('.git'))) return false; // hooks, config aliases, remote.*.push
   for (const s of segs) {

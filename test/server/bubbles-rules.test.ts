@@ -622,8 +622,8 @@ describe('heredoc bodies', () => {
       `python3 - <<'EOF'\np='bin/kubicle-hook'\ns=open(p).read()\ns=s.replace("curl -s --unix-socket","curl -q --config <(printf 'header = x') --unix-socket")\nopen(p,'w').write(s)\nEOF\nbash -n bin/kubicle-hook && git diff --stat`,
       `mkdir -p /tmp/x && cp ~/notes/db* /tmp/x/ && cat > /tmp/x/m.mjs <<'EOF'\nconsole.log(q("select count(*) n from events"));\nEOF\nnode /tmp/x/m.mjs`,
       'cat > notes.md <<EOF\nremember to run tests\nEOF',
-      'cat <<-EOF > a.txt\n\tcount(*) x\n\tEOF\ngit status',
-      'cat <<\'A\' <<"B" > a.txt\n$(x) y\nA\nselect *\nB\ngit status',
+      'cat <<-EOF > a.txt\n\tcount(*) x\n\tEOF\nls',
+      'cat <<\'A\' <<"B" > a.txt\n$(x) y\nA\nselect *\nB\nls',
       'git commit -F - <<\'EOF\'\nfix: parser edge\nEOF',
     ]) assert.equal(pm(c), null, c);
   });
@@ -699,7 +699,7 @@ describe('heredoc bodies', () => {
       `cat > build.ninja <<'EOF'\nrule r\n  command = ${O}\nbuild x: r\nEOF\nninja`,
       `cat > out.txt <<'EOF'\n${O}\nEOF\ngit -c alias.st=x status`,
     ]) assert.equal(pm(c)?.hit.kind, 'push', c);
-    assert.equal(pm(`cat > out.txt <<'EOF'\n${O}\nEOF\nls && git --no-pager log -1 && echo done`), null);
+    assert.equal(pm(`cat <<'EOF'\n${O}\nEOF\nls && git --no-pager log -1 && echo done`), null);
   });
 
   test('fix round 4: no wrappers, env prefixes, .git paths or file options in the closed grammar', () => {
@@ -761,6 +761,39 @@ describe('heredoc bodies', () => {
       H + 'sort -n in.txt | uniq -c | head -5',
       H + 'grep -n x in.txt',
       `cat > out.txt <<'EOF'\n${O}\nEOF\necho done > log.txt`,
+    ]) assert.equal(pm(c), null, c);
+  });
+
+  test('fix round 5: no heredoc cut when the command writes a file next to git', () => {
+    const O = 'G=git; $G $(printf pu)sh origin main';
+    for (const c of [
+      // git reads config and hooks from paths we cannot see
+      `cat >> ~/.config/git/config <<'EOF'\n[core]\n\tfsmonitor = ${O}\nEOF\ngit status`,
+      `cat > .husky/pre-commit <<'EOF'\n${O}\nEOF\ngit commit -F - <<'M'\nmsg\nM`,
+      `cat > notes <<'EOF'\n${O}\nEOF\ngit status`,
+      `echo x > f; git commit -F - <<'M'\n${O}\nM`,
+      `tee out.txt <<'EOF'\n${O}\nEOF\ngit diff`,
+      `mkdir d && cat <<'EOF'\n${O}\nEOF\ngit status`,
+      `cat <<'EOF'\n${O}\nEOF\ncp a b && git log -1`,
+      `cat <<'EOF'\n${O}\nEOF\ntouch a; git show`,
+      `sort -o out.txt <<'EOF'\n${O}\nEOF\ngit status`,
+      `uniq - out.txt <<'EOF'\n${O}\nEOF\ngit status`,
+      'cat <<-EOF > a.txt\n\tcount(*) x\n\tEOF\ngit status',
+      `cat > out.txt <<'EOF'\n${O}\nEOF\nls && git --no-pager log -1 && echo done`,
+      // base64 -o / uniq IN OUT / sort -o destinations get the written-file checks
+      `base64 -D -o s <<'EOF'\n${O}\nEOF\n./s`,
+      `base64 -D -o s <<'EOF'\n${O}\nEOF\nbash -n s`,
+      `base64 -Dos <<'EOF'\n${O}\nEOF\ncat s`,
+      `base64 --output=s <<'EOF'\n${O}\nEOF\nbash -n s`,
+      `uniq - s <<'EOF'\n${O}\nEOF\nbash -n s`,
+      `sort -o s <<'EOF'\n${O}\nEOF\nbash -n s`,
+    ]) assert.equal(pm(c)?.hit.kind, 'push', c);
+    for (const c of [
+      // /dev/null, /dev/stdout, /dev/stderr are not file writes
+      `python3 - <<'EOF'\nprint(1)\nEOF\nbash -n bin/kubicle-hook 2>/dev/null && git diff --stat 2>/dev/stderr`,
+      `cat <<'EOF'\n${O}\nEOF\ngit status > /dev/stdout`,
+      `uniq -c <<'EOF'\n${O}\nEOF`,
+      'git commit -F - <<\'EOF\'\nfix: parser edge\nEOF',
     ]) assert.equal(pm(c), null, c);
   });
 
