@@ -563,12 +563,9 @@ function cutHeredocs(cmd: string): { text: string; bodies: HereBody[] } | null {
 const SHELL_WORDS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash', 'mksh', 'yash', 'posh', 'fish', 'csh', 'tcsh', 'busybox',
   'eval', 'source', '.', 'su', 'ssh']);
 const NOEXEC_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
-/** `bash -n FILE`: parse only, runs nothing. */
-const noexecShell = (w: string[]): boolean => {
-  if (!NOEXEC_SHELLS.has(lc(basename(w[0])))) return false;
-  for (const a of w.slice(1)) { if (!a.startsWith('-')) return false; if (a === '-n') return true; }
-  return false;
-};
+/** Exactly `bash -n FILE`: parse only, runs nothing (`-n +n` / `+o noexec` would turn execution back on). */
+const noexecShell = (w: string[]): boolean =>
+  w.length === 3 && NOEXEC_SHELLS.has(lc(basename(w[0]))) && w[1] === '-n' && !/^[-+]/.test(w[2]);
 /**
  * A segment that may run code from data written earlier: a shell word anywhere (except a bare `sh -n` syntax
  * check), an opaque/glob command word, a path as the command word (`./s`, `/tmp/s`), or no command word (`sudo -s`).
@@ -576,7 +573,7 @@ const noexecShell = (w: string[]): boolean => {
 function runsCode(s: Segment): boolean {
   const w = stripPrefix(s.words);
   if (w.length === 0 || /[$`*?\[{]/.test(w[0]) || w[0].includes('/') && !SHELL_WORDS.has(lc(basename(w[0])))) return true;
-  if (noexecShell(w)) return false;
+  if (noexecShell(s.words)) return false;
   return s.words.some(x => SHELL_WORDS.has(lc(basename(x))));
 }
 // Receivers that only read their stdin as data. Interpreters run it, but are let through on the push-text scan
@@ -605,6 +602,40 @@ const PM_TEXT = /\b(push|merge|rebase|subtree|update-ref|sync)\b|refs\/|api\.git
  *  - no segment anywhere can run code (a shell, eval, source, ., a script path, an opaque command word), so data
  *    written to a file or a variable cannot be run later in the same command.
  */
+const FILE_INTERP = new Set(['python', 'python3', 'node']);
+/**
+ * A heredoc body written to a file (`> f`, `>> f`, `tee f`) must not be run later in the same command: no other word
+ * may name the file (its path or basename, even inside a word) except as the sole argument of python/python3/node
+ * (the accepted interpreter residual), and nothing may find it another way (xargs, make, a changed PATH).
+ */
+function writtenFilesInert(segs: Segment[], receivers: Segment[]): boolean {
+  const files: string[] = [];
+  const own = new Set<string>(); // the receivers' own file operands: not a later reference
+  for (const r of new Set(receivers)) {
+    for (const d of r.redirs) if (d.op.includes('>')) { files.push(d.target); own.add(d.target); }
+    const w = stripPrefix(r.words);
+    if (w[0] === 'tee') for (const a of w.slice(1)) if (!a.startsWith('-')) { files.push(a); own.add(a); }
+  }
+  if (files.length === 0) return true;
+  for (const s of segs) {
+    if (s.words.some(x => /^(xargs|make|gmake)$/.test(lc(basename(x))) || x.includes('PATH='))) return false;
+    if (ENV_SETTERS.has(s.words[0] ?? '') && s.words.some(x => /^PATH(=|$)/.test(x))) return false;
+  }
+  for (const f of files) {
+    const names = [f, basename(f)].filter(Boolean);
+    for (const s of segs) {
+      const w = stripPrefix(s.words);
+      const interp = w.length === 2 && FILE_INTERP.has(w[0]) && w[1] === f;
+      const words = [...s.words, ...s.redirs.map(d => d.target)];
+      for (const x of words) {
+        if (own.has(x) && receivers.includes(s)) continue;
+        if (names.some(n => x.includes(n)) && !(interp && x === f)) return false;
+      }
+    }
+  }
+  return true;
+}
+
 function heredocVerdict(cmd: string, ctx: RulesCtx): Protected | null | undefined {
   const cut = cutHeredocs(cmd);
   if (!cut) return undefined;
@@ -615,6 +646,7 @@ function heredocVerdict(cmd: string, ctx: RulesCtx): Protected | null | undefine
   if (segs.some(s => runsCode(s) || s.words.some(w => w === '{' || w === '}'))) return undefined;
   const receivers = segs.flatMap(s => s.redirs.filter(r => HEREDOC_OP.test(r.op)).map(() => s));
   if (receivers.length !== cut.bodies.length || !receivers.every(dataReceiver)) return undefined;
+  if (!writtenFilesInert(segs, receivers)) return undefined;
   for (let k = 0; k < cut.bodies.length; k++) {
     const body = lc(cut.bodies[k].body.replace(/['"\\]/g, ''));
     const gh = /(^|[^\w-])gh(?![\w-])/.test(body) && /(^|[^\w-])api(?![\w-])/.test(body);

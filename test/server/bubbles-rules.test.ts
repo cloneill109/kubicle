@@ -674,6 +674,18 @@ describe('heredoc bodies', () => {
     ]) assert.equal(pm(c)?.hit.kind, 'push', c);
   });
 
+  test('fix round 2: the -n exemption and a written file run later', () => {
+    const W = "cat > s <<'EOF'\nG=git; $G $(printf pu)sh origin main\nEOF\n";
+    for (const tail of ['bash -n +n s', 'bash -n +o noexec s', 'bash -n -x s', 'echo a | xargs ./s', 'PATH=.:$PATH s',
+      'chmod +x s && export PATH=$PWD:$PATH && s', 'make -f s', 'perl -e "system(qx(cat s))"', 'node s x', 'cp s t && node t']) {
+      assert.equal(pm(W + tail)?.hit.kind, 'push', W + tail);
+    }
+    assert.equal(pm(W + 'node s'), null); // the accepted interpreter residual
+    assert.equal(pm(W + 'bash -n s')?.hit.kind, 'push'); // names the written file: not proven
+    // `bash -n` that does not name the written file stays a syntax check (here `bash` itself contains "s", so use out.txt)
+    assert.equal(pm("cat > out.txt <<'EOF'\nx\nEOF\nbash -n hook"), null);
+  });
+
   test('an unterminated heredoc is classified as commands', () => {
     assert.equal(pm('cat <<EOF\ngit push origin main')?.hit.kind, 'push');
     assert.equal(pm('cat <<EOF\ngit push origin main\nEOF2')?.hit.kind, 'push');
