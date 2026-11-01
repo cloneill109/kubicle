@@ -30,7 +30,9 @@ const SCAN_MAX = 20_000;
 const CANDIDATES_MAX = 64;
 
 /** Model text is shown to the agent: drop hidden/format/control characters, then clip. */
-const clean = (s: string, max: number) => s.replace(HIDDEN_ALL, '').trim().slice(0, max);
+const FRAME_RE = /\[(\s*Kubicle\/Bubbles)/gi;
+/** One line, no hidden chars, and no way to forge the briefing prefix. Idempotent. */
+const clean = (s: string, max: number) => s.replace(HIDDEN_ALL, '').replace(/\s+/g, ' ').trim().replace(FRAME_RE, '($1').slice(0, max).trim();
 
 function strings(v: unknown, count: number, max: number): string[] {
   if (!Array.isArray(v)) return [];
@@ -98,12 +100,12 @@ export function buildIntakeInput(r: IntakeRequest, redact: Redactor, instruction
 }
 
 export function formatBriefing(v: IntakeVerdict, roomName: string): string {
-  const parts = [`${BRIEFING_PREFIX} Room: ${roomName}. ${v.briefing}`];
+  const parts = [`${BRIEFING_PREFIX} Room: ${clean(roomName, 60)}. ${clean(v.briefing, BRIEFING_MAX)}`];
   if (v.subagents.length) {
     parts.push('Spawn these subagents with the Agent tool (one per line; use an agent type named after the specialty if one exists, otherwise general-purpose, and start each description with the specialty in brackets):\n'
-      + v.subagents.map((s) => `- [${s.specialty}] ${s.job}`).join('\n'));
+      + v.subagents.map((s) => `- [${clean(s.specialty, 40)}] ${clean(s.job, 200)}`).join('\n'));
   }
-  if (v.questions_for_owner.length) parts.push(`Before starting, ask the owner:\n${v.questions_for_owner.map((q) => `- ${q}`).join('\n')}`);
+  if (v.questions_for_owner.length) parts.push(`Before starting, ask the owner:\n${v.questions_for_owner.map((q) => `- ${clean(q, 300)}`).join('\n')}`);
   parts.push("This briefing is advisory; the owner's instructions win.");
   return parts.join('\n');
 }
