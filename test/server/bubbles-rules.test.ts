@@ -574,3 +574,44 @@ test('pushMergeAction: refs/heads/X destinations match grants as X', () => {
   assert.equal(grantMatches({ kind: 'push', branch: null, reason: 'x' }, 'P', g('main'), Date.now()), null);
   assert.ok(grantMatches({ kind: 'push', branch: null, reason: 'x' }, 'P', g(null), Date.now()));
 });
+
+// ---- final review C1: every tool that runs a command is analyzed like Bash ----
+test('final C1: Monitor / PowerShell / unknown command-bearing tools are classified as shell', () => {
+  const ctx = { cwd: '/work/app', branches: br('feature'), home, strictScripts: false };
+  for (const tool of ['Monitor', 'PowerShell']) {
+    const p = protectedAction(tool, { command: 'git push origin main', description: 'x', timeout_ms: 1000 }, ctx);
+    assert.equal(p?.kind, 'push', tool);
+    assert.equal(pushMergeAction(tool, { command: 'git push origin main' }, ctx)?.hit.kind, 'push', tool);
+    assert.equal(pushMergeAction(tool, { command: 'git push origin main' }, ctx)?.grantable, false, `${tool}: only Bash is grantable`);
+    assert.equal(protectedAction(tool, { command: `echo hi > ${home}/bubbles.yaml` }, ctx)?.kind, 'self', tool);
+    assert.equal(protectedAction(tool, { command: 'npm test' }, ctx), null, `${tool}: an everyday command stays null`);
+    assert.equal(pushMergeAction(tool, { command: 'git push origin feature' }, ctx), null, tool);
+  }
+  // a `script` field is a command too
+  assert.equal(protectedAction('PowerShell', { script: 'git push origin main' }, ctx)?.kind, 'push');
+  // fail closed: a tool we do not know that carries a command-like string field is protected, whatever it says
+  for (const input of [{ command: 'ls' }, { script: 'echo hi' }, { cmd: 'git status' }]) {
+    assert.equal(protectedAction('SomeNewShell', input, ctx)?.kind, 'push', JSON.stringify(input));
+    assert.equal(pushMergeAction('SomeNewShell', input, ctx)?.hit.kind, 'push', JSON.stringify(input));
+  }
+  // tools without a command field are untouched
+  assert.equal(protectedAction('Read', { file_path: '/work/app/x' }, ctx), null);
+  assert.equal(pushMergeAction('Grep', { pattern: 'git push origin main' }, ctx), null);
+});
+
+// ---- final review I1: `case` inside $( ) / backticks cannot be tokenized reliably ----
+test('final I1: a case statement inside a command substitution is opaque', () => {
+  for (const c of ['echo $(case x in x) git push origin main;; esac)', 'x=$(case a in a) git push origin main ;; esac)',
+    'echo "$(case x in x) git push origin main;; esac)"', 'echo `case x in x) git push origin main;; esac`']) {
+    const p = bash(c);
+    assert.equal(p?.kind, 'push', c);
+    assert.equal(pm(c)?.hit.kind, 'push', c);
+  }
+  assert.equal(bash('echo $(date) && npm test'), null);
+  assert.equal(bash('case $x in a) echo a;; esac'), null);
+});
+
+test('final I1: the word "case" in a commit message body does not make a commit opaque', () => {
+  assert.equal(bash(`git commit -m "$(cat <<'EOF'\nfix: edge case in parser\n\nhandles the case where x\nEOF\n)"`), null);
+  assert.equal(bash('git log --grep="$(echo use case)"'), null);
+});

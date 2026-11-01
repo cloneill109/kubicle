@@ -471,6 +471,8 @@ const GIT_WORD = /(^|[^\w-])(git|hub)(?!\w)/;
 const SINKS = new Set(['tee']);
 
 export const MAX_COMMAND_LEN = 16 * 1024;
+/** A `case` keyword in command position somewhere after a `$(` or backtick. */
+const SUBST_CASE = /(?:\$\(|`)(?:[\s\S]*?(?:\$\(|`|[;&|(){\n]|\s(?:then|do|else|elif|if|while|until)\s))?\s*case\s/;
 
 function pushMergeVerdict(cmd: string, nm: string, segs: Segment[], ctx: RulesCtx): Protected | null {
   const mergeKind = (): 'push' | 'merge' => (nm.includes('merge') ? 'merge' : 'push');
@@ -505,6 +507,10 @@ function pushMergeVerdict(cmd: string, nm: string, segs: Segment[], ctx: RulesCt
   const fail = (br: string | null): Protected => ({ kind, branch: br, reason: `${kind} not proven safe: ${cmd.slice(0, 120)}` });
   // an opaque command word (`$(which gh)`, `$G`) next to git/gh/push/merge text could be any of them
   if (opaque || (inlineCode && trigger)) return fail(null);
+  // `case` inside $( ) or backticks: its arm `)` ends the substitution early, so the tokens after it are not what
+  // bash runs (`echo $(case x in x) git push origin main;; esac)`). Never provable.
+  // Only `case` in command position counts, so a commit message saying "edge case" stays analyzable.
+  if (SUBST_CASE.test(nm)) return fail(null);
   const b = ctx.branches;
   let changed = false; // HEAD / repo may differ from what branchInfo read (taints HEAD / @ destinations)
   let stickyEnv = false;
@@ -1031,18 +1037,48 @@ function grantableCmd(cmd: string): { push?: string } | null {
   return invocations === 1 ? (push !== undefined ? { push } : {}) : no;
 }
 
+/** Tools whose `command` runs in a shell; analyzed exactly like Bash (only Bash is ever grantable). */
+const SHELL_TOOLS = new Set(['Bash', 'PowerShell', 'Monitor']);
+const COMMAND_FIELDS = ['command', 'script', 'cmd'] as const;
+
+/** The command text a tool call would run, or null when the input carries none (and the tool is not Bash). */
+function commandText(toolName: string, inp: Record<string, unknown>): string | null {
+  for (const k of COMMAND_FIELDS) if (typeof inp[k] === 'string') return inp[k] as string;
+  return toolName === 'Bash' ? '' : null;
+}
+
+/**
+ * True when the call may be a push or merge: an MCP tool, or any tool carrying a command. Cheap (no file reads), so
+ * the PreToolUse guard can skip every other tool call before reading branch state.
+ */
+export function mayPushOrMerge(toolName: unknown, input: unknown): boolean {
+  if (typeof toolName !== 'string') return true;
+  if (toolName === 'Bash' || SHELL_TOOLS.has(toolName) || toolName.startsWith('mcp__')) return true;
+  try {
+    return commandText(toolName, (input && typeof input === 'object' ? input : {}) as Record<string, unknown>) !== null;
+  } catch { return true; }
+}
+
 function classify(toolName: string, input: unknown, ctx: RulesCtx, mode: 'all' | 'pm' | 'rest'): Protected | null {
   if (typeof toolName !== 'string') throw new TypeError('tool name is not a string');
   const inp = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
-  if (toolName === 'Bash') {
-    const cmd = typeof inp.command === 'string' ? inp.command : '';
+  const cmdText = commandText(toolName, inp);
+  // Fail closed: a non-MCP tool we do not know that carries a command could run anything.
+  if (cmdText !== null && mode !== 'rest' && !SHELL_TOOLS.has(toolName) && !toolName.startsWith('mcp__')) {
+    return { kind: 'push', branch: null, reason: `unrecognized tool ${toolName} runs a command` };
+  }
+  let shellHit: Protected | null = null;
+  if (cmdText !== null) {
+    const cmd = cmdText;
     if (cmd.length > MAX_COMMAND_LEN) return { kind: 'push', branch: null, reason: 'command too long to analyze' };
     const nm = lc(cmd.replace(/['"\\]/g, ''));
     // fd duplication and /dev/null redirects are harmless; every other redirect stays visible as a word
     const segs = segmentsOf(cmd.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' '));
-    if (mode === 'pm') return pushMergeVerdict(cmd, nm, segs, ctx);
-    if (mode === 'rest') return selfBash(cmd, nm, segs, ctx) ?? (ctx.strictScripts ? scriptBash(segs) : null);
-    return selfBash(cmd, nm, segs, ctx) ?? pushMergeVerdict(cmd, nm, segs, ctx) ?? (ctx.strictScripts ? scriptBash(segs) : null);
+    if (mode === 'pm') shellHit = pushMergeVerdict(cmd, nm, segs, ctx);
+    else if (mode === 'rest') shellHit = selfBash(cmd, nm, segs, ctx) ?? (ctx.strictScripts ? scriptBash(segs) : null);
+    else shellHit = selfBash(cmd, nm, segs, ctx) ?? pushMergeVerdict(cmd, nm, segs, ctx) ?? (ctx.strictScripts ? scriptBash(segs) : null);
+    // an MCP tool that runs a command is still checked by name below
+    if (shellHit || !toolName.startsWith('mcp__')) return shellHit;
   }
   if (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'NotebookEdit') {
     if (mode === 'pm') return null;
