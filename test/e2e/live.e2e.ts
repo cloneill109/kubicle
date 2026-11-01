@@ -69,14 +69,21 @@ function repo(name: string): string {
   return d;
 }
 
+/** POST /hooks over the hook socket (it is 404 on TCP), with the kind header the current shim sends. */
 function hook(body: Record<string, unknown>): Promise<Response> {
-  return fetch(`${srv!.url}/hooks`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json', 'x-kubicle-token': srv!.ingestToken,
-      ...(body.hook_event_name === 'PermissionRequest' ? { 'x-kubicle-hook-kind': 'perm' } : {}),
-    },
-    body: JSON.stringify({ transcript_path: join(tmp, 'none.jsonl'), ...body }),
+  const kind = body.hook_event_name === 'PermissionRequest' ? 'perm' : body.hook_event_name === 'PreToolUse' ? 'pre' : 'event';
+  return new Promise((ok, fail) => {
+    const req = httpRequest({
+      socketPath: srv!.hookSocket, path: '/hooks', method: 'POST', agent: false,
+      headers: { host: 'kubicle', 'content-type': 'application/json', 'x-kubicle-token': srv!.ingestToken, 'x-kubicle-hook-kind': kind },
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => ok(new Response(res.statusCode === 204 ? null : Buffer.concat(chunks), { status: res.statusCode ?? 0 })));
+      res.on('error', fail);
+    });
+    req.on('error', fail);
+    req.end(JSON.stringify({ transcript_path: join(tmp, 'none.jsonl'), ...body }));
   });
 }
 

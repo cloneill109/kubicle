@@ -53,12 +53,35 @@ async function login(s: Srv): Promise<string> {
   return sc.split(';')[0];
 }
 
+/** fetch()-alike over the hook socket: POST /hooks exists only there (404 on TCP). */
+function sockFetch(s: Srv, path: string, init: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal } = {}): Promise<Response> {
+  return new Promise((ok, fail) => {
+    const req = httpRequest({ socketPath: s.hookSocket, path, method: init.method ?? 'GET', agent: false, headers: { host: 'kubicle', connection: 'keep-alive', ...init.headers } }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => {
+        res.socket?.destroy(); // one request per connection (keep-alive only so a 413 is read before the close)
+        const status = res.statusCode ?? 0;
+        const headers = new Headers();
+        for (const [k, v] of Object.entries(res.headers)) if (typeof v === 'string') headers.set(k, v);
+        ok(new Response([101, 204, 205, 304].includes(status) ? null : Buffer.concat(chunks), { status, headers }));
+      });
+      res.on('error', fail);
+    });
+    req.on('error', fail);
+    init.signal?.addEventListener('abort', () => req.destroy(new Error('aborted')));
+    req.end(init.body ?? '');
+  });
+}
+
 function postHook(s: Srv, body: unknown, token: string | null = s.ingestToken): Promise<Response> {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (token !== null) headers['x-kubicle-token'] = token;
-  // What `kubicle-hook 140 perm` sends: only such a caller can receive a decision.
-  if (typeof body === 'object' && body !== null && (body as { hook_event_name?: unknown }).hook_event_name === 'PermissionRequest') headers['x-kubicle-hook-kind'] = 'perm';
-  return fetch(`${s.url}/hooks`, { method: 'POST', headers, body: typeof body === 'string' ? body : JSON.stringify(body) });
+  // What the current shim sends: `kubicle-hook 140 perm` (only such a caller can receive a decision), `kubicle-hook 2 pre`.
+  const ev = typeof body === 'object' && body !== null ? (body as { hook_event_name?: unknown }).hook_event_name : undefined;
+  if (ev === 'PermissionRequest') headers['x-kubicle-hook-kind'] = 'perm';
+  else if (ev === 'PreToolUse') headers['x-kubicle-hook-kind'] = 'pre';
+  return sockFetch(s, '/hooks', { method: 'POST', headers, body: typeof body === 'string' ? body : JSON.stringify(body) });
 }
 
 function control(s: Srv, cookie: string, path: string, body: unknown, extra: Record<string, string> = {}): Promise<Response> {
@@ -428,7 +451,7 @@ test('hook client disconnecting mid-wait makes the prompt unanswerable', async (
   const c = await owner(s, cookie);
   await control(s, cookie, '/api/approvals-mode', { scope: 'session', id: 'sX2', mode: 'office' });
   const ac = new AbortController();
-  const hook = fetch(`${s.url}/hooks`, {
+  const hook = sockFetch(s, '/hooks', {
     method: 'POST', signal: ac.signal,
     headers: { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken, 'x-kubicle-hook-kind': 'perm' }, body: JSON.stringify(perm('sX2')),
   }).catch(() => 'aborted');
@@ -471,7 +494,7 @@ test('I1/I2: PermissionRequest without the perm kind header never waits, even op
   const c = await owner(s, cookie);
   await control(s, cookie, '/api/approvals-mode', { scope: 'session', id: 'sOld', mode: 'office' });
   const t0 = performance.now();
-  const r = await fetch(`${s.url}/hooks`, {
+  const r = await sockFetch(s, '/hooks', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken }, body: JSON.stringify(perm('sOld')),
   });
   assert.equal(await r.text(), '');
@@ -488,9 +511,9 @@ test('I2: an opted-in wait streams heartbeat spaces, then the decision', async (
   const t0 = performance.now();
   const done = new Promise<void>((resolve, reject) => {
     const body = JSON.stringify(perm('sHB'));
-    const req = httpRequest(`${s.url}/hooks`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'x-kubicle-token': s.ingestToken, 'x-kubicle-hook-kind': 'perm' },
+    const req = httpRequest({
+      socketPath: s.hookSocket, path: '/hooks', method: 'POST', agent: false,
+      headers: { host: 'kubicle', 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'x-kubicle-token': s.ingestToken, 'x-kubicle-hook-kind': 'perm' },
     }, (res) => {
       res.setEncoding('utf8');
       res.on('data', (d: string) => chunks.push({ t: performance.now() - t0, text: d }));
@@ -605,7 +628,7 @@ test('ingest reads x-kubicle-division / x-kubicle-room into the agent, ignoring 
   const s = await start();
   const cookie = await login(s);
   const c = await owner(s, cookie);
-  const hook = (sid: string, extra: Record<string, string>) => fetch(`${s.url}/hooks`, {
+  const hook = (sid: string, extra: Record<string, string>) => sockFetch(s, '/hooks', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken, ...extra },
     body: JSON.stringify({ ...fixture('SessionStart'), session_id: sid }),
@@ -885,4 +908,34 @@ test('socket: a home whose socket path exceeds 103 bytes rejects, naming the pat
   const sock = join(home, 'run', 'hook.sock');
   assert.ok(Buffer.byteLength(sock) > 103);
   await assert.rejects(startServer(cfgFor(home)), (e: Error) => e.message.includes(sock));
+});
+
+test('final M1: a socket probe that times out means "already running": the path is left alone', async () => {
+  const { claimSocket } = await import('../../src/server/main.ts');
+  const dir = shortHome();
+  const path = join(dir, 'hook.sock');
+  writeFileSync(path, 'stand-in for a live but slow listener');
+  const { EventEmitter } = await import('node:events');
+  // a probe that never connects nor errors (a listener too busy to accept)
+  const silent = () => { const e = new EventEmitter(); return Object.assign(e, { destroy(err?: Error) { if (err) setImmediate(() => e.emit('error', err)); } }); };
+  await assert.rejects(claimSocket(path, { probeMs: 30, connect: silent as never }), /Kubicle is already running/);
+  assert.ok(existsSync(path), 'the possibly-live socket was not unlinked');
+  // a refused probe still clears a stale file
+  const refused = () => { const e = new EventEmitter(); setImmediate(() => e.emit('error', Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }))); return Object.assign(e, { destroy() {} }); };
+  await claimSocket(path, { probeMs: 30, connect: refused as never });
+  assert.ok(!existsSync(path));
+});
+
+test('final M3: POST /hooks exists only on the hook socket (404 over TCP, nothing ingested, no banner)', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  await c.waitFor((m) => m.t === 'snapshot');
+  const r = await fetch(`${s.url}/hooks`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken }, body: JSON.stringify({ ...fixture('SessionStart'), session_id: 'tcp-1' }) });
+  assert.equal(r.status, 404);
+  const bad = await fetch(`${s.url}/hooks`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-kubicle-token': 'nope' }, body: '{}' });
+  assert.equal(bad.status, 404, 'no token check (and no wrong-token banner) on TCP');
+  assert.equal((await postHook(s, { ...fixture('SessionStart'), session_id: 'sock-1' })).status, 200);
+  await c.waitFor(isAgent((a) => a.id === 'sock-1'));
+  assert.ok(!c.msgs.some((m) => (m.t === 'agent' && m.agent.id === 'tcp-1') || m.t === 'banner'));
 });

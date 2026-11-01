@@ -498,3 +498,62 @@ test('local git steps with unsafe flags make a push ungrantable; refs/heads/main
   assert.equal((await pre(s, 'lf', 'git push origin refs/heads/main')).body, '', 'refs/heads/main is main: the grant covers it once');
   assert.equal((await pre(s, 'lf', 'git push origin refs/heads/main')).body, GUARD_ASK);
 });
+
+test('final C1: Monitor and PowerShell running a protected push: the guard asks, decide escalates protected, Bubbles never called', async () => {
+  const s = await start();
+  for (const tool of ['Monitor', 'PowerShell']) {
+    const input = { command: 'git push origin main', description: 'watch', timeout_ms: 1000 };
+    assert.equal((await pre(s, `c1-${tool}`, '', { tool_name: tool, tool_input: input })).body, GUARD_ASK, tool);
+    assert.equal((await perm(s, `c1-${tool}`, '', { tool_name: tool, tool_input: input })).body.trim(), '', tool);
+  }
+  assert.equal(s.fakeCalls(), 0);
+  const es = await logOf(s);
+  assert.equal(es.filter((e) => e.kind === 'guard' && e.outcome === 'ask').length, 2);
+  assert.deepEqual(es.filter((e) => e.kind === 'triage').map((e) => e.outcome), ['escalated:protected', 'escalated:protected']);
+  // a harmless Monitor command still goes to Bubbles (fake approves)
+  assert.equal((await pre(s, 'c1-m2', '', { tool_name: 'Monitor', tool_input: { command: 'tail -f log.txt' } })).body, '');
+  assert.equal((await perm(s, 'c1-m2', '', { tool_name: 'Monitor', tool_input: { command: 'tail -f log.txt' } })).body.trim(), hookResponse('allow'));
+});
+
+test('final I3: a PreToolUse from an out-of-date hook line (kind event) raises the guard-off banner, which clears bannerMs later', async () => {
+  const STALE = 'Hooks are out of date: the protected-branch guard is off. Re-run npm run install-hooks.';
+  const s = await start({}, { bannerMs: 300 });
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  await c.waitFor((m) => m.t === 'snapshot');
+  // an up-to-date `pre` hook never raises it
+  assert.equal((await pre(s, 'i3', 'ls')).status, 200);
+  await sleep(100);
+  assert.ok(!c.msgs.some((m) => m.t === 'banner' && m.text?.includes('out of date')));
+  // the old `kubicle-hook 1` PreToolUse line sends kind `event`
+  const body = { session_id: 'i3', hook_event_name: 'PreToolUse', cwd: s.cwd, tool_name: 'Bash', tool_input: { command: 'git push origin main' } };
+  const r = await viaSocket(s.hookSocket, 'POST', '/hooks', hookHeaders(s, 'event'), JSON.stringify(body));
+  assert.equal(r.body, '', 'an event-kind hook gets no guard answer');
+  await c.waitFor((m) => m.t === 'banner' && m.text === STALE);
+  c.msgs.length = 0; // only banners after this one count below
+  const c2 = await owner(s, cookie);
+  const snap = await c2.waitFor((m) => m.t === 'snapshot') as Extract<ServerMsg, { t: 'snapshot' }>;
+  assert.equal(snap.banner, STALE);
+  // the server ticks every 5 s: once the last stale PreToolUse is older than bannerMs, the banner clears
+  await c.waitFor((m) => m.t === 'banner' && !(m.text ?? '').includes('out of date'), 7000);
+});
+
+test('final M2: the office wait is shortened by the time triage took (total stays within approvalWaitMs)', async () => {
+  const { officeWaitMs } = await import('../../src/server/permission-flow.ts');
+  assert.equal(officeWaitMs(120_000, 20_000), 100_000);
+  assert.equal(officeWaitMs(120_000, 0), 120_000);
+  assert.equal(officeWaitMs(120_000, 130_000), 0);
+  assert.equal(officeWaitMs(120_000, -5), 120_000);
+  // end to end: a 1.2 s triage leaves ~0.8 s of a 2 s office wait
+  const s = await start({ env: { FAKE_CLAUDE_MODE: 'slow-escalate', FAKE_CLAUDE_DELAY: '1200' } }, { approvalWaitMs: 2000 });
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  await c.waitFor((m) => m.t === 'snapshot');
+  const t0 = performance.now();
+  const r = perm(s, 'm2', 'npm run build');
+  await c.waitFor(agentMsg((a) => a.id === 'm2' && a.pending?.answerable === true), 5000);
+  assert.equal((await r).body.trim(), '');
+  const ms = performance.now() - t0;
+  assert.ok(ms < 2600, `triage + office wait took ${Math.round(ms)} ms (limit ~2000)`);
+  assert.equal(s.fakeCalls(), 1);
+});

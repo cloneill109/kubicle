@@ -2,8 +2,9 @@
 // terminal). Plus the PreToolUse guard that forces a prompt on protected-branch pushes/merges in EVERY session.
 //
 // Guard: synchronous, never calls the model, answers before ingest. Fails open (returns "no ask") on an internal
-// error, matching the shim, which also stays silent on any failure. Only Bash and MCP tool calls can be pushes or
-// merges, so every other tool call returns before any file read.
+// error, matching the shim, which also stays silent on any failure. Only shell tools (Bash, PowerShell, Monitor, any
+// tool carrying a `command`/`script`/`cmd` string) and MCP tool calls can be pushes or merges, so every other tool
+// call returns before any file read.
 // Log ordering: every log.append here runs outside any other transaction (append opens BEGIN IMMEDIATE itself).
 import type { AgentEvent } from '../shared/events.ts';
 import type { AgentView } from '../shared/protocol.ts';
@@ -11,7 +12,7 @@ import type { Approvals, BubblesNote, Decision } from './approvals.ts';
 import type { BubblesConfig } from './bubbles/config.ts';
 import type { BubblesLog, LogEntry } from './bubbles/log.ts';
 import type { Policy } from './bubbles/policy.ts';
-import { branchInfo, grantMatches, otherProtectedAction, protectedAction, pushMergeAction, type BranchInfo, type Protected, type RulesCtx } from './bubbles/rules.ts';
+import { branchInfo, grantMatches, mayPushOrMerge, otherProtectedAction, protectedAction, pushMergeAction, type BranchInfo, type Protected, type RulesCtx } from './bubbles/rules.ts';
 import type { Bubbles, EscalateWhy, TriageOutcome, TriageRequest } from './bubbles/triage.ts';
 import { projectRoot } from './projects.ts';
 import type { Registry } from './registry.ts';
@@ -53,6 +54,8 @@ export interface FlowDeps {
   onAgent: (a: AgentView) => void;
   now?: () => number;
   onError?: (msg: string) => void;
+  /** Triage + office wait budget (Config.approvalWaitMs, 120 s); see officeWaitMs. */
+  approvalWaitMs?: number;
 }
 
 export interface DecideOpts {
@@ -62,6 +65,14 @@ export interface DecideOpts {
   gone: () => boolean;
   /** The original (uncapped) tool_input object; parsed from e.toolInput if absent. */
   input?: unknown;
+}
+
+/**
+ * How long the office may wait for the owner once triage took `triageMs`: triage and the office wait share one
+ * `approvalWaitMs` budget (120 s), so with at most 20 s of triage the shim's 140 s timeout always has margin.
+ */
+export function officeWaitMs(approvalWaitMs: number, triageMs: number): number {
+  return Math.max(0, approvalWaitMs - Math.max(0, triageMs));
 }
 
 const keyOf = (e: AgentEvent) => (e.agentId !== undefined ? `${e.sessionId}:${e.agentId}` : e.sessionId);
@@ -151,9 +162,10 @@ export class PermissionFlow {
   guard(e: AgentEvent, rawInput?: unknown): boolean {
     try {
       const tool = e.toolName;
-      if (!tool || (tool !== 'Bash' && !tool.startsWith('mcp__'))) return false;
-      const agent = this.d.registry.get(keyOf(e));
       const input = inputOf(e, rawInput);
+      // Bash, PowerShell, Monitor, MCP, and any tool carrying a command (fail-closed); nothing else reads branch state.
+      if (!tool || !mayPushOrMerge(tool, input)) return false;
+      const agent = this.d.registry.get(keyOf(e));
       // Push/merge on its own: a command that is ALSO self-administration must still be asked about.
       const pm = pushMergeAction(tool, input, this.ctx(e.cwd ?? agent?.cwd));
       if (!pm) return false;
@@ -207,6 +219,7 @@ export class PermissionFlow {
     };
 
     this.setThinking(id, true);
+    const triageStart = this.now();
     let out: TriageOutcome | null = null;
     try {
       out = await this.d.bubbles.triage(req, hit);
@@ -239,7 +252,11 @@ export class PermissionFlow {
     if (opts.gone()) detail = 'hook caller gone';
     else if (!this.d.uiConnected()) detail = 'no office open';
     else if (!now || now.approvals === 'off') detail = 'approvals off';
-    else { detail = ''; decision = await this.d.approvals.request(e, note); }
+    else {
+      const waitMs = officeWaitMs(this.d.approvalWaitMs ?? 120_000, this.now() - triageStart);
+      if (waitMs <= 0) detail = 'no time left for an office wait';
+      else { detail = ''; decision = await this.d.approvals.request(e, note, waitMs); }
+    }
     if (detail) {
       // No office wait: keep the (unanswerable) card, with why, for anyone who opens the office later.
       const cur = this.d.registry.get(id);

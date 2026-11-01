@@ -27,6 +27,7 @@ const PRUNE_MS = 3_600_000;
 const KEEP_EVENTS_MS = 7 * 86_400_000;
 const FEED_MAX = 200;
 export const BAD_TOKEN_BANNER = 'Hooks are sending the wrong token. Re-run npm run install-hooks.';
+export const STALE_HOOKS_BANNER = 'Hooks are out of date: the protected-branch guard is off. Re-run npm run install-hooks.';
 // sockaddr_un.sun_path holds 104 bytes on macOS (108 on Linux), terminator included.
 const SOCKET_PATH_MAX = 103;
 const PROBE_MS = 300;
@@ -77,16 +78,17 @@ function listen(server: Server, port: number): Promise<number> {
 }
 
 /** Fail with "already running" if something answers on the socket; unlink a leftover file nobody answers. */
-function claimSocket(path: string): Promise<void> {
+export function claimSocket(path: string, opts: { probeMs?: number; connect?: typeof connect } = {}): Promise<void> {
   return new Promise((ok, fail) => {
-    const probe = connect(path);
-    const timer = setTimeout(() => probe.destroy(new Error('probe timeout')), PROBE_MS);
+    const probe = (opts.connect ?? connect)(path);
+    const timer = setTimeout(() => probe.destroy(new Error('probe timeout')), opts.probeMs ?? PROBE_MS);
     probe.once('connect', () => { clearTimeout(timer); probe.destroy(); fail(new Error('Kubicle is already running')); });
     probe.once('error', (err: NodeJS.ErrnoException) => {
       clearTimeout(timer);
-      // Refused or absent: stale. A listener too slow to answer is treated as stale too, but it
-      // then keeps the path, so our own listen() fails and reports "already running".
-      if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED' || err.message === 'probe timeout') {
+      // Refused or absent: stale, so unlink it. A probe that times out may be a live office too busy to accept:
+      // never unlink that socket (it would cut the running office off from its hooks); report it as running.
+      if (err.message === 'probe timeout') fail(new Error('Kubicle is already running'));
+      else if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED') {
         rmSync(path, { force: true });
         ok();
       } else fail(err);
@@ -152,14 +154,17 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   const feed: FeedItem[] = [];
   const pushFeed = (item: FeedItem) => { feed.push(item); if (feed.length > FEED_MAX) feed.shift(); };
   let banner: string | null = null;
-  // Banner: a wrong-token warning (any /hooks 401 within bannerMs) wins over the stale-hooks one;
-  // building file problems are appended to whichever shows.
+  // Banner: a wrong-token warning (any /hooks 401 within bannerMs) wins over the out-of-date-hooks one (any
+  // PreToolUse without the `pre` kind within bannerMs), which wins over the no-events one; building file problems
+  // are appended to whichever shows.
   let staleBanner: string | null = null;
   let badTokenAt = -Infinity;
   let badTokenCount = 0;
+  let staleHookAt = -Infinity; // last PreToolUse from a hook line without the `pre` kind (guard not running)
+  let staleHookLogged = false;
   const building = new BuildingService(cfg.home);
   const setBanner = (now: number) => {
-    const hooks = now - badTokenAt < cfg.bannerMs ? BAD_TOKEN_BANNER : staleBanner;
+    const hooks = now - badTokenAt < cfg.bannerMs ? BAD_TOKEN_BANNER : now - staleHookAt < cfg.bannerMs ? STALE_HOOKS_BANNER : staleBanner;
     const next = composeBanner(hooks, building.snapshot().warnings,
       bubblesBannerItems(bubbles.status(), bubblesConfigWarning, bubblesLog.warning()));
     if (next !== banner) { banner = next; hub.broadcast({ t: 'banner', text: banner }); }
@@ -203,7 +208,7 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   const url = `http://127.0.0.1:${port}`;
   const loginUrl = `${url}/login?code=${auth.newLoginCode()}`;
   const flow = new PermissionFlow({
-    registry, approvals, policy, log: bubblesLog, bubbles, config: () => bubblesConfig, home: cfg.home, port,
+    registry, approvals, policy, log: bubblesLog, bubbles, config: () => bubblesConfig, home: cfg.home, port, approvalWaitMs: cfg.approvalWaitMs,
     uiConnected: () => hub.count() > 0,
     projectName: (id) => projects.list().find((p) => p.id === id)?.name ?? id,
     onAgent: (a) => hub.broadcast({ t: 'agent', agent: a }),
@@ -217,6 +222,11 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
       if (badTokenCount === 1 || badTokenCount % 100 === 0) log(`hooks: ${badTokenCount} request(s) with a wrong ingest token`);
       badTokenAt = Date.now();
       setBanner(badTokenAt);
+    },
+    onStaleHook: () => {
+      if (!staleHookLogged) { staleHookLogged = true; log('hooks: a PreToolUse came from an out-of-date hook line; the protected-branch guard is off until npm run install-hooks'); }
+      staleHookAt = Date.now();
+      setBanner(staleHookAt);
     },
   });
   server.on('request', handler);

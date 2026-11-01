@@ -80,9 +80,10 @@ export class Approvals {
   /**
    * Waits for the office (if a UI is connected and the agent is opted in). Resolves with the owner's answer,
    * or null when it falls to the terminal (timeout, release, supersede, cancel, truncated input, no UI).
-   * `note`: why Bubbles escalated, shown on the card.
+   * `note`: why Bubbles escalated, shown on the card. `waitMs`: what is left of the budget after triage
+   * (never more than approvalWaitMs).
    */
-  request(e: AgentEvent, note?: BubblesNote): Promise<Decision | null> {
+  request(e: AgentEvent, note?: BubblesNote, waitMs: number = this.#cfg.approvalWaitMs): Promise<Decision | null> {
     const agentId = e.agentId ? `${e.sessionId}:${e.agentId}` : e.sessionId;
     const agent = this.#registry.get(agentId);
     if (!agent || agent.approvals === 'off' || !this.#uiConnected()) return Promise.resolve(null);
@@ -113,7 +114,7 @@ export class Approvals {
         agentId,
         base,
         resolve,
-        timer: setTimeout(() => this.#release(w), this.#cfg.approvalWaitMs),
+        timer: setTimeout(() => this.#release(w), Math.min(waitMs, this.#cfg.approvalWaitMs)),
       };
       this.#waiting.set(id, w);
       this.#byAgent.set(agentId, w);

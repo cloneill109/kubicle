@@ -88,8 +88,8 @@ Why: the owner wants agents to keep moving without stopping for every prompt. Th
   - any write or edit to `~/.kubicle/`;
   - any write or edit to `office.db`.
 
-  Known gap: a process can still tamper with `office.db` directly, outside Claude's tools. The log's hash chain makes that detectable, not impossible.
-- **Timeouts:** triage on the fast model has 8 s. The optional retry on the strong model has 12 s, with at most 20 s in total spent in Bubbles. Escalation keeps the existing 120 s office wait, for 140 s in all, under the 150 s hook timeout.
+  Known gap: a process can still tamper with `office.db` directly, outside Claude's tools. The log's hash chain detects edited or deleted log rows (`kubicle log verify`), but a grant or instruction row inserted directly into `office.db` is not detected. The Bubbles panel lists every active grant and instruction, so review them there.
+- **Timeouts:** triage on the fast model has 8 s. The optional retry on the strong model has 12 s, with at most 20 s in total spent in Bubbles. Triage and the office wait share one 120 s budget: the office waits 120 s minus the time triage took, so the total stays at or under 120 s, well inside the shim's 140 s limit and the 150 s hook timeout.
 - **Truncated input:** a request whose input was truncated (the stage 1 limit of over 4 KB) is never approved by Bubbles. It escalates.
 - **Intake scope:** intake runs only for plain `claude` sessions (no `KUBICLE_ROOM`). For sessions started with `kubicle run`, the room was chosen at launch and Bubbles never moves them. Room precedence: the owner's manual label, then the launch room, then Bubbles's assignment, then the Bullpen.
 - **Answering direction questions:** when Bubbles or an agent asks the owner something, the agent asks in its own terminal. The office shows the question with Bubbles's context, and the owner answers in the terminal. The office cannot type into a running terminal session. From the office the owner can also turn their answer into a standing instruction. If the `AskUserQuestion` spike succeeds, the office can answer those questions directly.
@@ -123,7 +123,7 @@ The input to Bubbles is untrusted data. The system prompt says so and puts it in
 
 ## 7. The log
 
-- **Storage:** an append-only `bubbles_log` table in `office.db`, mirrored to `~/.kubicle/log/bubbles-YYYY-MM.jsonl`. Each entry carries a hash of the previous one, so edits and deletions are detectable (`kubicle log verify`). Nothing in Kubicle updates or deletes entries. Retention is unlimited by default.
+- **Storage:** an append-only `bubbles_log` table in `office.db`, mirrored to `~/.kubicle/log/bubbles-YYYY-MM.jsonl`. Each entry carries a hash of the previous one, so edits and deletions of log rows are detectable (`kubicle log verify`); rows inserted directly into the grant or instruction tables are not. Nothing in Kubicle updates or deletes entries. Retention is unlimited by default.
 - **Every entry:**
   - time, entry kind (intake, triage, escalation, owner-answer, grant, instruction, report, error, usage), project/floor and room;
   - session id, agent id/type and the transcript path plus message uuid where available, so the owner can jump to the exact turn;

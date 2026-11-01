@@ -67,6 +67,8 @@ export interface HttpDeps {
   pushFeed(item: FeedItem): void;
   /** A hook arrived with a missing or wrong ingest token (I4). */
   onBadToken?(): void;
+  /** A PreToolUse arrived from a hook line that is not `kubicle-hook <max> pre`: the guard never ran for it. */
+  onStaleHook?(): void;
   /** Repo root: serves `src/ui/index.html`, `src/ui/styles.css`, `dist/ui/*`. */
   rootDir: string;
   /** Actual bound port (for the CSP connect-src). */
@@ -171,7 +173,7 @@ export function agentKey(e: AgentEvent): string {
   return e.agentId !== undefined ? `${e.sessionId}:${e.agentId}` : e.sessionId;
 }
 
-/** Which listener a request arrived on: `/cli/*` exists only on the private socket. */
+/** Which listener a request arrived on: `/cli/*` and POST /hooks exist only on the private socket. */
 export type Channel = 'tcp' | 'socket';
 
 export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerResponse, channel?: Channel) => void {
@@ -226,6 +228,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       try { ingest(e); } catch (err) { d.log(`ingest failed: ${String(err)}`); }
       return;
     }
+    if (e.event === 'PreToolUse') d.onStaleHook?.(); // an older install's PreToolUse line: no guard
     if (e.event !== 'PermissionRequest') {
       send(res, 200);
       try { ingest(e); } catch (err) { d.log(`ingest failed: ${String(err)}`); }
@@ -500,7 +503,8 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     }
 
     if (m === 'POST') {
-      if (p === '/hooks') return hooks(req, res);
+      // Hooks come only over the private socket (the shim never uses TCP): any local process can reach the port.
+      if (p === '/hooks') { if (channel !== 'socket') { req.resume(); return send(res, 404, 'not found'); } return hooks(req, res); }
       if (p === '/api/approvals-mode') return approvalsMode(req, res);
       let mm = /^\/api\/approvals\/([^/]+)$/.exec(p);
       if (mm) return answer(req, res, param(mm[1]));

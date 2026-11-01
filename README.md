@@ -12,13 +12,15 @@ npm start                # builds the UI, starts the server, opens the login lin
 
 Start with `npm start` (or `./bin/kubicle start`). Both steps have `kubicle` equivalents (`kubicle install-hooks`, `kubicle start`); run `npm link` once to get a global `kubicle` on your PATH (`bin/kubicle` resolves its real location, so it works through the symlink).
 
-**Upgrading:** re-run `npm run install-hooks`, then restart the office. The hooks now use the private socket and the PreToolUse guard, and an old office with the new hooks receives nothing.
+**Upgrading:** re-run `npm run install-hooks`, then restart the office. The hooks now use the private socket and the PreToolUse guard, and an old office with the new hooks receives nothing. Until you re-run it, the protected-branch guard is off: an older PreToolUse hook line still reports events but never runs the guard, and the office shows "Hooks are out of date: the protected-branch guard is off. Re-run npm run install-hooks."
+
+**Upgrading to Bubbles:** office approvals are now on by default, and the upgrade switches them on for every existing project. From then on every permission prompt in every session goes to Bubbles first, which runs `claude -p` on your subscription. If you do not want that for a project or a session, opt it out from the inspector, or turn Bubbles off (see [Bubbles](#bubbles)).
 
 The server listens on `127.0.0.1:4317` (override with `KUBICLE_PORT`). It prints `Kubicle: <login link>` and opens it. The link works once; restart the server for a new one. Set `KUBICLE_NO_OPEN=1` to skip opening the browser.
 
 Existing sessions pick up new hooks only after they restart.
 
-The installer writes the current `KUBICLE_HOME` into each hook command, so sessions reach the same office however their shell is set up. Hooks travel over a private Unix socket at `<home>/run/hook.sock` (the path is capped at 103 bytes, so keep the home short), not TCP. Re-run `npm run install-hooks` after changing the home, and after updating Kubicle (older hook command lines still report events but never get office approvals). If hooks arrive with the wrong token, the office shows "Hooks are sending the wrong token. Re-run npm run install-hooks."
+The installer writes the current `KUBICLE_HOME` into each hook command, so sessions reach the same office however their shell is set up. Hooks travel over a private Unix socket at `<home>/run/hook.sock` (the path is capped at 103 bytes, so keep the home short), not TCP. Re-run `npm run install-hooks` after changing the home, and after updating Kubicle. Older hook command lines keep working for events and office approvals, but an older PreToolUse line never runs the protected-branch guard; the office then shows "Hooks are out of date: the protected-branch guard is off. Re-run npm run install-hooks." If hooks arrive with the wrong token, the office shows "Hooks are sending the wrong token. Re-run npm run install-hooks."
 
 ## Uninstall
 
@@ -100,7 +102,7 @@ kubicle division show <id>
 
 On by default (Bubbles triages first, see below). Opt a session or a whole project out from the inspector. For a session that has not opted out, a permission prompt appears in the office with the tool's full input (up to 8192 characters) and Approve / Deny. Click the "need you" count in the header to jump to the agent that has waited longest.
 
-While the office waits for your answer (up to 2 minutes), the terminal prompt does not appear. If you do not answer in that time, the hook returns no decision and the normal prompt appears in the terminal. With no browser connected, or the server down, the terminal prompt appears at once.
+While the office waits for your answer (up to 2 minutes, including the time Bubbles took), the terminal prompt does not appear. If you do not answer in that time, the hook returns no decision and the normal prompt appears in the terminal. With no browser connected, or the server down, the terminal prompt appears at once.
 
 An input longer than 8192 characters cannot be approved from the office. For those the terminal prompt appears immediately (the office does not wait), and the office shows the input with "Answer this in the terminal".
 
@@ -110,10 +112,10 @@ Sessions that opted out still show their permission prompts in the office (full 
 
 Bubbles is the office's coordinator. Every permission request first goes to Bubbles, which asks a headless `claude -p` whether the action is routine for the task. It approves clear cases and escalates the rest to you (office, or the terminal prompt if no browser is open). Every decision is logged.
 
-- **Subscription only.** Bubbles runs `claude -p` under your own Claude login, never an API key (Kubicle strips `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from those calls). Calls count against your subscription limits. The daily cap is 300 calls (`daily_call_cap` in `bubbles.yaml`), and a usage-limit response puts Bubbles off duty until midnight (everything then goes to you).
+- **Subscription only.** Bubbles runs `claude -p` under your own Claude login, never an API key (Kubicle removes every `ANTHROPIC_*` variable, such as the API key, auth token and base URL, and every `CLAUDE_CODE_USE_*` provider switch from those calls). Calls count against your subscription limits. The daily cap is 300 calls (`daily_call_cap` in `bubbles.yaml`), and a usage-limit response puts Bubbles off duty until midnight (everything then goes to you).
 - **The main-branch rule.** A PreToolUse guard runs on every session: a push or merge to a protected branch (main, master, and any `protected_branches` in `bubbles.yaml`) is stopped and asked about. In headless `claude -p` sessions there is no prompt, so a guarded push is denied. A grant covers a single plain push to `origin` and needs your confirmation in the office. Known limits: scripts and programs that call git internally, inline interpreter code, GitHub Enterprise hosts and other VCS can get past a text-based guard. **Enable GitHub branch protection on main; that is the real backstop.**
 - **Grants, instructions and the on/off switch are proposals from the CLI.** `kubicle grant`, `kubicle instruct`, `kubicle revoke` and `kubicle bubbles on|off` only queue a proposal; nothing changes until you confirm it in the office (Lobby, Bubbles).
-- **The log.** An append-only, hash-chained record of triage verdicts (what Bubbles was shown, model, reason), escalations, your answers, guard decisions, grants, instructions and toggles. Read it with `kubicle log` (filters: `--project --session --kind --since --grep --limit --json`) or the office Log view. `kubicle log verify` checks the chain. JSONL mirror files are in `~/.kubicle/log/`.
+- **The log.** An append-only, hash-chained record of triage verdicts (what Bubbles was shown, model, reason), escalations, your answers, guard decisions, grants, instructions and toggles. Read it with `kubicle log` (filters: `--project --session --kind --since --grep --limit --json`) or the office Log view. `kubicle log verify` checks the chain: it detects edited or deleted log rows. It does not detect a grant or instruction row inserted straight into `office.db` by a process outside Claude's tools, so review the active grants and instructions the Bubbles panel lists. JSONL mirror files are in `~/.kubicle/log/`.
 - **Turning it off.** Use the toggle in the office, `kubicle bubbles off` (then confirm in the office), or set `enabled: false` in `~/.kubicle/bubbles.yaml` and restart. Per session or project, you can also opt out of office approvals from the inspector.
 
 ## Tests
@@ -125,7 +127,7 @@ npm run typecheck
 npm run smoke       # real `claude -p` session against a throwaway server/repo/settings; prints SMOKE OK
 ```
 
-The smoke test uses a temp home, a temp git repo with hooks in its `.claude/settings.local.json`, and port 4399. It does not touch `~/.claude` or `~/.kubicle`. It uses the real `claude` and your subscription: one short haiku session plus one routine Bubbles triage (at most 3 model calls). It also sends a protected push and asserts it is never allowed, and that `kubicle log verify` is ok.
+The smoke test uses a temp home, a temp git repo with hooks in its `.claude/settings.local.json`, and port 4399. It does not touch `~/.claude` or `~/.kubicle`. It uses the real `claude` and your subscription: one short haiku `claude -p` session plus one routine Bubbles triage (at most 3 `claude -p` runs in all: the session, then up to 2 for the triage). It also sends a protected push and asserts it is never allowed, and that `kubicle log verify` is ok.
 
 ## Owner check (manual, with real terminals)
 

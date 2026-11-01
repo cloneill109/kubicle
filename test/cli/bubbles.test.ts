@@ -2,6 +2,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../../src/server/config.ts';
@@ -24,8 +25,14 @@ async function office() {
   cleanup.push(() => s.close());
   // The office learns the project from a hook event.
   const hook = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'fixtures', 'hooks', 'SessionStart.json'), 'utf8'));
-  const r = await fetch(`${s.url}/hooks`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken }, body: JSON.stringify({ ...hook, session_id: 'sx', cwd: repo }) });
-  assert.ok(r.ok);
+  // POST /hooks exists only on the hook socket.
+  const status = await new Promise<number>((ok, fail) => {
+    const req = httpRequest({ socketPath: s.hookSocket, path: '/hooks', method: 'POST', agent: false,
+      headers: { host: 'kubicle', 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken } }, (res) => { res.resume(); res.on('end', () => ok(res.statusCode ?? 0)); });
+    req.on('error', fail);
+    req.end(JSON.stringify({ ...hook, session_id: 'sx', cwd: repo }));
+  });
+  assert.equal(status, 200);
   return { s, home, repo };
 }
 
