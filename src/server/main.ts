@@ -178,7 +178,11 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   building.start(() => projects.list());
   const reclassify = () => { for (const a of registry.reclassifySubagents()) hub.broadcast({ t: 'agent', agent: a }); };
   reclassify(); // divisions only load with start(); rebuild() ran before them
-  building.onChange = (b) => { hub.broadcast({ t: 'building', building: b }); reclassify(); setBanner(Date.now()); };
+  building.onChange = (b) => {
+    hub.broadcast({ t: 'building', building: b });
+    try { reclassify(); } catch (err) { log(`reclassify failed: ${String(err)}`); } // never skip the banner update
+    setBanner(Date.now());
+  };
   setBanner(Date.now()); // a file already broken at startup
   const bubblesChanged = () => { hub.broadcast({ t: 'bubbles', ...bubblesState() }); setBanner(Date.now()); };
   // status() fires onStatus on a change, and setBanner calls status(): guard the re-entry.

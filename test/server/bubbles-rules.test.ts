@@ -797,6 +797,41 @@ describe('heredoc bodies', () => {
     ]) assert.equal(pm(c), null, c);
   });
 
+  test('final wave: write targets and cp/mv destinations must pass a charset allowlist', () => {
+    const O = 'G=git; $G $(printf pu)sh origin main';
+    const W = (t: string) => `cat > ${t} <<'EOF'\n${O}\nEOF`;
+    for (const c of [
+      `cat >> .gi?/config <<'EOF'\n[core]\n\tpager = ${O}\nEOF`,
+      `cat > a1 <<'EOF'\n${O}\nEOF\ncp a? .gi?/hooks/pre-commit`,
+      `cat <<'EOF' >&2x\n${O}\nEOF\ngit status`,
+      `cat >&2x <<'EOF'\n${O}\nEOF`,
+      W('.husky/pre-commit'),
+      `cat >> ~/.config/git/config <<'EOF'\n${O}\nEOF`,
+      `cat >> $XDG_CONFIG_HOME/git/config <<'EOF'\n${O}\nEOF`,
+      W('/etc/gitconfig'),
+      W('githooks/pre-commit'),
+      W('../x'),
+      W('{a,b}'),
+      W('/dev/null.x'),
+      `cat >/dev/nullx <<'EOF'\n${O}\nEOF`,
+      `cat <<'EOF'\n${O}\nEOF\ncp a ~/x`,
+      `cat <<'EOF'\n${O}\nEOF\ncp -t d a`,
+      `tee x/../y <<'EOF'\n${O}\nEOF`,
+      // flags outside the grant whitelist on the inert git subcommands, long options on sort/grep/diff
+      `cat <<'EOF'\n${O}\nEOF\ngit log --show-signature`,
+      `sort -T x <<'EOF'\n${O}\nEOF`,
+      `grep --exclude-from=s x <<'EOF'\n${O}\nEOF`,
+    ]) assert.equal(pm(c)?.hit.kind, 'push', c);
+    for (const c of [
+      `python3 - <<'EOF'\np='bin/kubicle-hook'\ns=open(p).read()\ns=s.replace("curl -s --unix-socket","curl -q --config <(printf 'header = x') --unix-socket")\nopen(p,'w').write(s)\nEOF\nbash -n bin/kubicle-hook && git diff --stat`,
+      `mkdir -p /tmp/x && cp ~/notes/db* /tmp/x/ && cat > /tmp/x/m.mjs <<'EOF'\nconsole.log(q("select count(*) n from events"));\nEOF\nnode /tmp/x/m.mjs`,
+      'cat > notes.md <<EOF\nremember to run tests\nEOF',
+      `cat > /tmp/x/m.mjs <<'EOF'\n${O}\nEOF\nnode /tmp/x/m.mjs`,
+      `cat <<'EOF' >&2\n${O}\nEOF`,
+      `cat <<'EOF' 2>&1 >/dev/null\n${O}\nEOF`,
+    ]) assert.equal(pm(c), null, c);
+  });
+
   test('an unterminated heredoc is classified as commands', () => {
     assert.equal(pm('cat <<EOF\ngit push origin main')?.hit.kind, 'push');
     assert.equal(pm('cat <<EOF\ngit push origin main\nEOF2')?.hit.kind, 'push');

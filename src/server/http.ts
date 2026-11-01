@@ -182,15 +182,15 @@ export interface PromptHistory { count: number; lastPromptAt?: number; lastSeen?
 
 /**
  * Whether a UserPromptSubmit gets a Bubbles intake: a plain session (no subagent, no launch room/division
- * hint, on this event or kept from an earlier one), a non-empty prompt, a project floor, and either the
+ * hint, on this event or kept from an earlier one), a non-empty prompt, and either the
  * session's first prompt or one after it sat idle for INTAKE_IDLE_MS (both its last prompt and its last
- * event of any kind, so a subagent hand-back mid-task never qualifies).
+ * event of any kind, so a subagent hand-back mid-task never qualifies). The caller also requires the project floor.
  */
-export function shouldIntake(e: AgentEvent, prompt: unknown, before: PromptHistory, view: AgentView | undefined, hasFloor: boolean, now: number): boolean {
+export function shouldIntake(e: AgentEvent, prompt: unknown, before: PromptHistory, view: AgentView | undefined, now: number): boolean {
   if (e.event !== 'UserPromptSubmit' || e.agentId !== undefined) return false;
   if (e.room || e.division || view?.room || view?.division) return false;
   if (typeof prompt !== 'string' || prompt.trim() === '') return false;
-  if (!view || view.kind !== 'session' || !view.projectId || !hasFloor) return false;
+  if (!view || view.kind !== 'session' || !view.projectId) return false;
   if (before.count === 0) return true;
   // No view before this event (expired after a day idle, so the registry dropped it): idle too.
   return before.lastPromptAt !== undefined && now - before.lastPromptAt >= INTAKE_IDLE_MS
@@ -321,7 +321,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     try {
       const view = d.registry.get(e.sessionId);
       const floor = view?.projectId ? d.building.snapshot().floors[view.projectId] : undefined;
-      if (before && view && floor && shouldIntake(e, prompt, before, view, true, e.ts)) {
+      if (before && view && floor && shouldIntake(e, prompt, before, view, e.ts)) {
         roomName = (id) => floor.rooms.find((r) => r.id === id)?.name ?? (id === 'bullpen' ? 'Bullpen' : id);
         request = {
           prompt: prompt as string, projectId: view.projectId,

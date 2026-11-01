@@ -637,13 +637,17 @@ function closedGrammarSeg(s: Segment, receivers: Segment[]): boolean {
   if (/[$`*?\[{\/]/.test(c) && c !== '[') return false; // opaque, glob, or a path
   if ([...w, ...s.redirs.map(d => d.target)].some(x => lc(x).includes('.git'))) return false; // hooks, config
   if (FILE_OPT_CMDS.has(c) && w.slice(1).some(fileOpt)) return false;
+  // and no long option at all (`--random-source`, `--exclude-from`, `--diff-program`), nor sort's temp dir `-T`
+  if (FILE_OPT_CMDS.has(c) && w.slice(1).some(x => x.startsWith('--') || (c === 'sort' && /^-[^-]*T/.test(x)))) return false;
   if (s.pipeIn && !PURE_DATA.has(c)) return false;
   if (receivers.includes(s)) return true; // already passed dataReceiver
   if (INERT.has(c)) return true;
   if (c === 'git') {
     let j = 1;
     while (j < w.length && GRANT_GIT_GLOBAL.has(w[j])) j++;
-    return INERT_GIT.has(w[j]) && !w.slice(j + 1).some(x => GIT_RUN_SHORT.test(x) || longOpt(x, GIT_RUN_LONG));
+    // and only the grant path's per-subcommand flag whitelist (`--show-signature`, `--relative`, ... fall back)
+    return INERT_GIT.has(w[j]) && !w.slice(j + 1).some(x => GIT_RUN_SHORT.test(x) || longOpt(x, GIT_RUN_LONG))
+      && plainLocal(w[j], w.slice(j + 1));
   }
   if (noexecShell(w)) return true;
   return w.length === 2 && FILE_INTERP.has(w[0]) && !/^[-+]/.test(w[1]);
@@ -724,18 +728,62 @@ function writtenFilesInert(segs: Segment[]): boolean {
   return true;
 }
 
+/**
+ * A write target a heredoc cut may sit beside: exactly /dev/null|stdout|stderr, or a plain relative path (or one
+ * under /tmp/) of ordinary characters with no git/hook/husky in it. An ALLOWLIST: denying spellings (`.gi?`, `~`,
+ * `$HOME`, `{a,b}`, `..`, absolute paths) failed open, and git reads config and hooks from paths we cannot see.
+ */
+const SAFE_WRITE = /^(\/tmp\/)?[A-Za-z0-9_][A-Za-z0-9_.+-]*(\/[A-Za-z0-9_][A-Za-z0-9_.+-]*)*$/;
+const safeWriteTarget = (t: string): boolean => STD_DEV.has(t) || (SAFE_WRITE.test(t) && !/git|hook|husky/.test(lc(t)));
+/** Every write target of every segment (redirects, tee, base64 -o, sort -o, uniq OUT, cp/mv destination) is safe. */
+function writeTargetsSafe(segs: Segment[]): boolean {
+  for (const s of segs) {
+    for (const d of s.redirs) {
+      if (!d.op.includes('>')) continue;
+      if (d.op.includes('>&')) return false; // whole-token `>&N` / `>&-` were stripped; `>&WORD` writes a file
+      if (!safeWriteTarget(d.target)) return false;
+    }
+    const w = s.words;
+    const c = w[0] ?? '';
+    if (c === 'tee' && !w.slice(1).every(a => a.startsWith('-') || safeWriteTarget(a))) return false;
+    if (c === 'base64' || c === 'sort') {
+      for (let i = 1; i < w.length; i++) {
+        const o = outOperand(w, i);
+        if (o !== null && !safeWriteTarget(o)) return false; // '' (unreadable) fails too
+      }
+    }
+    if (c === 'uniq') {
+      const ops = w.slice(1).filter(a => !a.startsWith('-') || a === '-');
+      if (ops.length >= 2 && !safeWriteTarget(ops[ops.length - 1])) return false;
+    }
+    if (c === 'cp' || c === 'mv') {
+      // short flags only (no -t DIR / -S SUFFIX / long options); the destination is the last operand (a
+      // trailing `/` names a directory). Sources are only read (cp) or moved away (mv).
+      const args = w.slice(1);
+      if (args.some(a => (a.startsWith('-') && !/^-[A-Za-z]+$/.test(a)) || /^-[A-Za-z]*[tS]/.test(a))) return false;
+      const ops = args.filter(a => !a.startsWith('-'));
+      if (ops.length < 2 || !safeWriteTarget(ops[ops.length - 1].replace(/(.)\/$/, '$1'))) return false;
+    }
+  }
+  return true;
+}
+// `>&N`, `N>&M`, `>&-` and `>/dev/null`, `N>>/dev/null` as whole tokens only (`>&2x` and `>/dev/null.x` write files)
+const TOK_END = String.raw`(?=[\s;&|)]|$)`;
+const DUP_FD = new RegExp(String.raw`(?<=^|[\s;&|()])\d+>&(?:\d+|-)${TOK_END}|>&(?:\d+|-)${TOK_END}`, 'g');
+const TO_NULL = new RegExp(String.raw`(?<=^|[\s;&|()])\d+>>?\s*\/dev\/null${TOK_END}|>>?\s*\/dev\/null${TOK_END}`, 'g');
+
 function heredocVerdict(cmd: string, ctx: RulesCtx): Protected | null | undefined {
   const cut = cutHeredocs(cmd);
   if (!cut) return undefined;
   if (/\$[{[]|[<>]\(/.test(cut.text)) return undefined;
   if (cut.bodies.some(b => !b.quoted && (/\$[([{]|`/.test(b.body) || /\\\n|\\$/.test(b.body)))) return undefined;
-  const text = cut.text.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' ');
+  const text = cut.text.replace(DUP_FD, ' ').replace(TO_NULL, ' ');
   const segs = segmentsOf(text);
   if (segs.some(s => runsCode(s) || s.words.some(w => w === '{' || w === '}'))) return undefined;
   const receivers = segs.flatMap(s => s.redirs.filter(r => HEREDOC_OP.test(r.op)).map(() => s));
   if (receivers.length !== cut.bodies.length || !receivers.every(dataReceiver)) return undefined;
   if (!segs.every(s => closedGrammarSeg(s, receivers))) return undefined;
-  if (!writtenFilesInert(segs)) return undefined;
+  if (!writeTargetsSafe(segs) || !writtenFilesInert(segs)) return undefined;
   for (let k = 0; k < cut.bodies.length; k++) {
     const body = lc(cut.bodies[k].body.replace(/['"\\]/g, ''));
     const gh = /(^|[^\w-])gh(?![\w-])/.test(body) && /(^|[^\w-])api(?![\w-])/.test(body);

@@ -56,6 +56,7 @@ export class Registry {
   #quietMtime = new Map<string, number | null>();
   #lastEventTs = 0;
   #divisions: () => DivisionDef[];
+  // Kept past tick() expiry on purpose: the intake idle gate needs a returning session's prompt history.
   #prompts = new Map<string, { count: number; last: number }>();
 
   constructor(
