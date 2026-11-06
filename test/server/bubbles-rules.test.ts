@@ -379,7 +379,7 @@ const R4_SELF = [
   'rm -rf /', 'chmod -R 000 ~', `mv ${HD} /tmp/x`, 'cp -r /tmp/evil/.kubicle ~/', `echo x > ${KHOME}/bubbles.yaml`,
   'nice -n 5 rm -rf ~/.kubicle', `ls -a ${HD} | xargs rm -rf`, `cp -t ${HD} evil/x`,
   // P5: writes to Kubicle's own port / hook socket
-  'curl -X POST -d "{}" http://localhost:4317/api/grants', 'http POST :4317/api/grants a=b',
+  'curl -X POST -d "{}" http://localhost:7317/api/grants', 'http POST :7317/api/grants a=b',
   'curl --unix-socket /x/run/hook.sock -d "{}" http://x/',
 ];
 const R4_PUSH = [
@@ -403,7 +403,7 @@ const R4_PUSH = [
 ];
 const R4_SAFE = [
   'gh pr edit 12 --add-label bug', 'gh pr ready 12', 'gh pr close 12', 'gh pr reopen 12', 'gh pr comment 3 -b hi',
-  'curl -X POST -d "{}" http://localhost:3000/api/items', 'curl -s http://localhost:4317/api/state',
+  'curl -X POST -d "{}" http://localhost:3000/api/items', 'curl -s http://localhost:7317/api/state',
   './scripts/co.sh main && git push origin feature', 'npm run prep && git push origin feature',
   'git push origin feature 2>&1 | tee push.log', 'git push origin feature > push.log 2>&1', 'git push origin feature < /dev/null',
   'git push origin feature &> push.log', '[ -f package.json ] && git push origin feature', 'export X=1 && git push origin feature',
@@ -442,7 +442,7 @@ test('round 4: huge globs and brace bombs neither crash nor stall the guard', ()
 test('round 4: kubiclePort is configurable', () => {
   const ctx = { cwd: '/work/app', branches: br('feature'), home: KHOME, strictScripts: false, kubiclePort: 5000 };
   assert.equal(protectedAction('Bash', { command: 'curl -d x http://localhost:5000/api/grants' }, ctx)?.kind, 'self');
-  assert.equal(protectedAction('Bash', { command: 'curl -d x http://localhost:4317/api/grants' }, ctx), null);
+  assert.equal(protectedAction('Bash', { command: 'curl -d x http://localhost:7317/api/grants' }, ctx), null);
 });
 
 // ---- round 5: linear brace scan, `${` is not a glob, case arms, curl -K without URL, never throws ----
@@ -489,12 +489,12 @@ test('round 5: protectedAction never throws', () => {
 });
 
 // ---- Task 7 review: push/merge evaluated independently of self (the guard), and grantability ----
-const pmCtx = { cwd: '/w/repo', branches: br('feature'), home, strictScripts: false, kubiclePort: 4317 };
+const pmCtx = { cwd: '/w/repo', branches: br('feature'), home, strictScripts: false, kubiclePort: 7317 };
 const pm = (command: string) => pushMergeAction('Bash', { command }, pmCtx);
 
 test('pushMergeAction: a push hidden behind a self verdict is still a push', () => {
   for (const c of ['git push origin main # kubicle log', 'echo kubicle bubbles; git push origin HEAD:main',
-    'git push origin main && curl -X POST http://127.0.0.1:4317/x']) {
+    'git push origin main && curl -X POST http://127.0.0.1:7317/x']) {
     assert.equal(protectedAction('Bash', { command: c }, pmCtx)?.kind, 'self', `${c}: self wins in protectedAction`);
     assert.equal(pm(c)?.hit.kind, 'push', c);
   }
@@ -512,7 +512,7 @@ test('pushMergeAction: only a plain push in the session repo is grantable', () =
   for (const c of ['cd /tmp/other && git push origin main', 'pushd /tmp/other; git push origin main', '(cd ../x && git push origin main)',
     'git -C /tmp/other push origin main', 'git --git-dir=/x/.git push origin main', 'GIT_DIR=/x/.git git push origin main',
     'export GIT_WORK_TREE=/x; git push origin main', 'gh pr merge 3 -R other/repo', 'gh pr merge 3 --repo=other/repo',
-    'sh -c "git push origin main"', 'env git push origin main', 'git push origin main && curl -X POST http://127.0.0.1:4317/x']) {
+    'sh -c "git push origin main"', 'env git push origin main', 'git push origin main && curl -X POST http://127.0.0.1:7317/x']) {
     assert.equal(pm(c)?.grantable, false, c);
   }
   assert.equal(pushMergeAction('mcp__github__merge_pull_request', {}, pmCtx)?.grantable, false);

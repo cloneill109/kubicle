@@ -1,6 +1,6 @@
 #!/bin/bash
 # Real-session smoke test: runs one `claude -p` session (with a subagent) against a throwaway
-# server, repo, home and settings file, then checks Bubbles triage (real `claude`; a handful of `claude -p` runs in all: the session, up to 2 for the triage, a second session and its intake call). Never touches ~/.claude, ~/.kubicle or port 4317; hooks
+# server, repo, home and settings file, then checks Bubbles triage (real `claude`; a handful of `claude -p` runs in all: the session, up to 2 for the triage, a second session and its intake call). Never touches ~/.claude, ~/.kubicle or port 7317; hooks
 # reach the throwaway server over its Unix socket in the temp home (the port is only for the UI).
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

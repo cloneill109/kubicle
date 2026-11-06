@@ -15,13 +15,16 @@ export interface Config {
   bannerMs: number;
 }
 
+/** The office's TCP port unless KUBICLE_PORT says otherwise. */
+export const DEFAULT_PORT = 7317;
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
   const port = Number(env.KUBICLE_PORT);
   const home = env.KUBICLE_HOME || join(homedir(), '.kubicle');
   return {
     home,
     hookSocket: join(home, 'run', 'hook.sock'),
-    port: Number.isInteger(port) && port > 0 && port < 65536 ? port : 4317,
+    port: Number.isInteger(port) && port > 0 && port < 65536 ? port : DEFAULT_PORT,
     payloadCap: 4096,
     approvalWaitMs: 120_000,
     quietMs: 300_000,

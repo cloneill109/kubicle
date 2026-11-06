@@ -113,7 +113,7 @@ test('db file mode is 0600; ensureHome dir is 0700', () => {
 
 test('loadConfig defaults and env overrides', () => {
   const c = loadConfig({});
-  assert.equal(c.port, 4317);
+  assert.equal(c.port, 7317);
   assert.equal(c.payloadCap, 4096);
   assert.equal(c.approvalWaitMs, 120000);
   assert.equal(c.quietMs, 300000);

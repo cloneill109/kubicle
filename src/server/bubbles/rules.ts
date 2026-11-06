@@ -13,6 +13,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
+import { DEFAULT_PORT } from '../config.ts';
 
 export interface Grant {
   id: string;
@@ -35,7 +36,7 @@ export interface BranchInfo { protected: Set<string>; current: string | null }
 
 export interface RulesCtx {
   cwd?: string; branches: BranchInfo; home: string; strictScripts: boolean;
-  /** Kubicle's TCP port (default 4317): local write requests to it count as self-administration. */
+  /** Kubicle's TCP port (default DEFAULT_PORT): local write requests to it count as self-administration. */
   kubiclePort?: number;
 }
 
@@ -1072,7 +1073,7 @@ function xargsWrites(w: string[]): boolean {
   return c !== undefined && !(SELF_SAFE.has(lc(basename(c))) && c !== 'cd');
 }
 
-/** Port of a URL-ish word (`localhost:4317/x`, `http://[::1]:4317`, httpie `:4317/x`). */
+/** Port of a URL-ish word (`localhost:7317/x`, `http://[::1]:7317`, httpie `:7317/x`). */
 function urlPort(w: string): number | null {
   const m = /^(?:[a-z][\w+.-]*:\/\/)?(?:[^@\/\s]*@)?(\[[^\]]*\]|[^:\/\s]*):(\d{1,5})(?:[\/?#]|$)/i.exec(w);
   return m ? Number(m[2]) : null;
@@ -1088,7 +1089,7 @@ function selfBash(cmd: string, nm: string, segs: Segment[], ctx: RulesCtx): Prot
   if (/(?<![\w.])kubicle(\.ts|\.js|\.mjs|\.cjs)?(?![\w.-])/.test(nm) && /\b(grant|instruct|revoke|bubbles|log)\b/.test(nm)) {
     return { kind: 'self', reason: 'kubicle self-administration command' };
   }
-  const port = ctx.kubiclePort ?? 4317;
+  const port = ctx.kubiclePort ?? DEFAULT_PORT;
   if (segs.some(s => isHttpSeg(s) && httpSegWrites(s) && (s.words.some(w => urlPort(w) === port) || /hook\.sock/i.test(s.raw)))) {
     return { kind: 'self', reason: 'write request to the Kubicle server' };
   }

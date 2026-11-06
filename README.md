@@ -16,7 +16,7 @@ Start with `npm start` (or `./bin/kubicle start`). Both steps have `kubicle` equ
 
 **Upgrading to Bubbles:** office approvals are now on by default, and the upgrade switches them on for every existing project. From then on every permission prompt in every session goes to Bubbles first, which runs `claude -p` on your subscription. If you do not want that for a project or a session, opt it out from the inspector, or turn Bubbles off (see [Bubbles](#bubbles)).
 
-The server listens on `127.0.0.1:4317` (override with `KUBICLE_PORT`). It prints `Kubicle: <login link>` and opens it. The link works once; restart the server for a new one. Set `KUBICLE_NO_OPEN=1` to skip opening the browser.
+The server listens on `127.0.0.1:7317` (override with `KUBICLE_PORT`). It prints `Kubicle: <login link>` and opens it. The link works once; restart the server for a new one. Set `KUBICLE_NO_OPEN=1` to skip opening the browser.
 
 Existing sessions pick up new hooks only after they restart.
 
