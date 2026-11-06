@@ -1,6 +1,7 @@
 // Browser-safe: no Node-only imports (the Bubbles types below are type-only and erased).
 import type { Building } from './building.ts';
 import type { BubblesStatus, EscalateWhy } from '../server/bubbles/triage.ts';
+import type { PlacedBy } from './building.ts';
 import type { Grant, Instruction, PendingChange } from '../server/bubbles/policy.ts';
 import type { LogEntry } from '../server/bubbles/log.ts';
 
@@ -67,6 +68,18 @@ export interface AgentView {
   /** Bubbles is triaging this agent's permission request right now. */
   bubblesThinking?: boolean;
   log: string[]; // newest first, max 20
+}
+
+/** GET /cli/session/:id over the hook socket: what the session's own terminal (the Kubicle mod) shows. */
+export interface SessionCard {
+  room: { id: string; name: string; by: PlacedBy };
+  /** A permission request of this session waiting on the owner in the office. */
+  waiting: { tool: string; activity: string; reason?: string } | null;
+  /** Bubbles' questions for the owner from the session's first prompt. */
+  questions: string[];
+  /** How many subagents Bubbles suggested. */
+  suggestions: number;
+  bubbles: BubblesStatus['state'];
 }
 
 export interface FeedItem {

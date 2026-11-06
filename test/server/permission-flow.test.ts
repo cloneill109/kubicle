@@ -213,6 +213,20 @@ test('PermissionRequest: protected push, no UI: no model call, terminal within 1
   assert.equal(es[2]!.ref, es[1]!.seq);
 });
 
+test('GET /cli/session/:id shows a request waiting on the owner, with Bubbles\' reason, until it is answered', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  const pending = perm(s, 'p-card', 'git push origin main');
+  const m = await c.waitFor(agentMsg((a) => a.id === 'p-card' && a.pending?.answerable === true)) as Extract<ServerMsg, { t: 'agent' }>;
+  const card = JSON.parse((await cli(s, 'GET', '/cli/session/p-card')).body) as { waiting: { tool: string; reason?: string } | null };
+  assert.equal(card.waiting?.tool, 'Bash');
+  assert.match(card.waiting?.reason ?? '', /push/);
+  assert.equal((await control(s, cookie, `/api/approvals/${m.agent.pending!.id}`, { decision: 'deny' })).status, 204);
+  await pending;
+  assert.equal((JSON.parse((await cli(s, 'GET', '/cli/session/p-card')).body) as { waiting: unknown }).waiting, null);
+});
+
 test('PermissionRequest: protected push with a UI: the card carries why=protected; the owner answer is logged', async () => {
   const s = await start();
   const cookie = await login(s);

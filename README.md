@@ -130,12 +130,17 @@ When you send a session its first prompt, Bubbles reads it and does two things: 
 - **Hooks.** The UserPromptSubmit hook line is `kubicle-hook 10 prompt` (timeout 12 s). An older install's line cannot deliver a briefing; the office shows a banner until you re-run `npm run install-hooks`.
 - **Auto mode.** In Claude Code auto mode the session's own classifier decides permissions, so no permission request reaches Bubbles. That is your choice of mode. Intake and the main-branch guard still apply.
 
+### In the session's own terminal (the Kubicle mod)
+
+`mods/kubicle` is an optional, read-only Claude Code mod. It puts the session's room on the status line, shows a band above the prompt while one of its requests waits on you in the office (and Bubbles' intake questions), and adds a `/kubicle` command. It never answers or moves anything; approvals stay in the office. See [mods/kubicle/README.md](mods/kubicle/README.md) to turn it on.
+
 ## Tests
 
 ```
 npm test            # unit and server tests
 npm run test:e2e    # browser tests (Playwright)
 npm run typecheck
+npm run test:mod    # the Kubicle mod's tests (claude plugin test)
 npm run smoke       # real `claude -p` session against a throwaway server/repo/settings; prints SMOKE OK
 ```
 

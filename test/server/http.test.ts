@@ -1039,6 +1039,24 @@ test('intake: the feed item names the first question; a subagent prompt (agent_i
   assert.ok(feed.t === 'feed' && / in Front end; asks: Which "nav" \\ layout\?$/.test(feed.item.detail), JSON.stringify(feed));
 });
 
+test('GET /cli/session/:id: room, who placed it and Bubbles\' questions, for the session\'s own terminal', async () => {
+  const { s, prompt } = await startIntake();
+  const card = (sid: string, headers: Record<string, string> = { 'x-kubicle-token': s.ingestToken }) => sockFetch(s, `/cli/session/${sid}`, { headers });
+  assert.equal((await card('nobody')).status, 404);
+  assert.equal((await card('nobody', {})).status, 401);
+  assert.equal((await fetch(`${s.url}/cli/session/nobody`, { headers: { 'x-kubicle-token': s.ingestToken } })).status, 404, 'never over TCP');
+  briefing(await (await prompt('cardA', 'fake-mode:intake-asks build the nav')).text());
+  const r = await card('cardA');
+  assert.equal(r.status, 200);
+  assert.deepEqual(await r.json(), {
+    room: { id: 'frontend', name: 'Front end', by: 'bubbles' },
+    waiting: null, questions: ['Which "nav" \\ layout?', 'Second?'], suggestions: 1, bubbles: 'on',
+  });
+  const cookie = await login(s);
+  assert.equal((await control(s, cookie, '/api/agents/cardA/room', { room: 'qa' })).status, 204);
+  assert.deepEqual((await (await card('cardA')).json() as { room: unknown }).room, { id: 'qa', name: 'QA', by: 'owner' });
+});
+
 test('intake: Bubbles off gives an empty body (and no model call)', async () => {
   const { s, starts, prompt } = await startIntake();
   const cookie = await login(s);

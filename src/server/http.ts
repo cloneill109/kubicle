@@ -2,10 +2,10 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, join, resolve, sep } from 'node:path';
 import { normalizeHook, type AgentEvent } from '../shared/events.ts';
-import { ID_RE, type RoomDef } from '../shared/building.ts';
+import { BULLPEN, ID_RE, placeRoom, type RoomDef } from '../shared/building.ts';
 import type { BuildingService } from './building/service.ts';
 import { BuildingFileError, RevisionConflict } from './building/files.ts';
-import type { AgentView, BubblesState, FeedItem, ServerMsg } from '../shared/protocol.ts';
+import type { AgentView, BubblesState, FeedItem, ServerMsg, SessionCard } from '../shared/protocol.ts';
 import type { BubblesLog, LogKind, LogQuery } from './bubbles/log.ts';
 import { INTAKE_IDLE_MS, intakeResponse, type IntakeOutcome, type IntakeRequest } from './bubbles/intake.ts';
 import { PolicyError, type PendingChange, type Policy } from './bubbles/policy.ts';
@@ -462,8 +462,31 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     if (m === 'GET' && p === '/cli/log') return sendJson(res, 200, d.bubbles.log.query(logQuery(url)));
     if (m === 'GET' && p === '/cli/log/verify') return sendJson(res, 200, d.bubbles.log.verify());
     if (m === 'GET' && p === '/cli/bubbles') return sendJson(res, 200, d.bubbles.state());
+    const sm = m === 'GET' ? /^\/cli\/session\/([^/]+)$/.exec(p) : null;
+    if (sm) {
+      const card = sessionCard(param(sm[1]));
+      return card ? sendJson(res, 200, card) : send(res, 404, 'no such session');
+    }
     req.resume();
     send(res, 404, 'not found');
+  }
+
+  function sessionCard(sessionId: string): SessionCard | null {
+    const v = d.registry.get(sessionId);
+    if (!v || v.kind !== 'session') return null;
+    const floor = v.projectId ? d.building.snapshot().floors[v.projectId] : undefined;
+    const placed = floor
+      ? placeRoom(floor, { label: v.roomLabel, room: v.room, division: v.division, assigned: v.bubblesRoom })
+      : { id: BULLPEN, by: 'default' as const };
+    const name = floor?.rooms.find((r) => r.id === placed.id)?.name ?? 'Bullpen';
+    const w = v.pending;
+    return {
+      room: { ...placed, name },
+      waiting: w ? { tool: w.toolName, activity: w.activity, ...(w.bubbles ? { reason: w.bubbles.reason } : {}) } : null,
+      questions: v.bubblesNote?.questions ?? [],
+      suggestions: v.bubblesNote?.subagents.length ?? 0,
+      bubbles: d.bubbles.state().status.state,
+    };
   }
 
   async function answer(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {

@@ -64,14 +64,22 @@ export function validateFloor(f: FloorDef, _divisionIds: Set<string>): string[] 
   return errs;
 }
 
-export function resolveRoom(floor: FloorDef, hint: { label?: string; room?: string; division?: string; assigned?: string }): string {
+export type RoomHint = { label?: string; room?: string; division?: string; assigned?: string };
+/** Who put the agent in its room: the owner's label, a launch hint, Bubbles, or nobody (Bullpen). */
+export type PlacedBy = 'owner' | 'launch' | 'bubbles' | 'default';
+
+export function placeRoom(floor: FloorDef, hint: RoomHint): { id: string; by: PlacedBy } {
   const has = (id: string | undefined): id is string => !!id && floor.rooms.some((r) => r.id === id);
-  if (has(hint.label)) return hint.label;
-  if (has(hint.room)) return hint.room;
+  if (has(hint.label)) return { id: hint.label, by: 'owner' };
+  if (has(hint.room)) return { id: hint.room, by: 'launch' };
   if (hint.division) {
     const r = floor.rooms.find((x) => x.division === hint.division);
-    if (r) return r.id;
+    if (r) return { id: r.id, by: 'launch' };
   }
-  if (has(hint.assigned)) return hint.assigned;
-  return BULLPEN;
+  if (has(hint.assigned)) return { id: hint.assigned, by: 'bubbles' };
+  return { id: BULLPEN, by: 'default' };
+}
+
+export function resolveRoom(floor: FloorDef, hint: RoomHint): string {
+  return placeRoom(floor, hint).id;
 }

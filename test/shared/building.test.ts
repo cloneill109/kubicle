@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ID_RE, BULLPEN, DEFAULT_DIVISIONS, defaultFloor, validateFloor, resolveRoom,
+  ID_RE, BULLPEN, DEFAULT_DIVISIONS, defaultFloor, validateFloor, resolveRoom, placeRoom,
   type FloorDef, type RoomDef,
 } from '../../src/shared/building.ts';
 
@@ -59,6 +59,18 @@ test('validateFloor errors', () => {
 
 test('unknown division is not an error', () => {
   assert.deepEqual(validateFloor(floor([bp(), room('a', { division: 'nope' })]), ids), []);
+});
+
+test('placeRoom says who placed the agent', () => {
+  const f: FloorDef = { revision: 1, source: 'default', rooms: [
+    { id: 'fe1', name: 'FE', division: 'frontend', band: 'top', width: 12 },
+    { id: 'qa', name: 'QA', division: 'qa', band: 'top', width: 12 },
+    { id: BULLPEN, name: 'Bullpen', band: 'bottom', width: 14 },
+  ] };
+  assert.deepEqual(placeRoom(f, { label: 'qa', assigned: 'fe1' }), { id: 'qa', by: 'owner' });
+  assert.deepEqual(placeRoom(f, { division: 'frontend', assigned: 'qa' }), { id: 'fe1', by: 'launch' });
+  assert.deepEqual(placeRoom(f, { assigned: 'qa' }), { id: 'qa', by: 'bubbles' });
+  assert.deepEqual(placeRoom(f, { assigned: 'gone' }), { id: BULLPEN, by: 'default' });
 });
 
 test('resolveRoom', () => {
