@@ -12,6 +12,8 @@ function readStdin(): string {
 /** `kubicle secret set|list|remove`. Values come from stdin only: they never appear in argv, output or errors. */
 export function secretCommand(argv: string[], home: string): number {
   const sub = argv[0];
+  // Refuse extra or flag-shaped arguments without echoing them: they may be a value.
+  if (sub === 'set' && (argv.length > 2 || argv.slice(1).some((a) => a.startsWith('-')))) throw new UsageError('Secret values are read from stdin, never from arguments.');
   const p = parseArgs(argv.slice(1), []);
   if (sub === 'set') {
     if (p.positionals.length > 1) throw new UsageError('Secret values are read from stdin, never from arguments.');
@@ -24,7 +26,7 @@ export function secretCommand(argv: string[], home: string): number {
     value = value.endsWith('\r\n') ? value.slice(0, -2) : value.endsWith('\n') ? value.slice(0, -1) : value;
     if (value === '') throw new CliError('The secret value is empty.');
     if (store.kind === 'file') console.error(`Warning: no OS keyring; stored in ${secretsFile(home)} (readable by any process running as you)`);
-    try { store.set(name, value); } catch (e) { throw new CliError(`Could not save the secret: ${e instanceof Error ? e.message.split(value).join('***') : 'error'}`); }
+    try { store.set(name, value); } catch { throw new CliError(`Could not save the secret in the ${store.kind} store.`); }
     console.log(`Saved secret "${name}" (${store.kind}).`);
     return 0;
   }

@@ -26,14 +26,19 @@ export interface SecretStore {
 
 const isMap = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 
+/** Parsed file, or undefined when missing/empty. A file that does not parse throws (naming the file, never its content) so a later write cannot wipe it. */
 function readYaml(file: string): unknown {
   if (!existsSync(file)) return undefined;
-  try { return parse(readFileSync(file, 'utf8')); } catch { return undefined; }
+  try { return parse(readFileSync(file, 'utf8')) ?? undefined; }
+  catch { throw new Error(`${file} is not valid YAML; fix or delete it (no secrets were changed)`); }
 }
+const invalid = (file: string): Error => new Error(`${file} is not valid YAML; fix or delete it (no secrets were changed)`);
 
 /** Names of every set secret (never values), sorted. Kept in both modes so `list` works without keyring enumeration. */
 export function listSecretNames(home: string): string[] {
-  const v = readYaml(join(home, 'secret-names.yaml'));
+  const file = join(home, 'secret-names.yaml');
+  const v = readYaml(file);
+  if (v !== undefined && !Array.isArray(v)) throw invalid(file);
   return Array.isArray(v) ? [...new Set(v.filter((x): x is string => typeof x === 'string'))].sort() : [];
 }
 
@@ -53,12 +58,14 @@ function fileStore(home: string): SecretStore {
   const read = (): Record<string, string> => {
     const v = readYaml(file);
     const out: Record<string, string> = {};
+    if (v !== undefined && !isMap(v)) throw invalid(file);
     if (isMap(v)) for (const [k, x] of Object.entries(v)) if (typeof x === 'string') out[k] = x;
     return out;
   };
-  const write = (m: Record<string, string>) => {
+  const write = (m: Record<string, string>, name: string, added: boolean) => {
+    const names = listSecretNames(home).filter((n) => n !== name);
     writeAtomic(file, stringify(m), FILE_MODE, DIR_MODE);
-    writeNames(home, Object.keys(m));
+    writeNames(home, added ? [...names, name] : names);
   };
   return {
     kind: 'file',
@@ -66,13 +73,13 @@ function fileStore(home: string): SecretStore {
     has: (name) => ID_RE.test(name) && Object.hasOwn(read(), name),
     set(name, value) {
       if (!ID_RE.test(name)) throw new Error(`invalid secret name "${name}"`);
-      write({ ...read(), [name]: value });
+      write({ ...read(), [name]: value }, name, true);
     },
     remove(name) {
       const m = read();
       if (!ID_RE.test(name) || !Object.hasOwn(m, name)) return false;
       delete m[name];
-      write(m);
+      write(m, name, false);
       return true;
     },
   };
@@ -83,7 +90,7 @@ function keyringStore(home: string, Entry: KeyringLike): SecretStore {
     kind: 'keyring',
     get(name) {
       if (!ID_RE.test(name)) return null;
-      try { return new Entry(SERVICE, name).getPassword() ?? null; } catch { return null; }
+      try { return new Entry(SERVICE, name).getPassword() ?? null; } catch { throw new Error('The OS keyring could not be read.'); }
     },
     has: (name) => ID_RE.test(name) && listSecretNames(home).includes(name),
     set(name, value) {
@@ -104,7 +111,7 @@ function keyringStore(home: string, Entry: KeyringLike): SecretStore {
 }
 
 /**
- * Open the secret store: the OS keyring when it loads and an entry can be constructed, otherwise the
+ * Open the secret store: the OS keyring when it loads and a probe read works (a missing entry is healthy, any throw means unusable), otherwise the
  * 0600 file `<home>/secrets.yaml`. `opts.keyring` injects a keyring (tests); `null` forces the file store.
  * Env `KUBICLE_SECRETS_STORE=file` is a test/headless switch that does the same without code changes.
  * Synchronous on purpose: the keyring is loaded with createRequire, not import().
@@ -113,7 +120,7 @@ export function openSecrets(home: string, opts?: { keyring?: KeyringLike | null 
   const forceFile = opts !== undefined && 'keyring' in opts ? opts.keyring === null : process.env.KUBICLE_SECRETS_STORE === 'file';
   const Entry = forceFile ? null : opts?.keyring ?? loadKeyring();
   if (Entry) {
-    try { new Entry(SERVICE, 'kubicle-probe'); return keyringStore(home, Entry); } catch { /* fall back to the file */ }
+    try { new Entry(SERVICE, 'kubicle-probe').getPassword(); return keyringStore(home, Entry); } catch { /* fall back to the file */ }
   }
   return fileStore(home);
 }

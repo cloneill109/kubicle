@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, statSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -72,4 +72,53 @@ test('invalid names are rejected', () => {
   assert.throws(() => s.set('Bad Name', 'x'));
   assert.equal(s.has('../x'), false);
   assert.equal(s.get('../x'), null);
+});
+
+test('a keyring that constructs but fails on use falls back to the file store', () => {
+  for (const failing of ['getPassword'] as const) {
+    const home = tmp();
+    class Flaky {
+      constructor() { /* ok */ }
+      setPassword() { throw new Error('no secret service'); }
+      getPassword() { if (failing === 'getPassword') throw new Error('no secret service'); return null; }
+      deletePassword() { return false; }
+    }
+    const s = openSecrets(home, { keyring: Flaky as unknown as KeyringLike });
+    assert.equal(s.kind, 'file');
+    s.set('tok', 'v');
+    assert.equal(s.get('tok'), 'v');
+  }
+});
+
+test('keyring get distinguishes missing (null) from a failing store (throws, no value)', () => {
+  class Ok { getPassword() { return null; } setPassword() {} deletePassword() { return false; } }
+  assert.equal(openSecrets(tmp(), { keyring: Ok as unknown as KeyringLike }).get('x'), null);
+  let broken = false;
+  class Later { getPassword() { if (broken) throw new Error('boom v-secret'); return null; } setPassword() {} deletePassword() { return false; } }
+  const s = openSecrets(tmp(), { keyring: Later as unknown as KeyringLike });
+  broken = true;
+  assert.throws(() => s.get('x'), (e: Error) => e.message === 'The OS keyring could not be read.');
+});
+
+test('a corrupt secrets.yaml or secret-names.yaml is never overwritten', () => {
+  for (const [name, bad] of [['secrets.yaml', 'one: [unclosed\ntwo: x'], ['secrets.yaml', '- a\n- b\n'], ['secret-names.yaml', 'a: [x']] as const) {
+    const home = tmp();
+    const s0 = openSecrets(home, { keyring: null });
+    s0.set('one', 'v1');
+    const file = join(home, name);
+    writeFileSync(file, bad);
+    const s = openSecrets(home, { keyring: null });
+    assert.throws(() => s.set('two', 'v2'), (e: Error) => e.message.includes(file) && e.message.includes('not valid YAML') && !e.message.includes('unclosed'));
+    assert.throws(() => s.remove('one'));
+    assert.equal(readFileSync(file, 'utf8'), bad);
+  }
+});
+
+test('file store keeps names that live in the keyring', () => {
+  const home = tmp();
+  openSecrets(home, { keyring: fakeKeyring().Entry }).set('kr', 'v');
+  openSecrets(home, { keyring: null }).set('fl', 'v');
+  assert.deepEqual(listSecretNames(home), ['fl', 'kr']);
+  openSecrets(home, { keyring: null }).remove('fl');
+  assert.deepEqual(listSecretNames(home), ['kr']);
 });

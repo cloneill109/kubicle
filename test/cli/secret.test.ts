@@ -57,3 +57,13 @@ test('bad name and empty value', () => {
   assert.equal(e.status, 1);
   assert.equal(e.stderr, 'The secret value is empty.\n');
 });
+
+test('flag-shaped or extra arguments are refused without echo', () => {
+  const { run } = setup();
+  for (const a of [['secret', 'set', 'tok', '--value=hunter2'], ['secret', 'set', 'tok', '-x', 'hunter2'], ['secret', 'set', '--hunter2']]) {
+    const r = run(a, 'x');
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /Secret values are read from stdin, never from arguments\./);
+    assert.equal(r.stderr.includes('hunter2'), false);
+  }
+});
