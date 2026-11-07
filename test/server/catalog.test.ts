@@ -37,6 +37,23 @@ test('mcpProblems', () => {
   assert.match(mcpProblems('gh', 'x').join(), /mapping/);
 });
 
+test('mcpProblems: tokens in args/url/anywhere in a value, secret: only in env/headers, list limits', () => {
+  const tok = 'put tokens in a secret, not in mcp.yaml';
+  assert.match(mcpProblems('gh', { command: 'x', args: ['--token', 'ghp_x'] }).join(), /\(args\)/);
+  assert.match(mcpProblems('gh', { type: 'http', url: 'https://x/mcp?key=sk-abc' }).join(), /\(url\)/);
+  assert.match(mcpProblems('gh', { type: 'http', url: 'https://u:ghp_x@host/' }).join(), /\(url\)/);
+  assert.deepEqual(mcpProblems('gh', { command: 'x', env: { T: 'token ghp_x' } }), [`${tok} (env.T)`]);
+  assert.deepEqual(mcpProblems('gh', { command: 'x', args: ['secret:gh'] }), ['secret: references only work in env and headers (args)']);
+  assert.deepEqual(mcpProblems('gh', { type: 'http', url: 'https://x/?k=secret:gh' }), ['secret: references only work in env and headers (url)']);
+  assert.ok(!mcpProblems('gh', { command: 'x', args: ['--token', 'ghp_zzz'] }).join().includes('zzz'));
+  assert.match(mcpProblems('gh', { command: 'x', args: Array(51).fill('a') }).join(), /args must have at most 50 entries/);
+  assert.deepEqual(mcpProblems('gh', { command: 'x', args: Array(50).fill('a') }), []);
+  const f = join(tmp(), 'm.yaml');
+  const servers = Object.fromEntries(Array.from({ length: 51 }, (_, i) => [`s${i}`, { command: 'x' }]));
+  writeFileSync(f, `revision: 1\nservers:\n${Object.keys(servers).map((k) => `  ${k}: { command: x }`).join('\n')}\n`);
+  assert.throws(() => readCatalog(f), /servers must have at most 50 entries/);
+});
+
 test('catalog round trip, revision check, bad file', () => {
   const file = join(tmp(), 'mcp.yaml');
   assert.deepEqual(readCatalog(file), { revision: 0, servers: {} });

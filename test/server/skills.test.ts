@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, lstatSync, symlinkSync, existsSync } from 'node:fs';
+import { chmodSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, lstatSync, symlinkSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { listLibrary, listImportable, importSkill } from '../../src/server/harness/skills.ts';
+import { SkillImportError, listLibrary, listImportable, importSkill } from '../../src/server/harness/skills.ts';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'kub-sk-'));
 function skill(dir: string, name: string, fm = `---\nname: ${name}\ndescription: "does ${name}"\n---\nbody\n`) {
@@ -57,6 +57,59 @@ test('import copies, source deletion keeps library skill', () => {
   assert.equal(existsSync(join(info.path, 'big.bin')), false);
   rmSync(join(claude, 'skills'), { recursive: true });
   assert.deepEqual(listLibrary(home).map((s) => [s.name, s.description, s.source]), [['a', 'does a', 'library']]);
+});
+
+test('import skips internal links that point outside the folder, up-> .. and loops', () => {
+  const claude = tmp(), home = tmp(), outside = tmp();
+  writeFileSync(join(outside, 'id_rsa'), 'SECRET');
+  mkdirSync(join(outside, 'dir'));
+  writeFileSync(join(outside, 'dir', 'f.txt'), 'x');
+  const sk = join(claude, 'skills', 'a');
+  skill(sk, 'a');
+  mkdirSync(join(sk, 'sub'));
+  writeFileSync(join(sk, 'sub', 'in.txt'), 'in');
+  symlinkSync(join(outside, 'id_rsa'), join(sk, 'ref.txt'));
+  symlinkSync(join(outside, 'dir'), join(sk, 'docs'));
+  symlinkSync('..', join(sk, 'up'));
+  symlinkSync('.', join(sk, 'self'));
+  symlinkSync('sub/in.txt', join(sk, 'alias.txt')); // inside the folder: allowed
+  const info = importSkill(home, sk, claude);
+  assert.deepEqual(readdirSync(info.path).sort(), ['SKILL.md', 'alias.txt', 'sub']);
+  assert.equal(readFileSync(join(info.path, 'alias.txt'), 'utf8'), 'in');
+  assert.equal(readdirSync(join(home, 'skills')).length, 1);
+});
+
+test('import caps: too many files or bytes aborts with no partial library dir', () => {
+  const claude = tmp(), home = tmp();
+  const sk = join(claude, 'skills', 'a');
+  skill(sk, 'a');
+  for (let i = 0; i < 500; i++) writeFileSync(join(sk, `f${i}.txt`), 'x');
+  assert.throws(() => importSkill(home, sk, claude), /skill "a" is too large to import \(limit 10 MB \/ 500 files\)/);
+  assert.deepEqual(readdirSync(join(home, 'skills')), []);
+  for (let i = 0; i < 500; i++) rmSync(join(sk, `f${i}.txt`));
+  for (let i = 0; i < 11; i++) writeFileSync(join(sk, `b${i}.bin`), Buffer.alloc(1024 * 1024));
+  assert.throws(() => importSkill(home, sk, claude), /too large to import/);
+  assert.deepEqual(readdirSync(join(home, 'skills')), []);
+});
+
+test('import copy failure is a clean SkillImportError without paths, temp dir removed', () => {
+  const claude = tmp(), home = tmp();
+  const sk = join(claude, 'skills', 'a');
+  skill(sk, 'a');
+  mkdirSync(join(sk, 'locked'));
+  writeFileSync(join(sk, 'locked', 'f'), 'x');
+  chmodSync(join(sk, 'locked'), 0o000);
+  try {
+    assert.throws(() => importSkill(home, sk, claude), (e: unknown) => e instanceof SkillImportError && e.message === 'could not copy skill "a": EACCES');
+    assert.deepEqual(readdirSync(join(home, 'skills')), []);
+  } finally { chmodSync(join(sk, 'locked'), 0o700); }
+});
+
+test('importable name is the folder name; invalid folder names are skipped', () => {
+  const claude = tmp();
+  skill(join(claude, 'skills', 'folder'), 'Other Name');
+  skill(join(claude, 'skills', 'Bad_Name'), 'x');
+  assert.deepEqual(listImportable(claude).map((s) => s.name), ['folder']);
 });
 
 test('import dereferences a symlinked skill folder into real files', () => {

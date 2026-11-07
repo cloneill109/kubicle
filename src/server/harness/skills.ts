@@ -1,5 +1,5 @@
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
+import { basename, join, sep } from 'node:path';
 import { ID_RE } from '../../shared/building.ts';
 import type { SkillInfo } from '../../shared/catalog.ts';
 
@@ -12,6 +12,8 @@ export class SkillImportError extends Error {
 
 const MAX_FILE = 1024 * 1024;
 const MAX_DEPTH = 6;
+const MAX_TOTAL = 10 * 1024 * 1024;
+const MAX_FILES = 500;
 
 /** name and description from the leading --- block; simple `key: value` lines only. */
 function frontMatter(skillMd: string): { name?: string; description: string } {
@@ -40,8 +42,9 @@ function skillsIn(dir: string, source: SkillInfo['source'], byFolder: boolean): 
     const path = join(dir, n);
     const md = join(path, 'SKILL.md');
     if (!isDir(path) || !existsSync(md)) continue;
+    if (!byFolder && !ID_RE.test(n)) continue; // the library could not hold it
     const fm = frontMatter(md);
-    out.push({ name: byFolder ? n : fm.name || n, description: fm.description, path, source });
+    out.push({ name: n, description: fm.description, path, source });
   }
   return out;
 }
@@ -79,17 +82,41 @@ export function importSkill(home: string, source: string, claudeDir: string): Sk
   const tmp = join(libraryDir(home), `.import-${name}-${process.pid}`);
   rmSync(tmp, { recursive: true, force: true });
   try {
-    cpSync(src.path, tmp, {
-      recursive: true, dereference: true,
-      filter: (s) => {
-        if (s === src.path) return true;
-        if (basename(s).startsWith('.')) return false;
-        try { const st = statSync(s); return st.isDirectory() || st.size <= MAX_FILE; } catch { return false; }
-      },
-    });
+    copyContained(src.path, tmp, name);
     renameSync(tmp, dst);
+  } catch (e) {
+    if (e instanceof SkillImportError) throw e;
+    const code = (e as NodeJS.ErrnoException).code ?? 'error';
+    throw new SkillImportError(`could not copy skill "${name}": ${code}`);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
   return { name, description: src.description, path: dst, source: 'library' };
+}
+
+/** Copies real files only, and only entries whose real path stays inside the skill folder. */
+function copyContained(srcDir: string, dest: string, name: string): void {
+  const root = realpathSync(srcDir);
+  const inside = (p: string): boolean => p === root || p.startsWith(root + sep);
+  const seen = new Set<string>();
+  let bytes = 0, files = 0;
+  const tooBig = () => new SkillImportError(`skill "${name}" is too large to import (limit 10 MB / 500 files)`);
+  const walk = (real: string, out: string): void => {
+    if (seen.has(real)) return;
+    seen.add(real);
+    mkdirSync(out, { recursive: true, mode: 0o700 });
+    for (const n of readdirSync(real)) {
+      if (n.startsWith('.')) continue;
+      let rp: string;
+      try { rp = realpathSync(join(real, n)); } catch { continue; } // dangling or looping link
+      if (!inside(rp)) continue;
+      const st = statSync(rp);
+      if (st.isDirectory()) walk(rp, join(out, n));
+      else if (st.isFile() && st.size <= MAX_FILE) {
+        if (++files > MAX_FILES || (bytes += st.size) > MAX_TOTAL) throw tooBig();
+        copyFileSync(rp, join(out, n));
+      }
+    }
+  };
+  walk(root, dest);
 }

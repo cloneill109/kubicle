@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { stringify } from 'yaml';
 import { writeAtomic } from '../fsutil.ts';
 import { ID_RE } from '../../shared/building.ts';
+import { LIST_MAX } from '../../shared/harness.ts';
 import type { McpCatalog, McpServerDef } from '../../shared/catalog.ts';
 import { BuildingFileError, DIR_MODE, FILE_MODE, checkBase, isMap, parseFile, validRev } from '../building/files.ts';
 
@@ -9,6 +10,7 @@ export type { McpServerDef, McpCatalog } from '../../shared/catalog.ts';
 
 const KEYS = ['type', 'command', 'args', 'env', 'url', 'headers'];
 const TOKEN_RE = /^(sk-|ghp_|xox[bp]-|glpat-)/;
+const TOKEN_ANY_RE = /\b(sk-|ghp_|xox[bp]-|glpat-)/;
 const SECRET_RE = /secret:([a-z0-9][a-z0-9-]{0,31})/g;
 
 const isStrMap = (v: unknown): v is Record<string, string> => isMap(v) && Object.values(v).every((x) => typeof x === 'string');
@@ -29,13 +31,22 @@ export function mcpProblems(name: string, s: unknown): string[] {
     const local = u && u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1');
     if (!u || (u.protocol !== 'https:' && !local)) out.push(`${name}: url must be https (or http://localhost)`);
   }
+  if (typeof s.url === 'string') {
+    if (TOKEN_ANY_RE.test(s.url)) out.push(`put tokens in a secret, not in mcp.yaml (url)`);
+    if (s.url.includes('secret:')) out.push('secret: references only work in env and headers (url)');
+  }
   if (s.args !== undefined && !(Array.isArray(s.args) && s.args.every((a) => typeof a === 'string'))) out.push(`${name}: args must be a list of strings`);
+  else if (Array.isArray(s.args)) {
+    if (s.args.length > LIST_MAX) out.push(`${name}: args must have at most ${LIST_MAX} entries`);
+    if (s.args.some((x) => TOKEN_ANY_RE.test(x as string))) out.push('put tokens in a secret, not in mcp.yaml (args)');
+    if (s.args.some((x) => (x as string).includes('secret:'))) out.push('secret: references only work in env and headers (args)');
+  }
   for (const field of ['env', 'headers'] as const) {
     const m = s[field];
     if (m === undefined) continue;
     if (!isStrMap(m)) { out.push(`${name}: ${field} must be a mapping of strings`); continue; }
     for (const [k, v] of Object.entries(m)) {
-      if (TOKEN_RE.test(v.replace(/^Bearer\s+/i, ''))) out.push(`put tokens in a secret, not in mcp.yaml (${field}.${k})`);
+      if (TOKEN_RE.test(v.replace(/^Bearer\s+/i, '')) || TOKEN_ANY_RE.test(v)) out.push(`put tokens in a secret, not in mcp.yaml (${field}.${k})`);
     }
   }
   return out;
@@ -66,7 +77,9 @@ function problems(c: { revision: unknown; servers: unknown }): string[] {
   const errs: string[] = [];
   if (!validRev(c.revision)) errs.push('revision must be an integer >= 1');
   if (!isMap(c.servers)) { errs.push('servers must be a mapping'); return errs; }
-  for (const [n, s] of Object.entries(c.servers)) errs.push(...mcpProblems(n, s));
+  const entries = Object.entries(c.servers);
+  if (entries.length > LIST_MAX) errs.push(`servers must have at most ${LIST_MAX} entries`);
+  for (const [n, s] of entries) errs.push(...mcpProblems(n, s));
   return errs;
 }
 
