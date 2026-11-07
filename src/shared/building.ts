@@ -1,4 +1,5 @@
 import type { Harness } from './harness.ts';
+import type { McpCatalog, SkillInfo } from './catalog.ts';
 
 // Shared building model: divisions, floors, rooms. Browser-safe (no Node imports).
 
@@ -10,7 +11,16 @@ export interface RoomDef { id: string; name: string; division?: string; band: 't
 export interface FloorDef { revision: number; rooms: RoomDef[]; source: 'default' | 'home' | 'repo' }
 export interface RoomOverrides { revision: number; rooms: Record<string, Harness> }
 /** floors and overrides keyed by project id; a project with no overrides file has no overrides key */
-export interface Building { divisions: DivisionDef[]; floors: Record<string, FloorDef>; overrides: Record<string, RoomOverrides>; warnings: string[] }
+export interface Building {
+  divisions: DivisionDef[]; floors: Record<string, FloorDef>; overrides: Record<string, RoomOverrides>;
+  /** ~/.kubicle/mcp.yaml (revision 0 and no servers when absent) */
+  mcp: McpCatalog;
+  /** the skill library, ~/.kubicle/skills */
+  skills: SkillInfo[];
+  /** skills in the user's Claude config that can be imported */
+  importable: SkillInfo[];
+  warnings: string[];
+}
 
 export const DEFAULT_DIVISIONS: Omit<DivisionDef, 'revision'>[] = [
   { id: 'qa', name: 'QA', color: '#62c4a0', harness: {} },

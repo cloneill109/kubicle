@@ -34,7 +34,7 @@ function tmpHome(): string {
 }
 
 function cfgFor(home: string): Config {
-  return { ...loadConfig({ KUBICLE_HOME: home }), port: 0 };
+  return { ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0 };
 }
 
 type Srv = Awaited<ReturnType<typeof startServer>>;
@@ -1241,4 +1241,50 @@ test('POST /api/overrides/:projectId/:roomId: owner only, saves + broadcasts, nu
   assert.equal(del.status, 200);
   assert.deepEqual(await del.json(), { revision: 2, rooms: {} });
   assert.equal(readFileSync(repoFloor, 'utf8'), before);
+});
+
+test('POST /api/mcp/:name and /api/skills/import: owner only, broadcast, validation, revision', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const claude = join(s.home, 'claude-test');
+  mkdirSync(join(claude, 'skills', 'a'), { recursive: true });
+  writeFileSync(join(claude, 'skills', 'a', 'SKILL.md'), '---\nname: a\ndescription: does a\n---\n');
+  const c = await owner(s, cookie);
+  await c.waitFor((m) => m.t === 'snapshot');
+  const raw = (path: string, headers: Record<string, string>) => fetch(`${s.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', origin: s.url, ...headers }, body: JSON.stringify({ baseRevision: 0, server: null, source: 'x' }) });
+  for (const p of ['/api/mcp/gh', '/api/skills/import']) {
+    assert.equal((await raw(p, {})).status, 401);
+    assert.equal((await raw(p, { cookie })).status, 403);
+  }
+  const ok = await control(s, cookie, '/api/mcp/gh', { baseRevision: 0, server: { command: 'npx', env: { T: 'secret:gh' } } });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(await ok.json(), { revision: 1, servers: { gh: { command: 'npx', env: { T: 'secret:gh' } } } });
+  await c.waitFor((m) => m.t === 'building' && m.building.mcp.revision === 1);
+  const stale = await control(s, cookie, '/api/mcp/gh', { baseRevision: 0, server: null });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(await stale.json(), { error: 'conflict', current: 1 });
+  const bad = await control(s, cookie, '/api/mcp/gh', { baseRevision: 1, server: { command: 'x', env: { T: 'ghp_abc' } } });
+  assert.equal(bad.status, 400);
+  assert.match((await bad.json()).error, /put tokens in a secret/);
+  for (const b of [{ server: null }, { baseRevision: -1, server: null }, { baseRevision: 1 }, { baseRevision: 1, server: [] }]) {
+    assert.equal((await control(s, cookie, '/api/mcp/gh', b)).status, 400);
+  }
+  assert.equal((await control(s, cookie, '/api/mcp/Bad_Name', { baseRevision: 1, server: { command: 'x' } })).status, 400);
+  const del = await control(s, cookie, '/api/mcp/gh', { baseRevision: 1, server: null });
+  assert.equal(del.status, 200);
+  assert.deepEqual(await del.json(), { revision: 2, servers: {} });
+
+  const src = join(claude, 'skills', 'a');
+  const imp = await control(s, cookie, '/api/skills/import', { source: src });
+  assert.equal(imp.status, 200);
+  assert.deepEqual(await imp.json(), { name: 'a', description: 'does a', path: join(s.home, 'skills', 'a'), source: 'library' });
+  await c.waitFor((m) => m.t === 'building' && m.building.skills.length === 1);
+  const dup = await control(s, cookie, '/api/skills/import', { source: src });
+  assert.equal(dup.status, 400);
+  assert.deepEqual(await dup.json(), { error: 'skill "a" already exists' });
+  for (const body of [{ source: '/etc' }, { source: join(src, '..', '..') }, {}, { source: 3 }]) {
+    const r = await control(s, cookie, '/api/skills/import', body);
+    assert.equal(r.status, 400);
+    if ('source' in body && typeof body.source === 'string') assert.deepEqual(await r.json(), { error: 'not an importable skill' });
+  }
 });

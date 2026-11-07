@@ -5,6 +5,9 @@ import {
 } from '../../shared/building.ts';
 import type { ProjectRow } from '../../shared/protocol.ts';
 import type { Harness } from '../../shared/harness.ts';
+import { readCatalog, writeServer } from '../harness/catalog.ts';
+import { importSkill, listImportable, listLibrary } from '../harness/skills.ts';
+import type { McpCatalog, McpServerDef, SkillInfo } from '../../shared/catalog.ts';
 import { readOverrides, writeOverride, OverrideNotFound } from './overrides.ts';
 import { BuildingFileError, RefusedFileError, readDivision, readFloor, seedDivisions, slugFor, writeDivision, writeFloor } from './files.ts';
 
@@ -16,6 +19,7 @@ export class BuildingService {
   private home: string;
   private debounceMs: number;
   private sweepMs: number;
+  private claudeDir: string | null;
   private projects: () => ProjectRow[] = () => [];
   private started = false;
 
@@ -24,7 +28,8 @@ export class BuildingService {
   private floors = new Map<string, FloorDef>();
   private repoFloors = new Map<string, FloorDef>();
   private overrideFiles = new Map<string, RoomOverrides>();
-  private built: Building = { divisions: [], floors: {}, overrides: {}, warnings: [] };
+  private catalog: McpCatalog = { revision: 0, servers: {} };
+  private built: Building = { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], warnings: [] };
   private builtJson = JSON.stringify(this.built);
   private sig = '';
 
@@ -32,7 +37,8 @@ export class BuildingService {
   private debounce: NodeJS.Timeout | null = null;
   private sweep: NodeJS.Timeout | null = null;
 
-  constructor(home: string, opts: { debounceMs?: number; sweepMs?: number } = {}) {
+  constructor(home: string, opts: { debounceMs?: number; sweepMs?: number; claudeDir?: string } = {}) {
+    this.claudeDir = opts.claudeDir ?? null;
     this.home = home;
     this.debounceMs = opts.debounceMs ?? 100;
     this.sweepMs = opts.sweepMs ?? 60_000;
@@ -110,6 +116,25 @@ export class BuildingService {
     return stored;
   }
 
+  /** Sets or (null) removes one MCP server in <home>/mcp.yaml. */
+  saveMcp(name: string, server: McpServerDef | null, baseRevision: number): McpCatalog {
+    const file = this.mcpFile();
+    if (existsSync(file)) {
+      try { readCatalog(file); }
+      catch { throw new BuildingFileError(file, `fix or delete ${file} before editing the MCP catalog`); }
+    }
+    const stored = writeServer(file, name, server, baseRevision);
+    this.refresh();
+    return stored;
+  }
+
+  /** Copies an importable skill into the library. Throws SkillImportError when refused. */
+  importSkill(source: string): SkillInfo {
+    const info = importSkill(this.home, source, this.claudeDir ?? join(this.home, 'no-claude-dir'));
+    this.refresh();
+    return info;
+  }
+
   refresh(): void {
     this.reload();
     if (this.started) this.syncWatchers();
@@ -120,6 +145,8 @@ export class BuildingService {
   private divisionsDir(): string { return join(this.home, 'divisions'); }
   private homeFile(id: string): string { return join(this.home, 'floors', `${slugFor(id)}.yaml`); }
   private overrideFile(id: string): string { return join(this.home, 'overrides', `${slugFor(id)}.yaml`); }
+  private mcpFile(): string { return join(this.home, 'mcp.yaml'); }
+  private skillsDir(): string { return join(this.home, 'skills'); }
   private repoFile(id: string): string { return join(id, '.kubicle', 'floor.yaml'); }
   private repoDir(id: string): string { return join(id, '.kubicle'); }
 
@@ -192,6 +219,10 @@ export class BuildingService {
     for (const k of [...this.repoFloors.keys()]) if (!seenRepo.has(k)) this.repoFloors.delete(k);
     for (const k of [...this.overrideFiles.keys()]) if (!seenOver.has(k)) this.overrideFiles.delete(k);
 
+    // MCP catalog: validated as a whole; a broken file keeps the last good catalog.
+    try { this.catalog = readCatalog(this.mcpFile()); } catch (e) { problem(this.mcpFile(), e); }
+    if (!existsSync(this.mcpFile())) this.catalog = { revision: 0, servers: {} };
+
     this.sig = this.signature();
     const sortedFloors: Record<string, FloorDef> = {};
     for (const k of Object.keys(floors).sort()) sortedFloors[k] = floors[k]!;
@@ -199,6 +230,9 @@ export class BuildingService {
       divisions: [...this.divisions.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
       floors: sortedFloors,
       overrides: Object.fromEntries(Object.keys(overrides).sort().map((k) => [k, overrides[k]!])),
+      mcp: this.catalog,
+      skills: listLibrary(this.home),
+      importable: this.claudeDir ? listImportable(this.claudeDir) : [],
       warnings: [...warn.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([, m]) => m),
     };
   }
@@ -215,6 +249,10 @@ export class BuildingService {
     const files = [...this.divisionFiles()];
     try { files.push(this.divisionsDir()); } catch { /* ignore */ }
     for (const p of this.projects()) { files.push(this.homeFile(p.id), this.repoFile(p.id), this.overrideFile(p.id)); }
+    files.push(this.mcpFile(), this.skillsDir());
+    try {
+      for (const n of readdirSync(this.skillsDir()).sort()) files.push(join(this.skillsDir(), n), join(this.skillsDir(), n, 'SKILL.md'));
+    } catch { /* no library yet */ }
     return files.map((f) => {
       try { return `${f}:${statSync(f).mtimeMs}`; } catch { return `${f}:-`; }
     }).join('\n');
@@ -232,7 +270,8 @@ export class BuildingService {
     if (name === null) return true;
     const n = name.split('\\').join('/');
     if (!isHome) return n === 'floor.yaml';
-    return n === 'divisions' || n === 'floors' || n === 'overrides' || /^(divisions|floors|overrides)\/[^/]*\.yaml$/.test(n);
+    return n === 'divisions' || n === 'floors' || n === 'overrides' || n === 'mcp.yaml' || n === 'skills' || n.startsWith('skills/')
+      || /^(divisions|floors|overrides)\/[^/]*\.yaml$/.test(n);
   }
 
   private syncWatchers(): void {

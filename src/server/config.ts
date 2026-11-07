@@ -4,6 +4,8 @@ import { dirname, join } from 'node:path';
 
 export interface Config {
   home: string;
+  /** Claude Code's config dir (CLAUDE_CONFIG_DIR or ~/.claude): where importable skills live. */
+  claudeDir: string;
   /** The private hook channel: <home>/run/hook.sock (shims never use TCP). */
   hookSocket: string;
   port: number;
@@ -23,6 +25,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const home = env.KUBICLE_HOME || join(homedir(), '.kubicle');
   return {
     home,
+    claudeDir: env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'),
     hookSocket: join(home, 'run', 'hook.sock'),
     port: Number.isInteger(port) && port > 0 && port < 65536 ? port : DEFAULT_PORT,
     payloadCap: 4096,

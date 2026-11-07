@@ -126,7 +126,7 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   const ingestToken = ensureIngestToken(cfg.home);
   const store = openStore(join(cfg.home, 'office.db'));
   const projects = new Projects(store);
-  const building = new BuildingService(cfg.home);
+  const building = new BuildingService(cfg.home, { claudeDir: cfg.claudeDir });
   const registry = new Registry(projects, store, cfg, undefined, { divisions: () => building.snapshot().divisions });
   const writer = new EventWriter(store);
   registry.rebuild(store.eventsSince(Date.now() - cfg.expireMs));

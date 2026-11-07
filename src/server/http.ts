@@ -6,6 +6,9 @@ import { BULLPEN, ID_RE, placeRoom, type RoomDef } from '../shared/building.ts';
 import type { BuildingService } from './building/service.ts';
 import { BuildingFileError, RevisionConflict } from './building/files.ts';
 import { OverrideNotFound } from './building/overrides.ts';
+import { mcpProblems } from './harness/catalog.ts';
+import { SkillImportError } from './harness/skills.ts';
+import type { McpServerDef } from '../shared/catalog.ts';
 import { harnessProblems, type Harness } from '../shared/harness.ts';
 import type { AgentView, BubblesState, FeedItem, ServerMsg, SessionCard } from '../shared/protocol.ts';
 import type { BubblesLog, LogKind, LogQuery } from './bubbles/log.ts';
@@ -618,6 +621,44 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     }
   }
 
+  async function mcpSave(req: IncomingMessage, res: ServerResponse, name: string): Promise<void> {
+    if (!guard(req, res)) return;
+    const b = await readJson(req);
+    if (!isObj(b) || !Number.isInteger(b.baseRevision) || (b.baseRevision as number) < 0 || !(b.server === null || isObj(b.server))) {
+      return send(res, 400, JSON.stringify({ error: 'body must be { baseRevision: integer >= 0, server: object or null }' }), JSON_HDR);
+    }
+    if (!ID_RE.test(name)) return send(res, 400, JSON.stringify({ error: `server name "${name}" is invalid` }), JSON_HDR);
+    if (b.server !== null) {
+      const problems = mcpProblems(name, b.server);
+      if (problems.length > 0) return send(res, 400, JSON.stringify({ error: problems.join('; ') }), JSON_HDR);
+    }
+    try {
+      const stored = d.building.saveMcp(name, b.server as McpServerDef | null, b.baseRevision as number);
+      send(res, 200, JSON.stringify(stored), JSON_HDR);
+    } catch (err) {
+      if (err instanceof RevisionConflict) {
+        d.building.refresh();
+        return send(res, 409, JSON.stringify({ error: 'conflict', current: err.current }), JSON_HDR);
+      }
+      if (err instanceof BuildingFileError) return send(res, 400, JSON.stringify({ error: err.message }), JSON_HDR);
+      throw err;
+    }
+  }
+
+  async function skillImport(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!guard(req, res)) return;
+    const b = await readJson(req);
+    if (!isObj(b) || typeof b.source !== 'string') {
+      return send(res, 400, JSON.stringify({ error: 'body must be { source: string }' }), JSON_HDR);
+    }
+    try {
+      send(res, 200, JSON.stringify(d.building.importSkill(b.source)), JSON_HDR);
+    } catch (err) {
+      if (err instanceof SkillImportError) return send(res, 400, JSON.stringify({ error: err.message }), JSON_HDR);
+      throw err;
+    }
+  }
+
   async function agentRoom(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
     if (!guard(req, res)) return;
     const b = await readJson(req);
@@ -722,6 +763,9 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       if (mm) return divisionHarnessSave(req, res, param(mm[1]));
       mm = /^\/api\/overrides\/([^/]+)\/([^/]+)$/.exec(p);
       if (mm) return overrideSave(req, res, param(mm[1]), param(mm[2]));
+      mm = /^\/api\/mcp\/([^/]+)$/.exec(p);
+      if (mm) return mcpSave(req, res, param(mm[1]));
+      if (p === '/api/skills/import') return skillImport(req, res);
       if (p === '/api/agents/start') return agentStart(req, res);
       mm = /^\/api\/agents\/([^/]+)\/room$/.exec(p);
       if (mm) return agentRoom(req, res, param(mm[1]));
