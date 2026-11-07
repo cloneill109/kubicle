@@ -4,7 +4,8 @@ import {
   defaultFloor, type Building, type DivisionDef, type FloorDef, type RoomDef,
 } from '../../shared/building.ts';
 import type { ProjectRow } from '../../shared/protocol.ts';
-import { BuildingFileError, RefusedFileError, readDivision, readFloor, seedDivisions, slugFor, writeFloor } from './files.ts';
+import type { Harness } from '../../shared/harness.ts';
+import { BuildingFileError, RefusedFileError, readDivision, readFloor, seedDivisions, slugFor, writeDivision, writeFloor } from './files.ts';
 
 type Origin = 'home' | 'repo';
 
@@ -76,6 +77,18 @@ export class BuildingService {
       catch { throw new BuildingFileError(file, `fix or delete ${file} before editing this floor`); }
     }
     const stored = writeFloor(file, { revision: 0, rooms, source: origin }, baseRevision);
+    this.refresh();
+    return stored;
+  }
+
+  /** Rewrites only the harness (and bumps the revision) of a division; id, name and color stay. */
+  saveDivisionHarness(id: string, harness: Harness, baseRevision: number): DivisionDef {
+    const cur = this.divisionFiles().map((f) => this.divisions.get(f)).find((d) => d?.id === id);
+    if (!cur) throw new BuildingFileError(id, 'unknown division');
+    const file = join(this.divisionsDir(), `${id}.yaml`);
+    try { readDivision(file); }
+    catch { throw new BuildingFileError(file, `fix or delete ${file} before editing this division`); }
+    const stored = writeDivision(this.divisionsDir(), { ...cur, harness: harness as Record<string, unknown> }, baseRevision);
     this.refresh();
     return stored;
   }

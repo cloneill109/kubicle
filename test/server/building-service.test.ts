@@ -332,3 +332,24 @@ test('M3: a broken repo floor keeps its last good version (with a warning); a re
     assert.equal(s.svc.snapshot().floors[s.root]!.source, 'home', 'deleted repo floor is not last good');
   } finally { s.cleanup(); }
 });
+
+test('a division with a bad harness key keeps the last good division and warns; saveDivisionHarness bumps revision', () => {
+  const s = setup();
+  try {
+    const file = join(s.home, 'divisions', 'qa.yaml');
+    writeFileSync(file, 'id: qa\nname: QA\ncolor: "#62c4a0"\nharness: {}\nrevision: 1\n');
+    s.svc.refresh();
+    writeFileSync(file, 'id: qa\nname: QA\ncolor: "#62c4a0"\nharness: { mcps: [] }\nrevision: 2\n');
+    s.svc.refresh();
+    const b = s.svc.snapshot();
+    assert.equal(b.divisions.find((d) => d.id === 'qa')!.revision, 1);
+    assert.equal(b.warnings.length, 1);
+    assert.match(b.warnings[0]!, /harness has unknown key "mcps"/);
+    writeFileSync(file, 'id: qa\nname: QA\ncolor: "#62c4a0"\nharness: {}\nrevision: 1\n');
+    const stored = s.svc.saveDivisionHarness('qa', { model: 'sonnet' }, 1);
+    assert.equal(stored.revision, 2);
+    assert.equal(stored.name, 'QA');
+    assert.deepEqual(s.svc.snapshot().divisions.find((d) => d.id === 'qa')!.harness, { model: 'sonnet' });
+    assert.throws(() => s.svc.saveDivisionHarness('nope', {}, 1), /unknown division/);
+  } finally { s.cleanup(); }
+});

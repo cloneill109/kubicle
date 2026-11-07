@@ -3,6 +3,7 @@ import { basename, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { parseDocument, stringify } from 'yaml';
 import { writeAtomic } from '../fsutil.ts';
+import { harnessProblems } from '../../shared/harness.ts';
 import {
   ID_RE, DEFAULT_DIVISIONS, validateFloor,
   type DivisionDef, type FloorDef, type RoomDef,
@@ -120,7 +121,7 @@ function divisionProblems(d: any): string[] {
   if (typeof d.id !== 'string' || !ID_RE.test(d.id)) errs.push(`division id "${d.id}" is invalid`);
   if (typeof d.name !== 'string' || d.name.length === 0 || d.name.length > 40) errs.push('name must be a non-empty string of at most 40 characters');
   if (typeof d.color !== 'string' || !COLOR_RE.test(d.color)) errs.push(`color "${d.color}" must look like #rrggbb`);
-  if (!isMap(d.harness)) errs.push('harness must be a mapping');
+  errs.push(...harnessProblems(d.harness));
   if (!validRev(d.revision)) errs.push('revision must be an integer >= 1');
   return errs;
 }

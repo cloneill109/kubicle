@@ -236,3 +236,16 @@ test('M4/M5: room division and name are validated on read and on write', () => {
   assert.throws(() => writeFloor(w, { revision: 0, source: 'home', rooms: [bp, { id: 'a', name: 'x'.repeat(41), band: 'top', width: 12 }] }, 0), /name of "a" must be 1–40 characters/);
   assert.equal(existsSync(w), false);
 });
+
+test('division harness is validated: unknown key and bad types are rejected; {} still loads', () => {
+  const d = tmp();
+  const f = join(d, 'qa.yaml');
+  const w = (harness: string) => writeFileSync(f, `id: qa\nname: QA\ncolor: "#62c4a0"\nharness: ${harness}\nrevision: 1\n`);
+  w('{}'); assert.deepEqual(readDivision(f).harness, {});
+  w('{ model: sonnet, tools: [Read] }'); assert.equal(readDivision(f).harness.model, 'sonnet');
+  w('{ mcps: [] }');
+  assert.throws(() => readDivision(f), (e: any) => e instanceof BuildingFileError && e.message.includes('harness has unknown key "mcps"'));
+  w('{ tools: Read }');
+  assert.throws(() => readDivision(f), (e: any) => e instanceof BuildingFileError && e.message.includes('tools must be a list'));
+  assert.throws(() => writeDivision(d, div({ harness: { mcps: [] } }), 0), /harness has unknown key "mcps"/);
+});

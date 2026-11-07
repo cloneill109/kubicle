@@ -1169,3 +1169,34 @@ test('POST /api/agents/start: owner only, validates project/room/task, launches,
   assert.equal(launched[0].room, 'frontend');
   await c.close();
 });
+
+test('POST /api/divisions/:id/harness: owner only, saves + broadcasts, stale 409, bad 400, unknown 404', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const { c } = await withProject(s, cookie);
+  const path = '/api/divisions/qa/harness';
+  const raw = (headers: Record<string, string>) => fetch(`${s.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', origin: s.url, ...headers }, body: JSON.stringify({ baseRevision: 1, harness: {} }) });
+  assert.equal((await raw({})).status, 401);
+  assert.equal((await raw({ cookie })).status, 403);
+
+  const ok = await control(s, cookie, path, { baseRevision: 1, harness: { model: 'sonnet', deny: ['Bash(git push:*)'] } });
+  assert.equal(ok.status, 200);
+  const body = await ok.json();
+  assert.equal(body.id, 'qa'); assert.equal(body.revision, 2); assert.equal(body.name, 'QA');
+  assert.deepEqual(body.harness, { model: 'sonnet', deny: ['Bash(git push:*)'] });
+  await c.waitFor((m) => m.t === 'building' && m.building.divisions.some((d) => d.id === 'qa' && d.revision === 2));
+
+  const stale = await control(s, cookie, path, { baseRevision: 1, harness: {} });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(await stale.json(), { error: 'conflict', current: 2 });
+
+  const bad = await control(s, cookie, path, { baseRevision: 2, harness: { mcps: [], tools: 'Read' } });
+  assert.equal(bad.status, 400);
+  const msg = (await bad.json()).error as string;
+  assert.equal(msg, 'harness has unknown key "mcps"; tools must be a list');
+
+  assert.equal((await control(s, cookie, '/api/divisions/nope/harness', { baseRevision: 1, harness: {} })).status, 404);
+  for (const b of [{ harness: {} }, { baseRevision: 0 }, { baseRevision: -1, harness: {} }, { baseRevision: 2, harness: [] }]) {
+    assert.equal((await control(s, cookie, path, b)).status, 400);
+  }
+});

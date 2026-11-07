@@ -5,6 +5,7 @@ import { normalizeHook, type AgentEvent } from '../shared/events.ts';
 import { BULLPEN, ID_RE, placeRoom, type RoomDef } from '../shared/building.ts';
 import type { BuildingService } from './building/service.ts';
 import { BuildingFileError, RevisionConflict } from './building/files.ts';
+import { harnessProblems, type Harness } from '../shared/harness.ts';
 import type { AgentView, BubblesState, FeedItem, ServerMsg, SessionCard } from '../shared/protocol.ts';
 import type { BubblesLog, LogKind, LogQuery } from './bubbles/log.ts';
 import { INTAKE_IDLE_MS, intakeResponse, type IntakeOutcome, type IntakeRequest } from './bubbles/intake.ts';
@@ -568,6 +569,30 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     }
   }
 
+  async function divisionHarnessSave(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+    if (!guard(req, res)) return;
+    const b = await readJson(req);
+    if (!isObj(b) || !Number.isInteger(b.baseRevision) || (b.baseRevision as number) < 0 || !isObj(b.harness)) {
+      return send(res, 400, JSON.stringify({ error: 'body must be { baseRevision: integer >= 0, harness: object }' }), JSON_HDR);
+    }
+    const problems = harnessProblems(b.harness);
+    if (problems.length > 0) return send(res, 400, JSON.stringify({ error: problems.join('; ') }), JSON_HDR);
+    try {
+      const stored = d.building.saveDivisionHarness(id, b.harness as Harness, b.baseRevision as number);
+      send(res, 200, JSON.stringify(stored), JSON_HDR);
+    } catch (err) {
+      if (err instanceof RevisionConflict) {
+        d.building.refresh();
+        return send(res, 409, JSON.stringify({ error: 'conflict', current: err.current }), JSON_HDR);
+      }
+      if (err instanceof BuildingFileError) {
+        const status = err.message.endsWith('unknown division') ? 404 : 400;
+        return send(res, status, JSON.stringify({ error: err.message }), JSON_HDR);
+      }
+      throw err;
+    }
+  }
+
   async function agentRoom(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
     if (!guard(req, res)) return;
     const b = await readJson(req);
@@ -668,6 +693,8 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       if (mm) return projectPatch(req, res, param(mm[1]));
       mm = /^\/api\/floors\/([^/]+)$/.exec(p);
       if (mm) return floorSave(req, res, param(mm[1]));
+      mm = /^\/api\/divisions\/([^/]+)\/harness$/.exec(p);
+      if (mm) return divisionHarnessSave(req, res, param(mm[1]));
       if (p === '/api/agents/start') return agentStart(req, res);
       mm = /^\/api\/agents\/([^/]+)\/room$/.exec(p);
       if (mm) return agentRoom(req, res, param(mm[1]));
