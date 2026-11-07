@@ -19,6 +19,7 @@
     <span class="lbl">Floor</span><span class="name">Lobby</span><span class="glow" hidden></span><span class="caret" aria-hidden="true">▾</span>
   </button>
   <button class="btn edit-btn" id="editBtn" type="button" aria-pressed="false" aria-controls="editSheet" title="Rearrange this floor's rooms" hidden>Edit floor</button>
+  <button class="btn primary" id="startBtn" type="button" aria-haspopup="dialog" aria-controls="startDlg" title="Open a new Terminal running Claude in a room on this floor (or click a door sign)" hidden>Start agent</button>
   <div class="counts" id="counts" aria-live="polite"></div>
   <div class="tools">
     <button class="btn bub-dot" id="bubblesDot" type="button" data-state="" aria-haspopup="dialog" aria-controls="bubblesPanel" aria-label="Bubbles: connecting. Open the Bubbles panel"><i class="dot" aria-hidden="true"></i>Bubbles<span class="glow" hidden></span></button>
@@ -178,6 +179,21 @@
     <ol class="log bub-recent" id="bubblesRecent"></ol>
     <button class="btn" id="bubblesOpenLog" type="button">Open the full log</button>
   </section>
+</dialog>
+
+<dialog class="start-dlg" id="startDlg" aria-labelledby="startTitle">
+  <form class="bub-form start-form" id="startForm">
+    <header class="start-head">
+      <div><h2 id="startTitle">Start an agent</h2><p class="sub" id="startWhere"></p></div>
+      <button class="btn icon" id="startClose" type="button" aria-label="Close">✕</button>
+    </header>
+    <div class="field wide"><label for="startRoom">Room</label><select id="startRoom"></select></div>
+    <div class="field wide"><label for="startTask">Task <span class="opt">(optional)</span></label>
+      <textarea id="startTask" maxlength="4000" rows="5" spellcheck="true" placeholder="What should it work on? Leave empty to just open Claude there."></textarea></div>
+    <p class="sub wide">Opens a new Terminal window running <code>claude</code> on your subscription, with this as its first prompt. You talk to it in that window; it shows up in this room. <kbd>⌘</kbd><kbd>Enter</kbd> starts.</p>
+    <p class="bub-err" id="startMsg" role="alert" hidden></p>
+    <div class="start-actions"><button class="btn primary" type="submit" id="startGo">Start</button><button class="btn" type="button" id="startCancel">Cancel</button></div>
+  </form>
 </dialog>
 
 <dialog class="wide log-view" id="logView" aria-labelledby="logTitle">

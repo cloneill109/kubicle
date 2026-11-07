@@ -129,7 +129,7 @@ async function lobbyMenu(page: Page, name: string, act: string): Promise<void> {
 }
 
 async function settle(page: Page): Promise<void> {
-  await page.waitForFunction(() => window.__office.sim.agents().every((a) => a.anim === 'seated' || a.anim === 'standing'), null, { timeout: 20000 });
+  await page.waitForFunction(() => window.__office.sim.agents().every((a) => a.anim === 'seated' || a.anim === 'standing'), null, { timeout: 30000 }); // the far top rooms are a ~20 s walk
 }
 
 test('live office: state, floors, approvals, rooms, lobby, styles, narrow view, disconnect', async () => {
@@ -179,7 +179,7 @@ test('live office: state, floors, approvals, rooms, lobby, styles, narrow view, 
   assert.ok(await page.locator('#emptyFloor').isHidden(), 'hint gone once sessions appear');
   // Default floor layout: 7 division rooms plus the Bullpen.
   assert.deepEqual(await page.evaluate(() => window.__office.world().rooms.map((r) => `${r.id}:${r.kind}`)),
-    ['qa:division', 'security:division', 'uxui:division', 'frontend:division', 'bullpen:bullpen', 'backend:division', 'animation:division', 'imagegen:division']);
+    ['qa:division', 'security:division', '@bubbles:coordinator', 'uxui:division', 'frontend:division', 'bullpen:bullpen', 'backend:division', 'animation:division', 'imagegen:division']);
   await page.waitForFunction(() => document.querySelectorAll('#feed li').length >= 4, null, { timeout: 5000 });
   assert.match(await page.locator('#feed').innerText(), /SubagentStart/);
   await settle(page);
@@ -421,7 +421,7 @@ test('live office: state, floors, approvals, rooms, lobby, styles, narrow view, 
   await settle(page);
 
   // ---- door signs: one per room, not clickable in 1b ----
-  await page.waitForFunction(() => window.__office.signs().length === 8, null, { timeout: 3000 }); // drawn on the next frame
+  await page.waitForFunction(() => window.__office.signs().length === 9, null, { timeout: 3000 }); // drawn on the next frame (8 rooms + Bubbles' office)
   const p = await page.evaluate(() => {
     const r = window.__office.signs().find((x) => x.roomId === 'bullpen')!;
     const c = document.getElementById('map')!.getBoundingClientRect();
@@ -429,7 +429,12 @@ test('live office: state, floors, approvals, rooms, lobby, styles, narrow view, 
   });
   await page.mouse.click(p.x, p.y);
   await page.waitForTimeout(200);
-  assert.ok(await page.locator('#floorMenu').isHidden(), 'a door sign opens no menu');
+  assert.ok(await page.locator('#floorMenu').isHidden(), 'a door sign opens no move menu');
+  // ...it opens Start agent for that room instead
+  await page.locator('#startDlg').waitFor({ state: 'visible', timeout: 3000 });
+  assert.equal(await page.locator('#startRoom').inputValue(), 'bullpen');
+  await page.locator('#startCancel').click();
+  await page.locator('#startDlg').waitFor({ state: 'hidden', timeout: 3000 });
   await settle(page);
 
   // ---- every style renders without errors; screenshot each ----
@@ -717,7 +722,8 @@ test('floor edit mode: drag, resize, add, remove, save; conflict, 400, 404, netw
   assert.ok((await editRooms(page))!.some((r) => r.id === 'bullpen'), 'Delete does not remove the Bullpen');
   await page.locator('#editCancel').click();
   await page.locator('#editSheet').waitFor({ state: 'hidden', timeout: 3000 });
-  assert.deepEqual(await page.evaluate(() => window.__office.world().rooms.map((r) => r.id)), external.rooms.map((r) => r.id), 'Cancel restores the floor');
+  assert.deepEqual(await page.evaluate(() => window.__office.world().rooms.map((r) => r.id).filter((id) => id !== '@bubbles')), external.rooms.map((r) => r.id), 'Cancel restores the floor');
+  assert.ok(await page.evaluate(() => window.__office.world().rooms.some((r) => r.id === '@bubbles')), "Bubbles' office is back after edit mode");
   assert.equal(await page.evaluate(() => window.__office.world().rooms.find((r) => r.id === 'qa')!.name), 'Quality');
 
   // ---- add a division room from the select ----
@@ -1136,4 +1142,74 @@ test('Bubbles intake: the inspector says who placed the session and shows sugges
   await page.keyboard.press('Escape');
   assert.deepEqual(errors, [], 'no page errors');
   await ctx.close();
+});
+
+test('Start agent: header button and door sign open the dialog; Start asks the server to open a Terminal in that room', async () => {
+  await srv?.close();
+  const home = join(tmp, 'home-start');
+  const launched: { cwd: string; room: string; task: string }[] = [];
+  let failNext = false;
+  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, {
+    openBrowser: false,
+    launch: async (r) => { if (failNext) { failNext = false; throw new (await import('../../src/server/launcher.ts')).LaunchError('could not open Terminal: test'); } launched.push(r); },
+  });
+  const eta = repo('eta');
+  const page = await (await browser.newContext({ viewport: { width: 1400, height: 1000 } })).newPage();
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+  await page.goto(srv.loginUrl);
+  await page.waitForFunction(() => !!window.__office && document.body.dataset.conn === 'open', null, { timeout: 10000 });
+  assert.ok(await page.locator('#startBtn').isHidden(), 'no Start agent in the Lobby');
+  await postOk({ session_id: 'ffffffff-0000-4000-8000-000000000007', hook_event_name: 'SessionStart', cwd: eta, source: 'startup' });
+  await page.waitForFunction(() => window.__office.floor() !== 'lobby', null, { timeout: 5000 });
+  const floorId = await page.evaluate(() => window.__office.floor());
+
+  // header button → dialog, Bullpen by default; pick Front end, type a task, Start
+  await page.locator('#startBtn').click();
+  await page.locator('#startDlg').waitFor({ state: 'visible', timeout: 3000 });
+  assert.equal(await page.locator('#startRoom').inputValue(), '', 'Bubbles chooses by default');
+  await page.locator('#startRoom').selectOption('frontend');
+  await page.locator('#startTask').fill("fix the nav; it's broken");
+  await page.locator('#startGo').click();
+  await page.locator('#startDlg').waitFor({ state: 'hidden', timeout: 3000 });
+  assert.deepEqual(launched, [{ cwd: floorId, room: 'frontend', task: "fix the nav; it's broken" }]);
+  await page.waitForFunction(() => [...document.querySelectorAll('#feed li')].some((li) => /Opened a Terminal for a new agent in Front end/.test(li.textContent ?? '')), null, { timeout: 3000 });
+  await page.screenshot({ path: join(outDir, 'live-start-feed.png') });
+
+  // door sign → dialog preselects that room; a launcher failure shows its message and keeps the dialog open
+  const sign = await page.evaluate(() => {
+    const r = window.__office.signs().find((x) => x.roomId === 'qa')!;
+    const c = document.getElementById('map')!.getBoundingClientRect();
+    return { x: c.left + r.x + r.w / 2, y: c.top + r.y + r.h / 2 };
+  });
+  await page.mouse.click(sign.x, sign.y);
+  await page.locator('#startDlg').waitFor({ state: 'visible', timeout: 3000 });
+  assert.equal(await page.locator('#startRoom').inputValue(), 'qa');
+  await page.screenshot({ path: join(outDir, 'live-start-dialog.png') });
+  failNext = true;
+  await page.locator('#startTask').fill('x');
+  await page.keyboard.press('Meta+Enter');
+  await page.waitForFunction(() => /could not open Terminal: test/.test(document.getElementById('startMsg')!.textContent ?? ''), null, { timeout: 3000 });
+  assert.ok(await page.locator('#startDlg').isVisible());
+  assert.equal(launched.length, 1);
+  // Let Bubbles choose: no room is sent
+  await page.locator('#startRoom').selectOption('');
+  await page.locator('#startGo').click();
+  await page.locator('#startDlg').waitFor({ state: 'hidden', timeout: 3000 });
+  assert.deepEqual(launched[1], { cwd: floorId, room: '', task: 'x' });
+  // Bubbles' office sign does not start agents
+  const bsign = await page.evaluate(() => {
+    const r = window.__office.signs().find((x) => x.roomId === '@bubbles')!;
+    const c = document.getElementById('map')!.getBoundingClientRect();
+    return { x: c.left + r.x + r.w / 2, y: c.top + r.y + r.h / 2 };
+  });
+  await page.mouse.click(bsign.x, bsign.y);
+  await page.waitForTimeout(200);
+  assert.ok(await page.locator('#startDlg').isHidden());
+  // edit mode hides the button
+  await page.locator('#editBtn').click();
+  assert.ok(await page.locator('#startBtn').isHidden());
+  await page.locator('#editCancel').click();
+  assert.ok(await page.locator('#startBtn').isVisible());
+  assert.deepEqual(errors, []);
 });

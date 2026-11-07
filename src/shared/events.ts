@@ -1,4 +1,5 @@
 // Browser-safe: no Node-only imports.
+import { describeTool } from './describe.ts';
 
 export type HookEventName =
   | 'SessionStart' | 'SessionEnd' | 'UserPromptSubmit' | 'PreToolUse' | 'PostToolUse'
@@ -21,6 +22,8 @@ export interface AgentEvent {
   toolName?: string;
   toolUseId?: string;
   activity?: string;
+  /** Plain-language version of `activity` for speech bubbles (rule-based, see describe.ts). */
+  summary?: string;
   model?: string;
   notificationType?: string;
   message?: string;
@@ -187,7 +190,10 @@ export function normalizeHook(raw: unknown, now: number, cap: number = DEFAULT_C
   set('notificationType', str(raw.notification_type));
   const msg = str(raw.message);
   set('message', msg === undefined ? undefined : clip(msg, 500));
-  if (toolName) e.activity = summarizeTool(toolName, raw.tool_input, cwd);
+  if (toolName) {
+    e.activity = summarizeTool(toolName, raw.tool_input, cwd);
+    e.summary = describeTool(toolName, raw.tool_input);
+  }
   if ((name === 'PermissionRequest' || name === 'PreToolUse') && raw.tool_input !== undefined) {
     // What the owner approves must be exactly what runs: keep the whole input (capped), not the
     // one-line summary, and take it before truncatePayload cuts long strings.

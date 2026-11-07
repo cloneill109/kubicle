@@ -39,8 +39,8 @@ function cfgFor(home: string): Config {
 
 type Srv = Awaited<ReturnType<typeof startServer>>;
 
-async function start(home = tmpHome(), patch: Partial<Config> = {}): Promise<Srv & { home: string }> {
-  const s = await startServer({ ...cfgFor(home), ...patch });
+async function start(home = tmpHome(), patch: Partial<Config> = {}, opts?: Parameters<typeof startServer>[1]): Promise<Srv & { home: string }> {
+  const s = opts ? await startServer({ ...cfgFor(home), ...patch }, opts) : await startServer({ ...cfgFor(home), ...patch });
   let closed = false;
   const close = async () => { if (!closed) { closed = true; await s.close(); } };
   cleanup.push(close);
@@ -1124,4 +1124,48 @@ test('shouldIntake: the gate, case by case', () => {
   assert.equal(shouldIntake(e(), 'hi', ago(20 * MIN, 30_000), view, T), false, 'busy with tools (or a subagent) since the last prompt');
   assert.equal(shouldIntake(e(), 'hi', ago(30 * 60 * MIN), view, T), true, 'the view expired (a day idle): no lastSeen counts as idle');
   assert.equal(shouldIntake(e(), 'hi', { count: 3 }, view, T), false);
+});
+
+test('POST /api/agents/start: owner only, validates project/room/task, launches, feeds, rate-limits', async () => {
+  const launched: { cwd: string; room: string; task: string }[] = [];
+  let fail: Error | null = null;
+  const s = await start(undefined, {}, { launch: async (r) => { if (fail) throw fail; launched.push(r); } });
+  const cookie = await login(s);
+  const { c, snap } = await withProject(s, cookie);
+  assert.ok(snap.t === 'snapshot');
+  const projectId = snap.projects[0].id;
+  const path = '/api/agents/start';
+  // not the owner / no CSRF header / wrong origin: nothing launches
+  assert.equal((await fetch(`${s.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId, room: 'qa' }) })).status, 401);
+  assert.equal((await control(s, cookie, path, { projectId, room: 'qa' }, { 'x-kubicle-csrf': '' })).status, 403);
+  assert.equal((await control(s, cookie, path, { projectId, room: 'qa' }, { origin: 'http://evil.example' })).status, 403);
+  assert.equal(launched.length, 0);
+  // validation
+  assert.equal((await control(s, cookie, path, { projectId: '/nope', room: 'qa' })).status, 404);
+  assert.equal((await control(s, cookie, path, { projectId, room: 'nope' })).status, 400);
+  assert.equal((await control(s, cookie, path, { projectId, room: 'qa', task: 5 })).status, 400);
+  assert.equal((await control(s, cookie, path, { projectId, room: 'qa', task: 'x'.repeat(4001) })).status, 400);
+  assert.equal((await control(s, cookie, path, { room: 'qa' })).status, 400);
+  assert.equal(launched.length, 0);
+  // success
+  const r = await control(s, cookie, path, { projectId, room: 'frontend', task: "fix the nav; don't push" });
+  assert.equal(r.status, 202);
+  assert.deepEqual(launched, [{ cwd: projectId, room: 'frontend', task: "fix the nav; don't push" }]);
+  const feed = await c.waitFor((m) => m.t === 'feed' && m.item.event === 'Launch');
+  assert.ok(feed.t === 'feed' && /Front end/.test(feed.item.detail));
+  // empty room = Bubbles picks
+  assert.equal((await control(s, cookie, path, { projectId, room: '', task: 't' })).status, 202);
+  assert.deepEqual(launched.at(-1), { cwd: projectId, room: '', task: 't' });
+  // launcher failure → error text, not counted
+  fail = new (await import('../../src/server/launcher.ts')).LaunchError('could not open Terminal: boom');
+  const bad = await control(s, cookie, path, { projectId, room: 'qa' });
+  assert.equal(bad.status, 500);
+  assert.match((await bad.json() as { error: string }).error, /boom/);
+  fail = null;
+  // rate limit: 6 a minute
+  for (let i = 0; i < 4; i++) assert.equal((await control(s, cookie, path, { projectId, room: 'qa' })).status, 202);
+  assert.equal((await control(s, cookie, path, { projectId, room: 'qa' })).status, 429);
+  assert.equal(launched.length, 6);
+  assert.equal(launched[0].room, 'frontend');
+  await c.close();
 });

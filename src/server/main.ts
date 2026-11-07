@@ -2,7 +2,8 @@ import { spawn } from 'node:child_process';
 import { chmodSync, mkdirSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { makeLauncher, type Launch } from './launcher.ts';
 import { fileURLToPath } from 'node:url';
 import type { BubblesState, FeedItem } from '../shared/protocol.ts';
 import { loadBubblesConfig } from './bubbles/config.ts';
@@ -111,6 +112,8 @@ export interface StartOpts {
   bubbles?: { bin?: string; env?: Record<string, string | undefined>; timeouts?: Partial<Timeouts> };
   /** Test hook: the clock for hook event timestamps and the intake idle gate. */
   now?: () => number;
+  /** Test hook: replaces opening a Terminal for "Start agent". */
+  launch?: Launch;
 }
 
 export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<RunningServer> {
@@ -227,6 +230,7 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   });
   const handler = createHandler({
     cfg, ingestToken, auth, store, writer, projects, registry, building, approvals, hub, pushFeed, rootDir: ROOT, port, log, flow,
+    launch: opts.launch ?? makeLauncher({ runDir: dirname(cfg.hookSocket), app: process.env.KUBICLE_TERMINAL }),
     bubbles: { policy, log: bubblesLog, state: bubblesState, ownerToggledOn: () => bubbles.ownerToggledOn(), changed: bubblesChanged, intake: (r) => bubbles.intake(r) },
     ...(opts.now ? { now: opts.now } : {}),
     onBadToken: () => {

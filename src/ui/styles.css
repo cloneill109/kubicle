@@ -368,3 +368,14 @@ textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; 
   .log-table th:nth-child(3), .log-table td.p, .log-table th:nth-child(4), .log-table td.a { display: none; }
   .bub-form { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ---- Start agent ---- */
+.start-dlg { width: min(520px, calc(100vw - 32px)); }
+.start-form { padding: 16px; gap: 12px 10px; }
+.start-head { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.start-form .sub.wide { grid-column: 1 / -1; margin: 0; line-height: 1.45; }
+.start-form .opt { color: var(--muted); font-weight: 400; }
+.start-form textarea { min-height: 110px; }
+.start-form code, .start-form kbd { font: 12px var(--mono); }
+.start-form kbd { border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; margin: 0 1px; }
+.start-actions { grid-column: 1 / -1; display: flex; gap: 8px; }

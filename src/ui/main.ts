@@ -3,7 +3,8 @@
 // and floor edit mode (drag/resize rooms on the canvas, the side sheet, revision-checked save).
 // Bundled by esbuild into dist/ui/main.js.
 import type { ServerMsg, FeedItem, AgentView } from '../shared/protocol.ts';
-import { buildFloor, type World } from './sim/world.ts';
+import { buildFloor, COORDINATOR, type World } from './sim/world.ts';
+import { Coordinator } from './coordinator.ts';
 import { BULLPEN, defaultFloor, type FloorDef, type RoomDef } from '../shared/building.ts';
 import { addRoom, bandRooms, moveRoom, removeRoom, resizeRoom } from './floor-edit.ts';
 import { drawEdit, dropTarget, hitRoom, partPoint, screenToWorld, type EditPart, type EditView } from './render/edit-overlay.ts';
@@ -17,6 +18,7 @@ import { openPicker, closePicker, pickerOpen, renderLobby } from './elevator.ts'
 import { drawOverlays, bubblesMarks, type SignRect } from './render/overlays.ts';
 import { BubblesUi } from './bubbles-panel.ts';
 import { LogView } from './log-view.ts';
+import { StartAgentUi } from './start-agent.ts';
 
 const STYLE_KEY = 'kubicle-style';
 const CHIME_KEY = 'kubicle-chime';
@@ -38,6 +40,8 @@ const state = new OfficeState({ preferredFloor: tabStore.get(FLOOR_KEY) });
 // One floor is on the canvas at a time; switching floors builds a new world and Sim.
 let world: World = buildFloor(defaultFloor(), []);
 let sim = new Sim(world, { ambient: !reducedMotion?.matches });
+/** Bubbles' figure in the top-center room (absent while editing the floor). */
+const coord = new Coordinator();
 reducedMotion?.addEventListener?.('change', () => { sim.ambient = !reducedMotion.matches; });
 const floorDef = (id: string): FloorDef => state.building.floors[id] ?? defaultFloor();
 
@@ -64,6 +68,12 @@ const inspector = new Inspector(state, () => sim.agents(), (projectId) => floorD
 const projectName = (id: string): string => state.project(id)?.name ?? id;
 const logView = new LogView(state, projectName);
 const bubbles = new BubblesUi(state, { projectName, onOpenLog: () => logView.open($('logBtn')) });
+const startAgent = new StartAgentUi({
+  floor: () => state.currentFloor,
+  floorName: (id) => floorName(id),
+  rooms: (id) => floorDef(id).rooms.map((r) => ({ id: r.id, name: r.name })),
+});
+$('startBtn').addEventListener('click', (e) => { closeMenu(); startAgent.open(undefined, e.currentTarget as HTMLElement); });
 const openFromHash = () => { if (location.hash === '#bubbles') { closeMenu(); closePicker(false); if (logView.isOpen) $<HTMLDialogElement>('logView').close(); bubbles.open($('bubblesDot')); } };
 window.addEventListener('hashchange', openFromHash);
 
@@ -117,11 +127,14 @@ function loop(ts: number): void {
   const now = ts / 1000;
   if (state.currentFloor !== LOBBY) {
     sim.step(dt, now);
-    const agents = sim.agents();
+    const floorAgents = sim.agents();
+    coord.step(now, floorAgents);
+    const agents = coord.agent ? [...floorAgents, coord.agent] : floorAgents;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = R.bg;
     ctx.fillRect(0, 0, cw, ch);
     R.frame(ctx, cw, ch, dpr, world, agents, now);
+    coord.drawLinks(ctx, R, style, floorAgents, reducedMotion?.matches ? 0 : now);
     // Reduced motion: freeze the overlay clock so status marks and the selection ring don't bob.
     signs = drawOverlays(ctx, R, style, world, agents, roomOf, inspector.selectedId, hovered, reducedMotion?.matches ? 0 : now, cw);
     if (glowOn) drawGlow(now);
@@ -142,14 +155,14 @@ function rel(e: MouseEvent): [number, number] {
 function hitAgent(mx: number, my: number): SimAgent | undefined {
   const rad = Math.max(14, R.unit() * 0.75);
   let best: SimAgent | undefined, bd = rad;
-  for (const a of sim.agents()) {
+  for (const a of coord.agent ? [...sim.agents(), coord.agent] : sim.agents()) {
     if (a.anim === 'leaving') continue;
     const c = R.center(a), d = Math.hypot(c.x - mx, c.y - my);
     if (d < bd) { bd = d; best = a; }
   }
   return best;
 }
-const roomOf = (a: SimAgent) => sim.roomOf(a);
+const roomOf = (a: SimAgent) => (a === coord.agent ? COORDINATOR : sim.roomOf(a));
 
 /** The elevator tile's box on the canvas (CSS px): the 2×1 car, plus the shaft above it in iso. */
 function elevatorRect(): { x: number; y: number; w: number; h: number } {
@@ -161,6 +174,12 @@ function elevatorRect(): { x: number; y: number; w: number; h: number } {
   return { x: Math.min(...xs), y: top, w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - top };
 }
 const inRect = (r: { x: number; y: number; w: number; h: number }, x: number, y: number) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+/** A real room's door sign under (x, y) on a live floor: clicking it starts an agent there. */
+function startSign(x: number, y: number): string | undefined {
+  const id = state.currentFloor;
+  if (id === LOBBY || state.project(id)?.archived) return undefined;
+  return signs.find((s) => inRect(s, x, y) && floorDef(id).rooms.some((r) => r.id === s.roomId))?.roomId;
+}
 
 /** Pulse around the elevator while someone on another floor needs the owner (static under reduced motion). */
 let glowOn = false;
@@ -184,15 +203,17 @@ function drawGlow(now: number): void {
   ctx.restore();
 }
 
-// Door signs are not clickable in 1b (stage 2 uses them for room settings). The elevator opens the picker.
+// A door sign starts an agent in that room (not Bubbles' office). The elevator opens the picker.
 canvas.addEventListener('mousemove', (e) => {
   if (editing) return; // edit mode sets its own cursor (pointer handlers below)
   const [x, y] = rel(e);
   const a = hitAgent(x, y);
   hovered = a?.view.id;
   const onElevator = !a && inRect(elevatorRect(), x, y);
-  canvas.style.cursor = a || onElevator ? 'pointer' : 'default';
-  canvas.title = onElevator ? 'Elevator: go to another floor (E)' : '';
+  const sign = !a && !onElevator ? startSign(x, y) : undefined;
+  canvas.style.cursor = a || onElevator || sign ? 'pointer' : 'default';
+  canvas.title = onElevator ? 'Elevator: go to another floor (E)' : a && a === coord.agent ? 'Bubbles: open his panel'
+    : sign ? `Start an agent in ${floorDef(state.currentFloor).rooms.find((r) => r.id === sign)?.name ?? sign}` : '';
 });
 canvas.addEventListener('mouseleave', () => { hovered = undefined; });
 canvas.addEventListener('click', (e) => {
@@ -200,8 +221,10 @@ canvas.addEventListener('click', (e) => {
   const [x, y] = rel(e);
   const a = hitAgent(x, y);
   closeMenu();
-  if (a) inspector.select(a.view.id);
+  if (a && a === coord.agent) bubbles.open(canvas); // Bubbles himself: his panel
+  else if (a) inspector.select(a.view.id);
   else if (inRect(elevatorRect(), x, y)) showPicker();
+  else { const room = startSign(x, y); if (room) startAgent.open(room, canvas); }
 });
 
 // ---------------------------------------------------------------- header, feed, legend, banner
@@ -364,7 +387,7 @@ function goFloor(id: string): void {
 }
 
 let worldKey = '';
-const keyFor = (id: string) => JSON.stringify([id, layoutFor(id).rooms, state.building.divisions.map((d) => [d.id, d.color])]);
+const keyFor = (id: string) => JSON.stringify([id, !!editing, layoutFor(id).rooms, state.building.divisions.map((d) => [d.id, d.color])]);
 
 /** Puts state.currentFloor on screen: a fresh world and Sim with that floor's agents placed, or the Lobby. */
 function showFloor(): void {
@@ -377,8 +400,10 @@ function showFloor(): void {
   $('legend').hidden = lobby;
   if (!lobby) {
     worldKey = keyFor(id);
-    world = buildFloor(layoutFor(id), state.building.divisions);
+    world = buildFloor(layoutFor(id), state.building.divisions, { coordinator: !editing });
     sim = new Sim(world, { ambient: !reducedMotion?.matches });
+    coord.reset();
+    placeCoord();
     hovered = undefined;
     const now = performance.now() / 1000;
     for (const v of agentsOnFloor().sort(sessionsFirst)) sim.upsert(v, now, { place: true });
@@ -390,14 +415,20 @@ function showFloor(): void {
   renderFloorUi();
 }
 
+function placeCoord(): void {
+  coord.place(world);
+  coord.setOnDuty(!state.bubbles || state.bubbles.status.state === 'on');
+}
+
 /** Same floor, new layout or division colors (a building message): keep the Sim, re-seat it. */
 function syncWorld(): void {
   if (state.currentFloor === LOBBY) return;
   const key = keyFor(state.currentFloor);
   if (key === worldKey) return;
   worldKey = key;
-  world = buildFloor(layoutFor(state.currentFloor), state.building.divisions);
+  world = buildFloor(layoutFor(state.currentFloor), state.building.divisions, { coordinator: !editing });
   sim.setWorld(world);
+  placeCoord();
   R.invalidate();
   cw = 0; resize();
 }
@@ -418,6 +449,8 @@ function renderFloorUi(): void {
   floorBtn.disabled = !!editing;
   // Archived floors are view-only (an edit already open stays so its Save/Cancel still make sense).
   $('editBtn').hidden = id === LOBBY || (!editing && !!state.project(id)?.archived);
+  $('startBtn').hidden = id === LOBBY || !!editing || !!state.project(id)?.archived;
+  if ($('startBtn').hidden) startAgent.close();
   // The empty hint, only after the server has told us (not while connecting).
   const empty = $('emptyFloor');
   empty.hidden = !gotSnapshot || id === LOBBY || agentsOnFloor().length > 0;
@@ -575,8 +608,12 @@ function onMessage(m: ServerMsg): void {
   // Counts also drive the floor button, glow, empty hint and Lobby. Not on feed-only messages,
   // so a focused "need you" chip isn't replaced on every hook event.
   if (c.snapshot || c.floor || c.projects || c.building || c.upserted.length || c.removed.length) renderCounts();
-  if (c.bubbles) bubbles.render();
+  if (c.bubbles) { bubbles.render(); coord.setOnDuty(state.bubbles?.status.state === 'on'); }
   if (c.projects) { bubbles.render(); logView.projectsChanged(); }
+  if (c.log.length && state.currentFloor !== LOBBY) {
+    const floor = state.currentFloor, rooms = floorDef(floor).rooms;
+    coord.onLog(c.log, floor, (id) => state.agents.get(id), (id) => rooms.find((r) => r.id === id)?.name ?? id);
+  }
   if (c.log.length) { bubbles.onLog(c.log); logView.onLog(c.log); inspector.onLog(c.log); }
   if (c.newlyWaiting.length) chime();
   // A new approval the owner can answer here takes the inspector, unless one is already open there.
@@ -947,6 +984,7 @@ openFromHash();
   signs: () => signs,
   bubblesMarks: () => [...bubblesMarks],
   world: () => world,
+  coordinator: () => coord.agent,
   editRooms: () => (editing ? cloneRooms(editing.rooms) : null),
   /** Client coordinates of a room's body center or resize handle (edit mode), scrolling the map box to it. */
   editPoint(id: string, part: EditPart): { x: number; y: number; unit: number } {

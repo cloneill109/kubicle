@@ -44,6 +44,8 @@ If the server is not running, the hooks do nothing and sessions are unaffected. 
 - **Floors and the elevator.** Every project (its git root; worktrees map to the main repo) is a floor. The elevator button in the header (or the Lobby) takes you between floors. A floor has a top band and a bottom band of rooms on either side of a hall, with the elevator at the hall's left end. A room is 8 to 24 tiles wide.
 - **Divisions** are the kinds of room: QA, Cybersecurity, UX/UI, Front end, Back end, Animation, Image gen. They are files in `~/.kubicle/divisions/` (seeded on first start only when that folder is missing or empty).
 - **The Bullpen** is the one room every floor always has. It cannot be removed or given a division. Agents the office cannot place go there, and so do agents whose room was removed.
+- **Bubbles' office** sits in the middle of the top band on every floor. It is drawn by the office, not stored in any floor file, and is hidden while you edit the floor. Bubbles sits at the big desk and says what he just decided on this floor ("Sending Harbor to Front end", "OK'd for Harbor: Pushing to origin", "Checking Harbor's request with you"), with a dashed gold line to the agent concerned. He shows "z" when he is off or off duty. Click him to open the Bubbles panel.
+- **Speech bubbles** over agents are plain-language summaries of the current tool call ("Running the tests", "Editing main.ts"). They come from rules, not a model call. For Bash, the agent's own command description is used when it gives one. The raw command stays in the inspector (hover "Doing"), the recent activity list, the hook feed, and every approval card. Bubbles' approval lines always describe the command itself, never the agent's label for it.
 - **Edit floor** in the header lets you drag, resize, add and remove rooms, then Save. The default floor is never written to disk until its first edit.
 
 Upgrading from stage 1: existing projects become floors (in their old wing order), nothing is written just by viewing, and agents start in the Bullpen until they are started with a division (stage 2) or moved.
@@ -129,6 +131,15 @@ When you send a session its first prompt, Bubbles reads it and does two things: 
 - **The log.** Every intake is logged with kind `intake`: what Bubbles was shown, the room it picked, its confidence and briefing, or why it did not run (skipped, timeout, error). Read it with `kubicle log --kind intake` or the office Log view.
 - **Hooks.** The UserPromptSubmit hook line is `kubicle-hook 10 prompt` (timeout 12 s). An older install's line cannot deliver a briefing; the office shows a banner until you re-run `npm run install-hooks`.
 - **Auto mode.** In Claude Code auto mode the session's own classifier decides permissions, so no permission request reaches Bubbles. That is your choice of mode. Intake and the main-branch guard still apply.
+
+### Starting agents from the office
+
+**Start agent** in the header (or click a room's door sign) opens a dialog: pick a room, or leave it on **Let Bubbles choose**, and type an optional task. Start opens a new macOS Terminal window running interactive `claude` in the project folder, with the task as its first prompt. You talk to it in that window; it appears on the floor like any session.
+
+- **Subscription only.** The window runs `claude` from your login shell with every `ANTHROPIC_*` and `CLAUDE_CODE_USE_*` variable unset, the same rule as Bubbles. Kubicle itself makes no model call to start it.
+- **Rooms.** Picking a room sets `KUBICLE_ROOM`, so the agent goes straight there and Bubbles' intake does not run. **Let Bubbles choose** leaves it unset: Bubbles reads the first prompt, picks the room and adds his briefing.
+- **How.** The office writes a one-time script (mode 0700) under `<home>/run/`, which `open -a Terminal` runs and which deletes itself first. The task is passed as one quoted argument (`claude -- '<task>'`), never through AppleScript or a shell command line. Set `KUBICLE_TERMINAL` (for example `iTerm`) before `kubicle start` to use another terminal app.
+- **Limits.** Owner only (same login, origin and CSRF checks as approvals), at most 6 launches a minute, tasks up to 4000 characters, macOS only, not on archived floors or while editing a floor.
 
 ### In the session's own terminal (the Kubicle mod)
 

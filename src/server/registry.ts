@@ -228,6 +228,7 @@ export class Registry {
         case 'PreToolUse':
           setStatus(t, 'working');
           t.activity = e.activity ?? e.toolName ?? '';
+          if (e.summary) t.summary = e.summary; else delete t.summary;
           this.#pushLog(t, t.activity);
           break;
         case 'PostToolUse':

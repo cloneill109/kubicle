@@ -17,6 +17,7 @@ import type { Hub } from './hub.ts';
 import type { Projects } from './projects.ts';
 import type { Registry } from './registry.ts';
 import type { EventWriter, Store } from './store.ts';
+import { LaunchError, TASK_MAX, type Launch } from './launcher.ts';
 
 export const BODY_LIMIT = 2 * 1024 * 1024;
 export const BODY_TIMEOUT_MS = 10_000;
@@ -68,6 +69,8 @@ export interface HttpDeps {
     intake(r: IntakeRequest): Promise<IntakeOutcome>;
   };
   pushFeed(item: FeedItem): void;
+  /** "Start agent": opens a Terminal running claude in a room (absent: the route answers 501). */
+  launch?: Launch;
   /** A hook arrived with a missing or wrong ingest token (I4). */
   onBadToken?(): void;
   /**
@@ -580,6 +583,40 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     send(res, 204);
   }
 
+  const launches: number[] = []; // times of recent launches (rate limit: a burst can't open dozens of windows)
+  const LAUNCH_MAX = 6, LAUNCH_WINDOW_MS = 60_000;
+
+  async function agentStart(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!guard(req, res)) return;
+    const b = await readJson(req);
+    const err = (status: number, error: string) => send(res, status, JSON.stringify({ error }), JSON_HDR);
+    if (!isObj(b) || typeof b.projectId !== 'string' || typeof b.room !== 'string') return err(400, 'body must be { projectId, room, task }');
+    const task = b.task === undefined ? '' : b.task;
+    if (typeof task !== 'string' || Array.from(task).length > TASK_MAX) return err(400, `task must be text of at most ${TASK_MAX} characters`);
+    const project = d.projects.list().find((p) => p.id === b.projectId);
+    if (!project) return err(404, 'unknown project');
+    if (project.archived) return err(400, 'this floor is archived; restore it in the Lobby first');
+    const floor = d.building.snapshot().floors[project.id];
+    const room = b.room === '' ? { id: '', name: 'a room Bubbles picks' } : floor?.rooms.find((r) => r.id === b.room);
+    if (!room) return err(400, `no room "${b.room}" on this floor`);
+    try { if (!(await stat(project.id)).isDirectory()) throw new Error(); } catch { return err(400, `the project folder ${project.id} is missing`); }
+    if (!d.launch) return err(501, 'starting agents is not available here');
+    const t = Date.now();
+    while (launches.length && t - launches[0] > LAUNCH_WINDOW_MS) launches.shift();
+    if (launches.length >= LAUNCH_MAX) return err(429, `at most ${LAUNCH_MAX} agents a minute; wait a moment`);
+    try {
+      await d.launch({ cwd: project.id, room: room.id, task });
+    } catch (e) {
+      if (e instanceof LaunchError) return err(e.message.includes('macOS') ? 501 : 500, e.message);
+      throw e;
+    }
+    launches.push(t);
+    const item: FeedItem = { ts: t, event: 'Launch', agentName: 'Office', detail: `Opened a Terminal for a new agent in ${room.name}` };
+    d.pushFeed(item);
+    broadcast({ t: 'feed', item });
+    sendJson(res, 202, { room: room.id });
+  }
+
   function login(req: IncomingMessage, res: ServerResponse, url: URL): void {
     const id = d.auth.redeem(url.searchParams.get('code') ?? '');
     if (!id) return send(res, 403, LOGIN_HINT);
@@ -631,6 +668,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       if (mm) return projectPatch(req, res, param(mm[1]));
       mm = /^\/api\/floors\/([^/]+)$/.exec(p);
       if (mm) return floorSave(req, res, param(mm[1]));
+      if (p === '/api/agents/start') return agentStart(req, res);
       mm = /^\/api\/agents\/([^/]+)\/room$/.exec(p);
       if (mm) return agentRoom(req, res, param(mm[1]));
       mm = /^\/api\/bubbles\/(enabled|instructions|grants|revoke)$/.exec(p);

@@ -160,7 +160,8 @@ export class Inspector {
     setText($('iTask'), v.kind === 'subagent'
       ? `${roleLabel(v.role)} subagent working for ${parent?.name ?? 'its session'}`
       : v.cwd ? `Claude Code session in ${v.cwd}` : 'Claude Code session (no folder reported yet)');
-    setText($('iDoing'), v.activity || (v.status === 'idle' ? 'Waiting for a prompt' : '—'));
+    setText($('iDoing'), v.summary || v.activity || (v.status === 'idle' ? 'Waiting for a prompt' : '—'));
+    $('iDoing').title = v.summary && v.activity ? v.activity : ''; // the raw tool call, on hover
     setText($('iModel'), v.model ?? 'not reported yet');
     setText($('iConn'), LINK_TEXT);
 

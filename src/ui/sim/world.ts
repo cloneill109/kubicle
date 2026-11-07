@@ -2,7 +2,7 @@
 // either side of a 4-row hall, the elevator at the hall's left end. Pure data; no DOM, no Node imports.
 import { BULLPEN, type DivisionDef, type FloorDef, type RoomDef } from '../../shared/building.ts';
 
-export interface Room { id: string; name: string; kind: 'division' | 'bullpen'; division?: string; color?: string; x0: number; y0: number; x1: number; y1: number; doors: [number, number][] }
+export interface Room { id: string; name: string; kind: 'division' | 'bullpen' | 'coordinator'; division?: string; color?: string; x0: number; y0: number; x1: number; y1: number; doors: [number, number][] }
 export interface Furn { type: 'desk' | 'bigdesk' | 'table' | 'roundtable' | 'plant' | 'couch' | 'coffee' | 'fridge' | 'arcade' | 'shelf' | 'board'; x: number; y: number; w: number; h: number; room: string; decor?: boolean }
 export interface Cell { wall: boolean; room: string | null; block: boolean; door?: boolean }
 export interface World { cols: number; rows: number; grid: Cell[][]; rooms: Room[]; furn: Furn[]; elevator: { x: number; y: number }; breakSpots: [number, number][] }
@@ -17,6 +17,14 @@ const BOT_Y0 = 17, BOT_Y1 = 25, BOT_DOOR_Y = 16;
 /** x of the first room's left wall; columns 1..FIRST_WALL_X-1 of the hall are the elevator bay. */
 const FIRST_WALL_X = 2;
 const COLOR_RE = /^#[0-9a-f]{6}$/i;
+
+/**
+ * Bubbles' office: a view-only room the office adds in the middle of the top band. Not part of the
+ * FloorDef (never saved, never in edit mode). The id is not ID_RE-valid, so no floor room can collide.
+ */
+export const COORDINATOR = '@bubbles';
+export const COORDINATOR_COLOR = '#f2b84b';
+const COORDINATOR_WIDTH = 10;
 
 /**
  * Rows (dy from the room's top) per band. Top-band rooms open downward, so their far side is dy 0;
@@ -63,8 +71,14 @@ function normalize(r: RoomDef): RoomDef {
   return { ...r, band: r.band === 'top' ? 'top' : 'bottom', width: Math.min(24, Math.max(8, w)) };
 }
 
-export function buildFloor(floor: FloorDef, divisions: Pick<DivisionDef, 'id' | 'color'>[]): World {
+export function buildFloor(floor: FloorDef, divisions: Pick<DivisionDef, 'id' | 'color'>[], opts: { coordinator?: boolean } = {}): World {
   const defs = floor.rooms.map(normalize);
+  if (opts.coordinator) {
+    // Top center: before the middle top-band room (so with 4 top rooms it sits 2 | Bubbles | 2).
+    const tops = defs.flatMap((r, i) => (r.band === 'top' ? [i] : []));
+    const at = tops.length ? (tops[Math.ceil(tops.length / 2)] ?? tops[tops.length - 1] + 1) : 0;
+    defs.splice(at, 0, { id: COORDINATOR, name: 'Bubbles', band: 'top', width: COORDINATOR_WIDTH });
+  }
   const bandWidth = (b: 'top' | 'bottom') => {
     const rs = defs.filter((r) => r.band === b);
     return rs.reduce((s, r) => s + r.width, 0) + rs.length + 1;
@@ -107,6 +121,7 @@ export function buildFloor(floor: FloorDef, divisions: Pick<DivisionDef, 'id' | 
 function roomOf(def: RoomDef, divisions: Pick<DivisionDef, 'id' | 'color'>[], x0: number, y0: number, x1: number, y1: number, doors: [number, number][]): Room {
   const base = { id: def.id, name: def.name, x0, y0, x1, y1, doors };
   if (def.id === BULLPEN) return { ...base, kind: 'bullpen' };
+  if (def.id === COORDINATOR) return { ...base, kind: 'coordinator', color: COORDINATOR_COLOR };
   const color = divisions.find((d) => d.id === def.division)?.color;
   const r: Room = { ...base, kind: 'division' };
   if (def.division) r.division = def.division;
@@ -118,6 +133,16 @@ type Add = (type: Furn['type'], x: number, y: number, w: number, h: number, room
 
 function furnish(r: Room, band: 'top' | 'bottom', width: number, add: Add, breakSpots: [number, number][]): void {
   const B = BAND[band];
+  if (r.kind === 'coordinator') {
+    // One big desk facing the hall, a board behind it, plants in the far corners.
+    const dw = 4, dx = r.x0 + Math.floor((width - dw) / 2);
+    add('bigdesk', dx, r.y0 + B.desks[0], dw, 1, r.id);
+    add('plant', r.x0, r.y0 + B.far, 1, 1, r.id);
+    add('plant', r.x1, r.y0 + B.far, 1, 1, r.id);
+    add('shelf', r.x0 + 1, r.y0 + B.far, 2, 1, r.id);
+    if (band === 'top') add('board', r.x0 + 3, r.y0 - 1, Math.min(4, width - 6), 1, r.id, true);
+    return;
+  }
   // Desks: two rows of floor((w-2)/4), 2 tiles wide on a 4-tile pitch, centered.
   const k = Math.floor((width - 2) / 4);
   const off = 1 + Math.floor((width - 2 - (4 * k - 2)) / 2);

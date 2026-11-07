@@ -48,6 +48,8 @@ export interface AgentView {
   projectId: string; // '' = unassigned (no cwd known yet)
   status: AgentStatus;
   activity: string;
+  /** `activity` in plain language ("Running the tests"); absent for events from before it existed. */
+  summary?: string;
   model?: string;
   cwd?: string;
   startedAt: number;
