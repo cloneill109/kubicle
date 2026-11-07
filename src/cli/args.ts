@@ -20,6 +20,9 @@ export const USAGE = `usage: kubicle <command>
   floor resize-room <room-id> <width> [--project <dir>]
   division list
   division show <id>
+  secret set <name>                       store a secret; the value is read from stdin
+  secret list                             names and where each is stored (never values)
+  secret remove <name>
   grant push|merge [--branch <b>] [--uses <n>|--unlimited] [--for <30m|2h|1d, max 7d>] [--project <dir>]
                                           ask for a Bubbles grant (you confirm it in the office)
   instruct "<text>" [--project <dir>]     ask for a Bubbles instruction (all projects if no --project)
