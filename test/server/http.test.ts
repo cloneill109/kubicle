@@ -1200,3 +1200,45 @@ test('POST /api/divisions/:id/harness: owner only, saves + broadcasts, stale 409
     assert.equal((await control(s, cookie, path, b)).status, 400);
   }
 });
+
+test('POST /api/overrides/:projectId/:roomId: owner only, saves + broadcasts, null removes, 400/404/409, repo floor untouched', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const { proj, c } = await withProject(s, cookie);
+  mkdirSync(join(proj, '.kubicle'), { recursive: true });
+  const repoFloor = join(proj, '.kubicle', 'floor.yaml');
+  writeFileSync(repoFloor, 'revision: 1\nrooms:\n  - {id: bullpen, name: Bullpen, band: bottom, width: 14}\n  - {id: qa, name: QA, band: top, width: 12}\n');
+  const before = readFileSync(repoFloor, 'utf8');
+  const path = `/api/overrides/${encodeURIComponent(proj)}/qa`;
+  const raw = (headers: Record<string, string>) => fetch(`${s.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', origin: s.url, ...headers }, body: JSON.stringify({ baseRevision: 0, harness: {} }) });
+  assert.equal((await raw({})).status, 401);
+  assert.equal((await raw({ cookie })).status, 403);
+
+  const ok = await control(s, cookie, path, { baseRevision: 0, harness: { model: 'sonnet' } });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(await ok.json(), { revision: 1, rooms: { qa: { model: 'sonnet' } } });
+  await c.waitFor((m) => m.t === 'building' && m.building.overrides[proj]?.revision === 1);
+
+  const stale = await control(s, cookie, path, { baseRevision: 0, harness: {} });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(await stale.json(), { error: 'conflict', current: 1 });
+
+  const bad = await control(s, cookie, path, { baseRevision: 1, harness: { mcps: [] } });
+  assert.equal(bad.status, 400);
+  assert.equal((await bad.json()).error, 'harness has unknown key "mcps"');
+  for (const b of [{ harness: {} }, { baseRevision: -1, harness: {} }, { baseRevision: 1, harness: [] }, { baseRevision: 1 }]) {
+    assert.equal((await control(s, cookie, path, b)).status, 400);
+  }
+
+  const noRoom = await control(s, cookie, `/api/overrides/${encodeURIComponent(proj)}/docs`, { baseRevision: 1, harness: {} });
+  assert.equal(noRoom.status, 404);
+  assert.deepEqual(await noRoom.json(), { error: 'no room "docs" on this floor' });
+  const noProj = await control(s, cookie, '/api/overrides/%2Fnope/qa', { baseRevision: 0, harness: {} });
+  assert.equal(noProj.status, 404);
+  assert.deepEqual(await noProj.json(), { error: 'unknown project' });
+
+  const del = await control(s, cookie, path, { baseRevision: 1, harness: null });
+  assert.equal(del.status, 200);
+  assert.deepEqual(await del.json(), { revision: 2, rooms: {} });
+  assert.equal(readFileSync(repoFloor, 'utf8'), before);
+});

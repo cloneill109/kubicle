@@ -1,10 +1,11 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, statSync, watch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import {
-  defaultFloor, type Building, type DivisionDef, type FloorDef, type RoomDef,
+  defaultFloor, type Building, type DivisionDef, type FloorDef, type RoomDef, type RoomOverrides,
 } from '../../shared/building.ts';
 import type { ProjectRow } from '../../shared/protocol.ts';
 import type { Harness } from '../../shared/harness.ts';
+import { readOverrides, writeOverride, OverrideNotFound } from './overrides.ts';
 import { BuildingFileError, RefusedFileError, readDivision, readFloor, seedDivisions, slugFor, writeDivision, writeFloor } from './files.ts';
 
 type Origin = 'home' | 'repo';
@@ -22,7 +23,8 @@ export class BuildingService {
   private divisions = new Map<string, DivisionDef>();
   private floors = new Map<string, FloorDef>();
   private repoFloors = new Map<string, FloorDef>();
-  private built: Building = { divisions: [], floors: {}, warnings: [] };
+  private overrideFiles = new Map<string, RoomOverrides>();
+  private built: Building = { divisions: [], floors: {}, overrides: {}, warnings: [] };
   private builtJson = JSON.stringify(this.built);
   private sig = '';
 
@@ -93,6 +95,21 @@ export class BuildingService {
     return stored;
   }
 
+  /** Sets or (null) removes one room's override. Only ever writes <home>/overrides, never a repo file. */
+  saveOverride(projectId: string, roomId: string, harness: Harness | null, baseRevision: number): RoomOverrides {
+    if (!this.projects().some((p) => p.id === projectId && !p.archived)) throw new OverrideNotFound(projectId, 'unknown project');
+    const floor = this.built.floors[projectId] ?? defaultFloor();
+    if (!floor.rooms.some((r) => r.id === roomId)) throw new OverrideNotFound(projectId, `no room "${roomId}" on this floor`);
+    const file = this.overrideFile(projectId);
+    if (existsSync(file)) {
+      try { readOverrides(file); }
+      catch { throw new BuildingFileError(file, `fix or delete ${file} before editing these overrides`); }
+    }
+    const stored = writeOverride(file, roomId, harness, baseRevision);
+    this.refresh();
+    return stored;
+  }
+
   refresh(): void {
     this.reload();
     if (this.started) this.syncWatchers();
@@ -102,6 +119,7 @@ export class BuildingService {
   // ---- paths ----
   private divisionsDir(): string { return join(this.home, 'divisions'); }
   private homeFile(id: string): string { return join(this.home, 'floors', `${slugFor(id)}.yaml`); }
+  private overrideFile(id: string): string { return join(this.home, 'overrides', `${slugFor(id)}.yaml`); }
   private repoFile(id: string): string { return join(id, '.kubicle', 'floor.yaml'); }
   private repoDir(id: string): string { return join(id, '.kubicle'); }
 
@@ -128,6 +146,8 @@ export class BuildingService {
     const floors: Record<string, FloorDef> = {};
     const seenHome = new Set<string>();
     const seenRepo = new Set<string>();
+    const seenOver = new Set<string>();
+    const overrides: Record<string, RoomOverrides> = {};
     for (const p of this.projects()) {
       const home = this.homeFile(p.id);
       seenHome.add(home);
@@ -148,10 +168,29 @@ export class BuildingService {
           if (e instanceof RefusedFileError) this.repoFloors.delete(repo);
         }
       } else this.repoFloors.delete(repo);
-      if (!p.archived) floors[p.id] = this.repoFloors.get(repo) ?? this.floors.get(home) ?? defaultFloor();
+      const floor = this.repoFloors.get(repo) ?? this.floors.get(home) ?? defaultFloor();
+      if (!p.archived) floors[p.id] = floor;
+
+      // Overrides live only in <home>/overrides. A broken file keeps its last good version.
+      const ovf = this.overrideFile(p.id);
+      seenOver.add(ovf);
+      if (existsSync(ovf)) {
+        try { this.overrideFiles.set(ovf, readOverrides(ovf)); } catch (e) { problem(ovf, e); }
+      } else this.overrideFiles.delete(ovf);
+      const ov = this.overrideFiles.get(ovf);
+      if (ov && !p.archived) {
+        const known = new Set(floor.rooms.map((r) => r.id));
+        const rooms: Record<string, Harness> = {};
+        for (const [id, h] of Object.entries(ov.rooms)) {
+          if (known.has(id)) rooms[id] = h;
+          else warn.set(`${ovf}#${id}`, `override for unknown room "${id}" (${ovf})`);
+        }
+        overrides[p.id] = { revision: ov.revision, rooms };
+      }
     }
     for (const k of [...this.floors.keys()]) if (!seenHome.has(k)) this.floors.delete(k);
     for (const k of [...this.repoFloors.keys()]) if (!seenRepo.has(k)) this.repoFloors.delete(k);
+    for (const k of [...this.overrideFiles.keys()]) if (!seenOver.has(k)) this.overrideFiles.delete(k);
 
     this.sig = this.signature();
     const sortedFloors: Record<string, FloorDef> = {};
@@ -159,6 +198,7 @@ export class BuildingService {
     this.built = {
       divisions: [...this.divisions.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
       floors: sortedFloors,
+      overrides: Object.fromEntries(Object.keys(overrides).sort().map((k) => [k, overrides[k]!])),
       warnings: [...warn.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([, m]) => m),
     };
   }
@@ -174,7 +214,7 @@ export class BuildingService {
   private signature(): string {
     const files = [...this.divisionFiles()];
     try { files.push(this.divisionsDir()); } catch { /* ignore */ }
-    for (const p of this.projects()) { files.push(this.homeFile(p.id), this.repoFile(p.id)); }
+    for (const p of this.projects()) { files.push(this.homeFile(p.id), this.repoFile(p.id), this.overrideFile(p.id)); }
     return files.map((f) => {
       try { return `${f}:${statSync(f).mtimeMs}`; } catch { return `${f}:-`; }
     }).join('\n');
@@ -192,7 +232,7 @@ export class BuildingService {
     if (name === null) return true;
     const n = name.split('\\').join('/');
     if (!isHome) return n === 'floor.yaml';
-    return n === 'divisions' || n === 'floors' || /^(divisions|floors)\/[^/]*\.yaml$/.test(n);
+    return n === 'divisions' || n === 'floors' || n === 'overrides' || /^(divisions|floors|overrides)\/[^/]*\.yaml$/.test(n);
   }
 
   private syncWatchers(): void {
