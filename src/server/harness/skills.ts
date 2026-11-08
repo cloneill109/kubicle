@@ -95,7 +95,7 @@ export function importSkill(home: string, source: string, claudeDir: string): Sk
 }
 
 /** Copies real files only, and only entries whose real path stays inside the skill folder. */
-function copyContained(srcDir: string, dest: string, name: string): void {
+export function copyContained(srcDir: string, dest: string, name: string): void {
   const root = realpathSync(srcDir);
   const inside = (p: string): boolean => p === root || p.startsWith(root + sep);
   const seen = new Set<string>();
