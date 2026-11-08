@@ -484,7 +484,7 @@ const SUBST_CASE = /(?:\$\(|`)(?:[\s\S]*?(?:\$\(|`|[;&|(){\n]|\s(?:then|do|else|
  * or any doubt: an operator inside parens / `$(` / backticks, a comment, `$'...'`, a `$(` or backtick inside double
  * quotes, an unterminated quote, an odd terminator word, or a body with no terminator line.
  */
-interface HereBody { body: string; quoted: boolean }
+interface HereBody { body: string; quoted: boolean; /** [start, end) of body + terminator line in the input */ start: number; end: number }
 function cutHeredocs(cmd: string): { text: string; bodies: HereBody[] } | null {
   let out = '';
   const bodies: HereBody[] = [];
@@ -547,7 +547,7 @@ function cutHeredocs(cmd: string): { text: string; bodies: HereBody[] } | null {
           const end = nl < 0 ? cmd.length : nl;
           const line = cmd.slice(pos, end);
           const next = nl < 0 ? cmd.length : nl + 1;
-          if ((h.strip ? line.replace(/^\t+/, '') : line) === h.delim) { bodies.push({ body: cmd.slice(start, pos), quoted: h.quoted }); pos = next; break; }
+          if ((h.strip ? line.replace(/^\t+/, '') : line) === h.delim) { bodies.push({ body: cmd.slice(start, pos), quoted: h.quoted, start, end: next }); pos = next; break; }
           pos = next;
         }
       }
@@ -575,7 +575,8 @@ function runsCode(s: Segment): boolean {
   const w = stripPrefix(s.words);
   if (w.length === 0 || /[$`*?\[{]/.test(w[0]) || w[0].includes('/') && !SHELL_WORDS.has(lc(basename(w[0])))) return true;
   if (noexecShell(s.words)) return false;
-  return s.words.some(x => SHELL_WORDS.has(lc(basename(x))));
+  // `.` (source) only as the command word: `grep .`, `find .`, `cp a .` name a directory
+  return s.words.some(x => SHELL_WORDS.has(lc(basename(x))) && (x !== '.' || x === w[0]));
 }
 // Receivers that only read their stdin as data. Interpreters run it, but are let through on the push-text scan
 // (inline interpreter code is an accepted residual, see the header).
@@ -643,6 +644,7 @@ function closedGrammarSeg(s: Segment, receivers: Segment[]): boolean {
   if (s.pipeIn && !PURE_DATA.has(c)) return false;
   if (receivers.includes(s)) return true; // already passed dataReceiver
   if (INERT.has(c)) return true;
+  if (cdLiteral(s)) return true; // the push analysis treats a cd as moving HEAD/repo
   if (c === 'git') {
     let j = 1;
     while (j < w.length && GRANT_GIT_GLOBAL.has(w[j])) j++;
@@ -731,31 +733,46 @@ function writtenFilesInert(segs: Segment[]): boolean {
 
 /**
  * A write target a heredoc cut may sit beside: exactly /dev/null|stdout|stderr, or a plain relative path (or one
- * under /tmp/) of ordinary characters with no git/hook/husky in it. An ALLOWLIST: denying spellings (`.gi?`, `~`,
- * `$HOME`, `{a,b}`, `..`, absolute paths) failed open, and git reads config and hooks from paths we cannot see.
+ * under /tmp/, /private/tmp/ (macOS realpath of /tmp, where scratchpads live) or $TMPDIR/) of ordinary characters
+ * with no git/hook/husky in it, no `.`/`..` component, no shell rc/env file and no tool config dir (RC_FILE). An ALLOWLIST: denying spellings
+ * (`.gi?`, `~`, `$HOME`, `{a,b}`, `..`, other absolute paths) failed open, and git reads config and hooks from paths
+ * we cannot see.
  */
-const SAFE_WRITE = /^(\/tmp\/)?[A-Za-z0-9_][A-Za-z0-9_.+-]*(\/[A-Za-z0-9_][A-Za-z0-9_.+-]*)*$/;
-const safeWriteTarget = (t: string): boolean => STD_DEV.has(t) || (SAFE_WRITE.test(t) && !/git|hook|husky/.test(lc(t)));
+const WRITE_COMP = String.raw`(?!\.\.?(?:/|$))[A-Za-z0-9_.+-]+`;
+const SAFE_WRITE = new RegExp(String.raw`^(?:\./|/tmp/|/private/tmp/|\$TMPDIR/|\$\{TMPDIR\}/)?${WRITE_COMP}(?:/${WRITE_COMP})*$`);
+// shell rc/env files, and tool config dirs that run commands later on their own (Claude Code hooks, editor tasks)
+const RC_FILE = /(^|\/)\.([\w.-]*rc|env[\w.-]*|[\w.-]*profile|zshenv|zlogin|claude|config|vscode|cursor|devcontainer|idea|ssh|local)(\/|$)/i;
+/** `root` (the session cwd): an absolute target inside it is judged as the relative path below it. */
+function safeWriteTarget(t: string, root?: string): boolean {
+  if (STD_DEV.has(t)) return true;
+  if (root && isAbsolute(root) && !comps(lc(root)).includes('.git') && t.startsWith(root.replace(/\/+$/, '') + '/')) {
+    t = t.slice(root.replace(/\/+$/, '').length + 1);
+  }
+  return SAFE_WRITE.test(t) && !/git|hook|husky/.test(lc(t)) && !RC_FILE.test(t);
+}
+/** `cd DIR` with one literal directory that names no git/hook dir: changes nothing a heredoc cut relies on. */
+const cdLiteral = (s: Segment): boolean => s.words.length === 2 && s.words[0] === 'cd' && s.redirs.length === 0
+  && LITERAL.test(s.words[1]) && !/git|hook|husky/.test(lc(s.words[1]));
 /** Every write target of every segment (redirects, tee, base64 -o, sort -o, uniq OUT, cp/mv destination) is safe. */
-function writeTargetsSafe(segs: Segment[]): boolean {
+function writeTargetsSafe(segs: Segment[], root?: string): boolean {
   for (const s of segs) {
     for (const d of s.redirs) {
       if (!d.op.includes('>')) continue;
       if (d.op.includes('>&')) return false; // whole-token `>&N` / `>&-` were stripped; `>&WORD` writes a file
-      if (!safeWriteTarget(d.target)) return false;
+      if (!safeWriteTarget(d.target, root)) return false;
     }
     const w = s.words;
     const c = w[0] ?? '';
-    if (c === 'tee' && !w.slice(1).every(a => a.startsWith('-') || safeWriteTarget(a))) return false;
+    if (c === 'tee' && !w.slice(1).every(a => a.startsWith('-') || safeWriteTarget(a, root))) return false;
     if (c === 'base64' || c === 'sort') {
       for (let i = 1; i < w.length; i++) {
         const o = outOperand(w, i);
-        if (o !== null && !safeWriteTarget(o)) return false; // '' (unreadable) fails too
+        if (o !== null && !safeWriteTarget(o, root)) return false; // '' (unreadable) fails too
       }
     }
     if (c === 'uniq') {
       const ops = w.slice(1).filter(a => !a.startsWith('-') || a === '-');
-      if (ops.length >= 2 && !safeWriteTarget(ops[ops.length - 1])) return false;
+      if (ops.length >= 2 && !safeWriteTarget(ops[ops.length - 1], root)) return false;
     }
     if (c === 'cp' || c === 'mv') {
       // short flags only (no -t DIR / -S SUFFIX / long options); the destination is the last operand (a
@@ -763,7 +780,7 @@ function writeTargetsSafe(segs: Segment[]): boolean {
       const args = w.slice(1);
       if (args.some(a => (a.startsWith('-') && !/^-[A-Za-z]+$/.test(a)) || /^-[A-Za-z]*[tS]/.test(a))) return false;
       const ops = args.filter(a => !a.startsWith('-'));
-      if (ops.length < 2 || !safeWriteTarget(ops[ops.length - 1].replace(/(.)\/$/, '$1'))) return false;
+      if (ops.length < 2 || !safeWriteTarget(ops[ops.length - 1].replace(/(.)\/$/, '$1'), root)) return false;
     }
   }
   return true;
@@ -773,30 +790,125 @@ const TOK_END = String.raw`(?=[\s;&|)]|$)`;
 const DUP_FD = new RegExp(String.raw`(?<=^|[\s;&|()])\d+>&(?:\d+|-)${TOK_END}|>&(?:\d+|-)${TOK_END}`, 'g');
 const TO_NULL = new RegExp(String.raw`(?<=^|[\s;&|()])\d+>>?\s*\/dev\/null${TOK_END}|>>?\s*\/dev\/null${TOK_END}`, 'g');
 
-function heredocVerdict(cmd: string, ctx: RulesCtx): Protected | null | undefined {
+// `${TMPDIR}/` is `$TMPDIR/`: the only braced expansion a heredoc cut accepts
+const TMPDIR_BRACED = /\$\{TMPDIR\}(?=\/)/g;
+interface HeredocCut { text: string; bodies: HereBody[]; segs: Segment[]; receivers: Segment[] }
+/**
+ * The heredoc cut shared by the push/merge and self verdicts, or undefined (= classify the whole text as commands)
+ * unless: the cutter is sure where every body is; each body is inert (a quoted delimiter, or no `$(`, backtick,
+ * `${`, `$[` and no line ending in `\`); the text outside the bodies has no `${` (but `${TMPDIR}/`), `$[`, process
+ * substitution or `{ ...; }` group; no segment may run code from data (a shell word anywhere, a path or opaque command
+ * word: runsCode); every receiver is on the DATA_RECEIVERS allowlist; and no body can reach an executor through a
+ * pipe: every segment reading a pipe after the first receiver is pure data (cat, grep, tail, ...).
+ */
+function heredocCutOf(cmd: string): HeredocCut | undefined {
   const cut = cutHeredocs(cmd);
   if (!cut) return undefined;
-  if (/\$[{[]|[<>]\(/.test(cut.text)) return undefined;
+  const outside = cut.text.replace(TMPDIR_BRACED, '$TMPDIR');
+  if (/\$[{[]|[<>]\(/.test(outside)) return undefined;
   if (cut.bodies.some(b => !b.quoted && (/\$[([{]|`/.test(b.body) || /\\\n|\\$/.test(b.body)))) return undefined;
-  const text = cut.text.replace(DUP_FD, ' ').replace(TO_NULL, ' ');
+  const text = outside.replace(DUP_FD, ' ').replace(TO_NULL, ' ');
   const segs = segmentsOf(text);
   if (segs.some(s => runsCode(s) || s.words.some(w => w === '{' || w === '}'))) return undefined;
   const receivers = segs.flatMap(s => s.redirs.filter(r => HEREDOC_OP.test(r.op)).map(() => s));
   if (receivers.length !== cut.bodies.length || !receivers.every(dataReceiver)) return undefined;
-  if (!segs.every(s => closedGrammarSeg(s, receivers))) return undefined;
-  if (!writeTargetsSafe(segs) || !writtenFilesInert(segs)) return undefined;
-  for (let k = 0; k < cut.bodies.length; k++) {
-    const body = lc(cut.bodies[k].body.replace(/['"\\]/g, ''));
+  // conservative: `$(...)` sub-segments interleave with their pipeline, so after the first receiver EVERY pipe reader counts
+  const first = segs.findIndex(s => receivers.includes(s));
+  if (segs.some((s, i) => s.pipeIn && i >= first && !pipeDataSeg(s))) return undefined;
+  return { text, bodies: cut.bodies, segs, receivers };
+}
+
+/** A pipe reader that only filters text: a PURE_DATA command, or exactly `sed -n N[,M]p` (no `e`/`w` command). */
+const pipeDataSeg = (s: Segment): boolean => PURE_DATA.has(s.words[0] ?? '')
+  || (s.words.length === 3 && s.words[0] === 'sed' && s.words[1] === '-n' && /^(\d+|\$)(,(\d+|\$))?p$/.test(s.words[2]));
+
+// Names whose assignment changes what a later command runs or loads.
+const SENS_ASSIGN = /^(PATH|HOME|ENV|BASH_ENV|CDPATH|IFS|PS4|PROMPT_COMMAND|SHELLOPTS|BASHOPTS|GLOBIGNORE|GIT_\w*|XDG_\w*|LD_\w*|DYLD_\w*|NODE_\w*|NPM_\w*|PYTHON\w*|PERL\w*|RUBY\w*)=/i;
+/**
+ * The OPEN grammar beside a heredoc cut (when the closed grammar does not hold): any program may sit beside the cut
+ * (npm test, node --test, tsc, sed -n, git commit), as long as nothing changes how a later command is found or
+ * loaded (no env prefix or wrapper word, no export/declare, no PATH-like assignment), every cd names a literal
+ * directory, nothing names a `.git` path, and every file write lands on a safe target (writeTargetsSafe; an absolute
+ * path inside the session cwd counts as the relative path below it). Bodies
+ * that are not interpreter input are then also read as commands (persistedBodyVerdict): a later program may run them.
+ */
+function openGrammar(segs: Segment[], root?: string): boolean {
+  for (const s of segs) {
+    const w = s.words;
+    if (w.length > 0 && w.every(x => ENV_ASSIGN.test(x))) { if (w.some(x => SENS_ASSIGN.test(x))) return false; continue; }
+    if (stripPrefix(w).length !== w.length || ENV_SETTERS.has(w[0] ?? '')) return false;
+    if (CD_CMDS.has(lc(basename(w[0] ?? ''))) && !cdLiteral(s)) return false;
+    if ([...w, ...s.redirs.map(d => d.target)].some(x => lc(x).includes('.git'))) return false;
+  }
+  return writeTargetsSafe(segs, root);
+}
+
+// a glob command word inside a body counts only when it could name git/gh/hub (`/usr/bin/gi?`), not code (`s[:5]`)
+const GITISH = ['git', 'gh', 'hub', 'git-push', 'git-merge', 'git-rebase', 'git-subtree', 'git-update-ref'];
+function gitishGlob(w: string): boolean {
+  if (!isGlobWord(w) || /^\*+$/.test(basename(w) || w)) return false; // `* item`, `dir/**/*`: markdown, not a binary
+  if (/\{[^{}]*\.\.[^{}]*\}/.test(w)) return true; // `{f..h}it`: a sequence can spell anything
+  const cands: Cand[] = [];
+  expandBraces(w, cands, { n: 64 });
+  // after expansion a brace is literal (`{}`, `({`): match it as itself, not as the matcher's wildcard
+  return cands.some(c => c.open || GITISH.some(g => compMatch((basename(c.path) || c.path).replace(/[{}]/g, '[$&]'), g)));
+}
+const INTERP_RECEIVER = new Set(['python', 'python3', 'node']);
+/**
+ * A body that is not interpreter input (a file written by cat/tee, a commit message) is read as commands too, as if
+ * it ran later in this command (`cat > package.json` then `npm test`; a hook reading the message). Interpreter input
+ * stays the accepted residual (see the header).
+ */
+function persistedBodyVerdict(h: HeredocCut, ctx: RulesCtx): Protected | null {
+  for (let k = 0; k < h.bodies.length; k++) {
+    const w = stripPrefix(h.receivers[k].words);
+    if (INTERP_RECEIVER.has(w[0])) continue;
+    const body = h.bodies[k].body;
+    const hit = pushMergeVerdict(body, lc(body.replace(/['"\\]/g, '')), segmentsOf(body), ctx, gitishGlob);
+    if (hit) return { ...hit, reason: `${hit.reason.replace(/:[\s\S]*$/, '')} in a heredoc written by ${w[0]}: ${body.slice(0, 100)}` };
+  }
+  return null;
+}
+
+function heredocVerdict(cmd: string, ctx: RulesCtx): Protected | null | undefined {
+  const h = heredocCutOf(cmd);
+  if (!h) return undefined;
+  const { text, segs, receivers, bodies } = h;
+  const closed = segs.every(s => closedGrammarSeg(s, receivers)) && writeTargetsSafe(segs, ctx.cwd) && writtenFilesInert(segs);
+  if (!closed && !openGrammar(segs, ctx.cwd)) return undefined;
+  for (let k = 0; k < bodies.length; k++) {
+    const body = lc(bodies[k].body.replace(/['"\\]/g, ''));
     const gh = /(^|[^\w-])gh(?![\w-])/.test(body) && /(^|[^\w-])api(?![\w-])/.test(body);
     if (PM_TEXT.test(body) || gh) {
       const word = stripPrefix(receivers[k].words)[0];
       return { kind: 'push', branch: null, reason: `push or merge text in a heredoc fed to ${word}` };
     }
   }
+  if (!closed) { const p = persistedBodyVerdict(h, ctx); if (p) return p; }
   return pushMergeVerdict(text, lc(text.replace(/['"\\]/g, '')), segs, ctx);
 }
 
-function pushMergeVerdict(cmd: string, nm: string, segs: Segment[], ctx: RulesCtx): Protected | null {
+/**
+ * Self verdict input: the command with every body fed to a pure-data receiver (cat, tee, ..., `git commit -F -`)
+ * removed, so a file that merely MENTIONS ~/.kubicle or office.db is not self-administration. The redirect/tee
+ * target stays in the text, so a write INTO the Kubicle home or office.db is still caught. Bodies fed to an
+ * interpreter (python3 -, node -) stay: they can open any file. Unchanged when the cut is in any doubt.
+ */
+function selfText(cmd: string): string {
+  const h = cmd.includes('<<') ? heredocCutOf(cmd) : undefined;
+  if (!h) return cmd;
+  let out = '';
+  let at = 0;
+  h.bodies.forEach((b, k) => {
+    const w = stripPrefix(h.receivers[k].words);
+    if (!PURE_DATA.has(w[0]) && w[0] !== 'git') return;
+    out += cmd.slice(at, b.start);
+    at = b.end;
+  });
+  return out + cmd.slice(at);
+}
+
+function pushMergeVerdict(cmd: string, nm: string, segs: Segment[], ctx: RulesCtx, globWord: (w: string) => boolean = isGlobWord): Protected | null {
   const mergeKind = (): 'push' | 'merge' => (nm.includes('merge') ? 'merge' : 'push');
   // HTTP: GitHub API writes, and writes whose URL we cannot read (the target may be GitHub)
   const httpSegs = segs.filter(isHttpSeg);
@@ -813,7 +925,7 @@ function pushMergeVerdict(cmd: string, nm: string, segs: Segment[], ctx: RulesCt
   }
   // a glob in the command word can expand to any binary (`/usr/bin/gi?`, `~/bin/g*`): never provable
   const words0 = segs.map(cmdWord);
-  if (words0.some(w => w !== undefined && isGlobWord(w))) {
+  if (words0.some(w => w !== undefined && globWord(w))) {
     return { kind: 'push', branch: null, reason: `glob in command word: ${cmd.slice(0, 120)}` };
   }
   const gitWord = GIT_WORD.test(nm);
@@ -1396,14 +1508,20 @@ function classify(toolName: string, input: unknown, ctx: RulesCtx, mode: 'all' |
     const nm = lc(cmd.replace(/['"\\]/g, ''));
     // fd duplication and /dev/null redirects are harmless; every other redirect stays visible as a word
     const segs = segmentsOf(cmd.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' '));
-    // heredoc bodies fed to non-shells are data for the push/merge verdict (self/script checks still see the full text)
+    // heredoc bodies fed to non-shells are data for the push/merge verdict (the script check still sees the full text)
     const pmVerdict = (): Protected | null => {
       const h = heredocVerdict(cmd, ctx);
       return h !== undefined ? h : pushMergeVerdict(cmd, nm, segs, ctx);
     };
+    // bodies written by cat/tee are data for the self verdict too (selfText); interpreter bodies are not
+    const selfVerdict = (): Protected | null => {
+      const sc = selfText(cmd);
+      if (sc === cmd) return selfBash(cmd, nm, segs, ctx);
+      return selfBash(sc, lc(sc.replace(/['"\\]/g, '')), segmentsOf(sc.replace(/\d*>&\d+/g, ' ').replace(/\d*>>?\s*\/dev\/null/g, ' ')), ctx);
+    };
     if (mode === 'pm') shellHit = pmVerdict();
-    else if (mode === 'rest') shellHit = selfBash(cmd, nm, segs, ctx) ?? (ctx.strictScripts ? scriptBash(segs) : null);
-    else shellHit = selfBash(cmd, nm, segs, ctx) ?? pmVerdict() ?? (ctx.strictScripts ? scriptBash(segs) : null);
+    else if (mode === 'rest') shellHit = selfVerdict() ?? (ctx.strictScripts ? scriptBash(segs) : null);
+    else shellHit = selfVerdict() ?? pmVerdict() ?? (ctx.strictScripts ? scriptBash(segs) : null);
     // an MCP tool that runs a command is still checked by name below
     if (shellHit || !toolName.startsWith('mcp__')) return shellHit;
   }

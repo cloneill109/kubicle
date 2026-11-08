@@ -571,3 +571,18 @@ test('final M2: the office wait is shortened by the time triage took (total stay
   assert.ok(ms < 2600, `triage + office wait took ${Math.round(ms)} ms (limit ~2000)`);
   assert.equal(s.fakeCalls(), 1);
 });
+
+test('AskUserQuestion is a question for the owner, not a permission: no triage, no office wait, straight to the terminal', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  await c.waitFor((m) => m.t === 'snapshot' && 'bubbles' in m);
+  const t0 = performance.now();
+  const r = await perm(s, 'p-ask', '', { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Which layout?', options: [{ label: 'A' }, { label: 'B' }] }] } });
+  const ms = performance.now() - t0;
+  assert.equal(r.body.trim(), '');
+  assert.ok(ms < 1000, `took ${ms} ms`);
+  assert.equal(s.fakeCalls(), 0, 'Bubbles never triages a question');
+  assert.ok(!c.msgs.some((m) => m.t === 'agent' && m.agent.id === 'p-ask' && m.agent.pending?.answerable === true), 'no answerable office card');
+  assert.ok(!(await logOf(s)).some((e) => e.kind === 'triage'));
+});

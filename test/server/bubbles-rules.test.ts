@@ -778,7 +778,6 @@ describe('heredoc bodies', () => {
       `cat <<'EOF'\n${O}\nEOF\ntouch a; git show`,
       `sort -o out.txt <<'EOF'\n${O}\nEOF\ngit status`,
       `uniq - out.txt <<'EOF'\n${O}\nEOF\ngit status`,
-      'cat <<-EOF > a.txt\n\tcount(*) x\n\tEOF\ngit status',
       `cat > out.txt <<'EOF'\n${O}\nEOF\nls && git --no-pager log -1 && echo done`,
       // base64 -o / uniq IN OUT / sort -o destinations get the written-file checks
       `base64 -D -o s <<'EOF'\n${O}\nEOF\n./s`,
@@ -794,6 +793,9 @@ describe('heredoc bodies', () => {
       `cat <<'EOF'\n${O}\nEOF\ngit status > /dev/stdout`,
       `uniq -c <<'EOF'\n${O}\nEOF`,
       'git commit -F - <<\'EOF\'\nfix: parser edge\nEOF',
+      // owner prompt flood: an inert body written next to git is allowed by the open grammar (the body is still
+      // read as commands, and the write target must pass safeWriteTarget); the obfuscated-body rows above still ask
+      'cat <<-EOF > a.txt\n\tcount(*) x\n\tEOF\ngit status',
     ]) assert.equal(pm(c), null, c);
   });
 
@@ -839,5 +841,108 @@ describe('heredoc bodies', () => {
 
   test('a here-string is not a heredoc', () => {
     assert.equal(pm('cat <<<x\ngit push origin main\nx')?.hit.kind, 'push');
+  });
+});
+
+// ---- owner prompt flood (bubbles-2026-11 log): file edits classed as pushes / self-administration ----
+// Shapes taken from real escalations; paths and contents are made up. Every one of these is an ordinary edit.
+describe('heredoc edits are not pushes', () => {
+  const both = (command: string) => protectedAction('Bash', { command }, pmCtx);
+  const SCRATCH = '/private/tmp/claude-501/-w-repo/0d1e2f3a-aaaa-bbbb-cccc-1234567890ab/scratchpad';
+  const PY = "p='src/ui/main.ts'; s=open(p).read()\ndef rep(old,new):\n    global s\n    assert s.count(old)==1, old[:60]\n    s=s.replace(old,new)\nrep(\"a\",\"b\")\nopen(p,'w').write(s)\nprint(s[:5])";
+  const TS = "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('x', () => {\n  const xs = [[1]];\n  assert.equal(xs.map((x) => x[0])[0], 1);\n});";
+  const O = 'G=git; $G $(printf pu)sh origin main';
+
+  test('fix A: a python heredoc beside cd / npm test / node --test is data', () => {
+    for (const c of [
+      `cd /w/repo && python3 - <<'EOF'\n${PY}\nEOF`,
+      `cd /w/repo\npython3 - <<'EOF'\n${PY}\nEOF\nnpm test 2>&1 | grep -E "ℹ (tests|pass|fail)|✖"; npm run typecheck 2>&1 | tail -5`,
+      `python3 - <<'EOF'\n${PY}\nEOF\nnode --disable-warning=ExperimentalWarning --test test/ui/a.test.ts 2>&1 | grep -E "^not ok|ℹ (pass|fail)"`,
+      `grep -n "door sign" README.md | head; python3 - <<'E'\n${PY}\nE\nnpm run build:ui >/dev/null 2>&1; (npm test 2>&1 | grep -E "^not ok"; npm run test:e2e 2>&1 | tail -3)`,
+      `cd /w/repo; mkdir -p test/server; cat > test/server/x.test.ts <<'EOF'\n${TS}\nEOF\nnode --disable-warning=ExperimentalWarning --test test/server/x.test.ts 2>&1 | tail -8`,
+      `cd /w/repo\ncat >> test/server/x.test.ts <<'EOF'\n${TS}\nEOF\npython3 - <<'EOF'\n${PY}\nEOF\nfor f in a b; do node --test test/server/$f.test.ts 2>&1 | grep -E "^# (pass|fail)"; done`,
+      // a report written next to a commit
+      `cd /w/repo; cat > .superpowers/sdd/task-3-report.md <<'EOF'\n# Task 3\n\n- tests: 12/12 (\`npm test\`)\n- see s[0] notes\nEOF\ngit add -A && git commit -q -m "feat(harness): per-room overrides" && git log --oneline -1`,
+      `cd /w/repo; git add src test && git commit -q -F - <<'EOF'\nfeat(harness): secrets in the OS keyring\n\nCo-Authored-By: X <x@example.com>\nEOF\ngit log --oneline -1; git status --short`,
+    ]) {
+      assert.equal(pm(c), null, c);
+      assert.equal(both(c), null, c);
+    }
+  });
+
+  test('fix B: cd to a literal path and scratchpad writes under /private/tmp or $TMPDIR', () => {
+    for (const c of [
+      `mkdir -p ${SCRATCH} && cat > ${SCRATCH}/a.py <<'EOF'\n${PY}\nEOF\npython3 ${SCRATCH}/a.py`,
+      `cat > $TMPDIR/b.py <<'EOF'\n${PY}\nEOF\npython3 $TMPDIR/b.py`,
+      `cat > \${TMPDIR}/b.py <<'EOF'\n${PY}\nEOF\npython3 \${TMPDIR}/b.py`,
+      `cd /w/repo && cat > ${SCRATCH}/c.mjs <<'EOF'\nconsole.log([1][0]);\nEOF\nnode ${SCRATCH}/c.mjs`,
+      `cd /w/repo && cat <<'EOF'\nx[0]\nEOF`,
+      // an absolute path inside the session cwd, `grep .`, `sed -n N,Mp` reading a pipe, `./x`, `{}` and `dir/**/*` in a body
+      `cat > /w/repo/src/a.ts <<'EOF'\nconst o = ({});\nEOF\ngrep -c . src/a.ts`,
+      `python3 - <<'EOF'\n${PY}\nEOF\ngrep -n "rep" src/ui/main.ts | sed -n 1,8p; npm run typecheck 2>&1 | grep -v "^>" | grep .`,
+      `cp ${SCRATCH}/shoot.mjs ./.shoot-tmp.mjs && cat > ${SCRATCH}/r.md <<'EOF'\n# Report\nplugins/cache/**/skills/*\n* item\nEOF`,
+    ]) {
+      assert.equal(pm(c), null, c);
+      assert.equal(both(c), null, c);
+    }
+  });
+
+  test('fix C: a body written by cat/tee that merely mentions Kubicle state is not self-administration', () => {
+    for (const c of [
+      `cd /w/repo; cat >> README.md <<'EOF'\nKubicle keeps its state in ${home}/office.db; see the bubbles log.\nEOF`,
+      `cat > test/server/y.test.ts <<'EOF'\nconst home = '${home}';\nconst db = join(home, 'office.db');\nEOF\nnode --test test/server/y.test.ts`,
+      `tee docs/notes.md <<'EOF' >/dev/null\n~/.kubicle/office.db holds the log\nEOF`,
+      `git commit -q -F - <<'EOF'\nfix: never write ~/.kubicle/secrets.yaml\nEOF`,
+    ]) assert.equal(both(c), null, c);
+  });
+
+  test('still protected: pushes, also next to a heredoc', () => {
+    for (const c of [
+      'git push origin main', 'git push --force', 'git push --force origin feature', 'cd /x && git push origin main',
+      'bash <<\'EOF\'\ngit push origin main\nEOF',
+      `sh -s <<'EOF'\n${O}\nEOF`,
+      `cd /w/repo && bash <<'EOF'\n${O}\nEOF`,
+      `cd /w/repo && cat <<'EOF' | bash\n${O}\nEOF`,
+      `cd /w/repo && cat <<'EOF' | node\n${O}\nEOF`,
+      `cd /w/repo && python3 - <<'EOF'\n${PY}\nEOF\ngit push origin main`,
+      `cd /w/repo && python3 - <<'EOF'\n${PY}\nEOF\nnpm test && git push --force origin feature`,
+      `cd /w/repo && python3 - <<'EOF'\nimport subprocess\nsubprocess.run(["git", "push", "origin", "main"])\nEOF\nnpm test`,
+      `cd /w/repo && cat > notes.md <<'EOF'\n${PY}\nEOF\ngit push origin HEAD:main`,
+      // data that a later program may run: the body is still read as commands when it is written to a file
+      `cd /w/repo && cat > package.json <<'EOF'\n{"scripts":{"test":"${O}"}}\nEOF\nnpm test`,
+      `cd /w/repo && cat > scripts/x.sh <<'EOF'\n/usr/bin/gi? $(printf pu)sh origin main\nEOF\nnpm test`,
+      `cd /w/repo && cat > .git/hooks/pre-push <<'EOF'\n${O}\nEOF\nnpm test`,
+      `cat > /private/tmp/../../w/repo/.git/hooks/x <<'EOF'\n${O}\nEOF\nnpm test`,
+      `cat > /w/repo/.git/hooks/pre-push <<'EOF'\n${O}\nEOF\nnpm test`,
+      `cat > /w/repo/../x/s <<'EOF'\n${O}\nEOF\nnpm test`,
+      `cat > s.md <<'EOF'\n{f..h}it $(printf pu)sh origin main\nEOF\nnpm test`,
+      `cat > s.md <<'EOF'\n/usr/bin/g{i,x}t $(printf pu)sh origin main\nEOF\nnpm test`,
+      `cat <<'EOF' | sed -n 1p\ngit push origin main\nEOF`,
+      `cat <<'EOF' | sed e\n${O}\nEOF`,
+      `python3 - <<'EOF'\n${PY}\nEOF\n. ./s`,
+      `cat > ls <<'EOF'\n${O}\nEOF\nchmod +x ls; export PATH=.:$PATH; ls`,
+      `cat > .claude/settings.local.json <<'EOF'\n{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"${O}"}]}]}}\nEOF`,
+      `cat > .vscode/tasks.json <<'EOF'\n{"command":"${O}"}\nEOF`,
+      `cat > .envrc <<'EOF'\n${O}\nEOF`,
+      `cat > ls <<'EOF'\n${O}\nEOF\nchmod +x ls && PATH=.:$PATH ls`,
+      `cd /w/repo && cat > s <<'EOF'\n${O}\nEOF\n./s`,
+      `cd /w/repo && cat > $X/s <<'EOF'\n${O}\nEOF\nnpm test`,
+    ]) assert.equal(pm(c)?.hit.kind, 'push', c);
+  });
+
+  test('still protected: writes into the Kubicle home or office.db, and interpreter bodies that touch them', () => {
+    for (const c of [
+      `cat > ${home}/bubbles.yaml <<'EOF'\ngrants: all\nEOF`,
+      `cd /w/repo && cat >> ${home}/bubbles.yaml <<'EOF'\ngrants: all\nEOF\nnpm test`,
+      `tee ${home}/policy.json <<'EOF'\n{}\nEOF`,
+      `cat > /tmp/office.db <<'EOF'\nx\nEOF`,
+      `cd /w/repo && python3 - <<'EOF'\nopen('${home}/bubbles.yaml','w').write('grants: all')\nEOF`,
+      `node - <<'EOF'\nrequire('fs').rmSync('${home}', { recursive: true })\nEOF`,
+      `cat <<'EOF' | python3\nimport shutil; shutil.rmtree('${home}')\nEOF`,
+      `cd /w/repo && rm -rf ${home}`,
+    ]) assert.equal(both(c)?.kind, 'self', c);
+    // `~` spellings against a Kubicle home under the real home directory
+    for (const c of ["cat > ~/.kubicle/bubbles.yaml <<'EOF'\ngrants: all\nEOF", "cd /work/app && tee ~/.kubicle/x <<'EOF'\nx\nEOF\nnpm test",
+      "cat >> ~/.kub*/bubbles.yaml <<'EOF'\nx\nEOF", "cat > office.db <<'EOF'\nx\nEOF"]) assert.equal(bashH(c)?.kind, 'self', c);
   });
 });
