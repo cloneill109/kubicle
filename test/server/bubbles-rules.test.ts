@@ -946,3 +946,47 @@ describe('heredoc edits are not pushes', () => {
       "cat >> ~/.kub*/bubbles.yaml <<'EOF'\nx\nEOF", "cat > office.db <<'EOF'\nx\nEOF"]) assert.equal(bashH(c)?.kind, 'self', c);
   });
 });
+
+// ---- review of bc02867: a body read back as a path, and git config injected on the command line ----
+describe('heredoc bodies used as paths; git -c', () => {
+  const both = (command: string) => protectedAction('Bash', { command }, pmCtx);
+  const DB = `${home}/office.db`;
+  test('a body the same command reads back (substitution, xargs/read, stdin, the written file) stays visible to the self rule', () => {
+    for (const c of [
+      `cat > p <<'EOF'\n${DB}\nEOF\ncp evil.db "$(cat p)"`,
+      `cat > p <<'EOF'\n${DB}\nEOF\nsqlite3 "$(cat p)" 'delete from grants'`,
+      `cat > p <<'EOF'\n${DB}\nEOF\necho x > "$(cat p)"`,
+      `cat > p <<'EOF'\n${DB}\nEOF\nxargs rm < p`,
+      `cat > p <<'EOF'\n${DB}\nEOF\nrm \`cat p\``,
+      `tee p <<'EOF'\n${DB}\nEOF\nsqlite3 "$(cat p)" 'delete from grants'`,
+      `cat > p <<'EOF'\n.kubicle/office.db\nEOF\ncp e.db "$HOME/$(cat p)"`,
+      `cat > p <<'EOF'\n${home}\nEOF\nrm -rf "$(cat p)"`,
+      `cat > p <<'EOF'\n${home}\nEOF\nwhile read f; do rm -rf "$f"; done < p`,
+      `cat > p <<'EOF'\n${home}\nEOF\ntar -cf x.tar --remove-files -T p`,
+      `cat <<'EOF' | xargs rm -rf\n${home}\nEOF`,
+      `git commit -F - <<'EOF'\n${DB}\nEOF\nrm "$(git log -1 --format=%B)"`,
+    ]) assert.equal(both(c)?.kind, 'self', c);
+    // still data: a written file nobody reads back
+    assert.equal(both(`cat > notes.md <<'EOF'\nstate: ${DB}\nEOF\nnpm test`), null);
+  });
+
+  test('git -c / --config-env / config env vars fail closed (hooksPath, fsmonitor, aliases, ...)', () => {
+    for (const c of [
+      'git -c core.hooksPath=d commit -m x', "git -c core.fsmonitor='./x' status", 'git -c alias.st=x st',
+      'git -c include.path=/tmp/c log', 'git --config-env=core.pager=P log', 'git -c core.sshCommand=x fetch',
+      'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=d git commit -m x',
+      'HOME=/tmp/h git commit -m x', 'XDG_CONFIG_HOME=/tmp/h git status', 'export GIT_CONFIG_GLOBAL=/tmp/c; git commit -m x',
+    ]) assert.equal(pm(c)?.hit.kind, 'push', c);
+    for (const c of ['GIT_PAGER=cat git log -1', 'git --no-pager log -1', 'git commit -m "use -c core.x"']) assert.equal(pm(c), null, c);
+  });
+
+  test('hook-runner configs written next to git commit are refused', () => {
+    for (const t of ['.pre-commit-config.yaml', 'lint-staged.config.js', '.lintstagedrc.json', 'lefthook.yml']) {
+      const c = `cat > ${t} <<'EOF'\nx: y\nEOF\ngit add -A && git commit -q -m x`;
+      assert.equal(pm(c)?.hit.kind, 'push', c);
+    }
+    assert.equal(pm("echo 'repos: []' > .pre-commit-config.yaml && git commit -qam x")?.hit.kind, 'push');
+    assert.equal(pm('cp /tmp/x lint-staged.config.js && git commit -qam x')?.hit.kind, 'push');
+    assert.equal(pm(`cat > notes.md <<'EOF'\nx: y\nEOF\ngit add -A && git commit -q -m x`), null);
+  });
+});

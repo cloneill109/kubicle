@@ -302,11 +302,14 @@ const isHeadLike = (x: string): boolean => x === 'HEAD' || x === '@';
 /** `w` is normalised so w[0] === 'git' (also for `/usr/bin/git`, `git-push`, `hub`). */
 function analyzeGit(w: string[], b: BranchInfo, changed: boolean, gitEnv: boolean): Verdict {
   let i = 1;
-  let opaque = gitEnv; // repo/config redirection we cannot see: -c, GIT_* env, --git-dir, ...
+  // config injected for this run (`-c core.hooksPath=d`, `--config-env`, GIT_CONFIG_*/HOME/XDG_* env) can make ANY
+  // subcommand run a program (hooks, fsmonitor, pager, aliases, include.path): fail closed, like `git config`
+  if (gitEnv) return bad();
+  let opaque = false; // repo redirection we cannot see: --git-dir, --work-tree, ...
   let dirOpt = false;
   while (i < w.length && w[i].startsWith('-')) {
     const o = w[i];
-    if (o === '-c') { opaque = true; i += 2; }
+    if (o === '-c' || /^-c./.test(o) || /^--config-env(=|$)/.test(o)) return bad();
     else if (o === '-C') { dirOpt = true; i += 2; }
     else if (/^--(git-dir|work-tree|exec-path|namespace|config-env|super-prefix)(=|$)/.test(o)) { opaque = true; i += o.includes('=') ? 1 : 2; }
     else if (['--no-pager', '--paginate', '-p', '-P', '--bare', '--no-replace-objects', '--no-optional-locks'].includes(o)) i++;
@@ -467,6 +470,9 @@ const GLOB_SYNTAX = new Set(['[', '[[', ']', ']]', '{', '}']);
 // `{` right after `$` is a parameter expansion (`${PYTHON}`), not a brace glob
 const isGlobWord = (w: string): boolean => /[*?\[]|(?<!\$)\{/.test(w) && !GLOB_SYNTAX.has(w);
 const SENS_ENV = /^(GIT_|PATH=|HOME=|XDG_)/i;
+// git env that changes nothing it runs or loads
+const INERT_GIT_ENV = /^(GIT_PAGER=(cat)?|GIT_TERMINAL_PROMPT=0|GIT_OPTIONAL_LOCKS=0|GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL|DATE)=[^$`]*)$/;
+const sensEnv = (x: string): boolean => SENS_ENV.test(x) && !INERT_GIT_ENV.test(x);
 const RISKY_WORDS = /(^|[^\w-])(git|gh|hub)(?!\w)|\b(push|merge|rebase|sync|update-ref)\b|refs\//;
 const GIT_WORD = /(^|[^\w-])(git|hub)(?!\w)/;
 // write files only; they cannot run git (but may rewrite .git/HEAD, so they still taint HEAD)
@@ -743,7 +749,10 @@ const SAFE_WRITE = new RegExp(String.raw`^(?:\./|/tmp/|/private/tmp/|\$TMPDIR/|\
 // shell rc/env files, and tool config dirs that run commands later on their own (Claude Code hooks, editor tasks)
 const RC_FILE = /(^|\/)\.([\w.-]*rc|env[\w.-]*|[\w.-]*profile|zshenv|zlogin|claude|config|vscode|cursor|devcontainer|idea|ssh|local)(\/|$)/i;
 /** `root` (the session cwd): an absolute target inside it is judged as the relative path below it. */
-function safeWriteTarget(t: string, root?: string): boolean {
+// files that hook managers read and run at `git commit` (pre-commit, lint-staged, lefthook, overcommit)
+const HOOK_RUNNER_CFG = /(^|\/)\.?(pre-commit-config|lint-?staged[\w.-]*|lefthook[\w.-]*|overcommit[\w.-]*)(\.\w+)?$/i;
+function safeWriteTargetIn(t: string, root?: string, gitNear = false): boolean {
+  if (gitNear && HOOK_RUNNER_CFG.test(t)) return false;
   if (STD_DEV.has(t)) return true;
   if (root && isAbsolute(root) && !comps(lc(root)).includes('.git') && t.startsWith(root.replace(/\/+$/, '') + '/')) {
     t = t.slice(root.replace(/\/+$/, '').length + 1);
@@ -755,6 +764,8 @@ const cdLiteral = (s: Segment): boolean => s.words.length === 2 && s.words[0] ==
   && LITERAL.test(s.words[1]) && !/git|hook|husky/.test(lc(s.words[1]));
 /** Every write target of every segment (redirects, tee, base64 -o, sort -o, uniq OUT, cp/mv destination) is safe. */
 function writeTargetsSafe(segs: Segment[], root?: string): boolean {
+  const gitNear = segs.some(gitSeg);
+  const safeWriteTarget = (t: string, r?: string): boolean => safeWriteTargetIn(t, r, gitNear);
   for (const s of segs) {
     for (const d of s.redirs) {
       if (!d.op.includes('>')) continue;
@@ -889,6 +900,25 @@ function heredocVerdict(cmd: string, ctx: RulesCtx): Protected | null | undefine
 }
 
 /**
+ * A body's text may become a PATH in this same command: a command substitution (`"$(cat p)"`, `$(git log --format=%B)`),
+ * xargs/read/mapfile, a file fed back on stdin (`< p`), or any later word naming a written file (`tar -T p`).
+ */
+function bodyReadBack(h: HeredocCut): boolean {
+  if (/\$\(|`/.test(h.text)) return true;
+  if (h.segs.some(s => s.words.some(w => /^(xargs|parallel|read|mapfile|readarray)$/.test(basename(w)))
+    || s.redirs.some(d => d.op.includes('<') && !HEREDOC_OP.test(d.op)))) return true;
+  const own = new Map(h.segs.map(s => [s, new Set(segWrites(s).targets)] as const));
+  const files = [...own.values()].flatMap(x => [...x]);
+  // printing it (cat/grep, no substitution: checked above) or running it as a script (`node --test f`) is not a path read
+  const reader = (s: Segment): boolean => {
+    const w = stripPrefix(s.words);
+    return !(PURE_DATA.has(w[0] ?? '') || (FILE_INTERP.has(w[0] ?? '') && !inlineInterp(s)));
+  };
+  return files.some(f => h.segs.filter(reader).some(s => [...s.words, ...s.redirs.map(d => d.target)]
+    .some(x => !own.get(s)!.has(x) && (x.includes(f) || (basename(f) !== '' && x.includes(basename(f)))))));
+}
+
+/**
  * Self verdict input: the command with every body fed to a pure-data receiver (cat, tee, ..., `git commit -F -`)
  * removed, so a file that merely MENTIONS ~/.kubicle or office.db is not self-administration. The redirect/tee
  * target stays in the text, so a write INTO the Kubicle home or office.db is still caught. Bodies fed to an
@@ -897,6 +927,7 @@ function heredocVerdict(cmd: string, ctx: RulesCtx): Protected | null | undefine
 function selfText(cmd: string): string {
   const h = cmd.includes('<<') ? heredocCutOf(cmd) : undefined;
   if (!h) return cmd;
+  if (bodyReadBack(h)) return cmd;
   let out = '';
   let at = 0;
   h.bodies.forEach((b, k) => {
@@ -936,6 +967,12 @@ function pushMergeVerdict(cmd: string, nm: string, segs: Segment[], ctx: RulesCt
   const trigger = ghApi || /\b(push|merge|rebase|subtree|update-ref|sync)\b|refs\//.test(nm);
   const inlineCode = segs.some(inlineInterp);
   if (!gitWord && !ghWord && !((opaque || inlineCode) && trigger)) return null;
+  // a hook manager's config (pre-commit, lint-staged, ...) written next to git: `git commit` runs what it names
+  if (gitWord && segs.some(s => {
+    const w = stripPrefix(s.words);
+    const dst = (w[0] === 'cp' || w[0] === 'mv') ? w.slice(1).filter(a => !a.startsWith('-')).slice(-1) : [];
+    return [...segWrites(s).targets, ...dst].some(t => HOOK_RUNNER_CFG.test(t));
+  })) return { kind: 'push', branch: null, reason: `hook manager config written next to git: ${cmd.slice(0, 120)}` };
   const isMerge = !hasPush && !/\bsync\b/.test(nm) && (/\b(merge|rebase)\b/.test(nm) || ghWord);
   const kind: 'push' | 'merge' = isMerge ? 'merge' : 'push';
   const fail = (br: string | null): Protected => ({ kind, branch: br, reason: `${kind} not proven safe: ${cmd.slice(0, 120)}` });
@@ -951,7 +988,7 @@ function pushMergeVerdict(cmd: string, nm: string, segs: Segment[], ctx: RulesCt
   for (const s of segs) {
     let i = 0;
     let envOp = stickyEnv;
-    while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) { if (SENS_ENV.test(s.words[i])) envOp = true; i++; }
+    while (i < s.words.length && ENV_ASSIGN.test(s.words[i])) { if (sensEnv(s.words[i])) envOp = true; i++; }
     const w = s.words.slice(i);
     if (w.length === 0) { if (envOp) stickyEnv = true; continue; }
     const first = w[0];
@@ -969,7 +1006,7 @@ function pushMergeVerdict(cmd: string, nm: string, segs: Segment[], ctx: RulesCt
     } else if (CD_CMDS.has(base)) {
       changed = true;
     } else if (ENV_SETTERS.has(base)) {
-      if (w.slice(1).some(x => SENS_ENV.test(x))) stickyEnv = true;
+      if (w.slice(1).some(x => sensEnv(x) || /^(GIT_\w*|PATH|HOME|XDG_\w*)$/i.test(x))) stickyEnv = true;
     } else if (HARMLESS.has(base)) {
       if (writes) changed = true; // e.g. `echo ref: refs/heads/main > .git/HEAD`
     } else if (SINKS.has(base)) {
