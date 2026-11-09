@@ -65,7 +65,11 @@ rooms:
 YAML
 chmod 600 "$HOME_DIR/overrides/$SLUG.yaml"
 
-export KUBICLE_HOME="$HOME_DIR" KUBICLE_PORT="$PORT"export KUBICLE_HOME="$HOME_DIR" KUBICLE_PORT="$PORT"
+export KUBICLE_HOME="$HOME_DIR" KUBICLE_PORT="$PORT"
+# Subscription only: drop every ANTHROPIC_* and CLAUDE_CODE_USE_* variable (names read NUL-separated, so odd names are safe).
+while IFS= read -r -d '' _kv; do
+  case "${_kv%%=*}" in ANTHROPIC_*|CLAUDE_CODE_USE_*) unset "${_kv%%=*}" ;; esac
+done < <(env -0)
 export KUBICLE_SECRETS_STORE=file   # never the real OS keyring
 unset KUBICLE_CLAUDE_BIN   # Bubbles must use the real claude here
 
@@ -239,7 +243,7 @@ SEEN3="$TMP/seen3.jsonl"
 ) &
 POLL_PID=$!
 echo "Running kubicle run qa --print (haiku) ..."
-( cd "$REPO" && SMOKE_REC="$REC" KUBICLE_CLAUDE_BIN="$WRAP" perl -e 'alarm 180; exec @ARGV' -- "$KUB" run qa --print -- "reply ok" ) >"$TMP/run.out" 2>"$TMP/run.err"
+( cd "$REPO" && SMOKE_REC="$REC" KUBICLE_CLAUDE_BIN="$WRAP" perl -e 'my $p = fork; if (!$p) { setpgrp(0, 0); exec @ARGV; exit 127 } $SIG{ALRM} = sub { kill "TERM", -$p; exit 124 }; alarm 180; waitpid($p, 0); exit($? >> 8)' -- "$KUB" run qa --print -- "reply ok" ) >"$TMP/run.out" 2>"$TMP/run.err"
 echo "kubicle run exit: $?"
 sleep 1
 kill "$POLL_PID" 2>/dev/null; wait "$POLL_PID" 2>/dev/null
@@ -251,12 +255,13 @@ echo "  launch id: $LAUNCH_ID"
 # What reached the launch: the model on argv, the deny rule in the generated settings, and the answer printed.
 ARGS_TXT="$(tr '\0' '\n' < "$REC/args")"
 printf '%s\n' "$ARGS_TXT" | grep -qx -- '--model' && printf '%s\n' "$ARGS_TXT" | grep -qx 'haiku' || fail "claude was not launched with --model haiku"
+printf '%s\n' "$ARGS_TXT" | awk 'p && $0=="auto" {ok=1} {p = ($0=="--permission-mode")} END {exit !ok}' || fail "claude was not launched with --permission-mode auto"
 printf '%s\n' "$ARGS_TXT" | grep -qx -- '-p' || fail "claude was not launched with -p"
 node -e '
   const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
   if (!(s.permissions?.deny || []).includes(process.argv[2])) { console.error("deny rule missing from generated settings"); process.exit(1); }' \
   "$REC/settings.json" "$SMOKE_DENY" || fail "the room's deny rule did not reach the generated settings"
-echo "  argv has --model haiku and -p; generated settings deny ${SMOKE_DENY}"
+echo "  argv has --model haiku, --permission-mode auto and -p; generated settings deny ${SMOKE_DENY}"
 [ -s "$TMP/run.out" ] || { cat "$TMP/run.err" >&2; fail "the print-mode run printed nothing"; }
 echo "  claude printed: $(head -c 80 "$TMP/run.out" | tr '\n' ' ')"
 # The office saw it: a session carrying this launch id (X-Kubicle-Launch) in room qa. (SessionStart carries no model, so

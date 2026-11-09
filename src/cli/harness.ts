@@ -64,7 +64,7 @@ export function harnessCommand(argv: string[], cfg: Config, deps: { secrets?: Pi
   for (const k of ['allow', 'ask', 'deny', 'mcp', 'skills'] as const) if (eff[k].length > 0) out[k] = eff[k];
   if (eff.optional.size > 0) out.optional = [...eff.optional];
   if (Object.keys(servers).length > 0) out.mcp_servers = servers;
-  process.stdout.write(stringify(out));
+  if (problems.length === 0) process.stdout.write(stringify(out)); // a room that cannot start prints no setup
   for (const w of warnings) console.error(`warning: ${w}`);
   for (const m of problems) console.error(m);
   return problems.length > 0 ? 1 : 0;

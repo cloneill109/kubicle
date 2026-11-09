@@ -47,6 +47,7 @@ test('harness resolve prints merged YAML with secrets by name, never a value', (
   function withUnset() { const t = setup(); withGithub(t); return t.run(['harness', 'resolve', 'qa']); }
   assert.equal(bad.status, 1);
   assert.match(bad.stderr, /Secret "github" is not set/);
+  assert.equal(bad.stdout, '', 'a room that cannot start prints no setup');
   const none = s.run(['harness', 'resolve', 'nope']);
   assert.equal(none.status, 1);
 });
@@ -131,6 +132,10 @@ test('run: builds the launch like the office, -p before --, exits with claude\'s
   assert.equal(blocked.status, 1);
   assert.match(blocked.stderr, /mcp\.yaml has a problem/);
   assert.equal(existsSync(b.argsFile), false);
+  const res = b.run(['harness', 'resolve', 'qa']);
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /mcp\.yaml has a problem/);
+  assert.equal(res.stdout, '', 'a blocked room prints nothing on stdout');
   assert.equal(b.run(['run', 'qa', '--print']).status, 2);
 });
 
