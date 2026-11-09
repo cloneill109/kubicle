@@ -5,7 +5,7 @@ import { connect, type AddressInfo } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { makeLauncher, type Launch } from './launcher.ts';
 import { LaunchWatch, checkInMessage } from './launch-watch.ts';
-import { HarnessError, buildLaunch } from './harness/resolve.ts';
+import { prepareLaunch } from './harness/prepare.ts';
 import { openSecrets } from './harness/secrets.ts';
 import { fileURLToPath } from 'node:url';
 import type { BubblesState, FeedItem } from '../shared/protocol.ts';
@@ -246,10 +246,8 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
     launch: opts.launch ?? makeLauncher({ home: cfg.home, app: process.env.KUBICLE_TERMINAL }),
     // The secret store is opened per launch and only asked `has`: values are read by `kubicle agent`, never here.
     prepareLaunch: ({ projectId, roomId, task, briefing, id }) => {
-      const blockers = building.launchBlockers(projectId, roomId);
-      if (blockers.length > 0) throw new HarnessError(blockers);
-      return buildLaunch({
-      home: cfg.home, claudeSettings: join(cfg.claudeDir, 'settings.json'), building: building.snapshot(),
+      return prepareLaunch({
+        home: cfg.home, claudeDir: cfg.claudeDir, building: building.snapshot(), blockers: building.launchBlockers(projectId, roomId),
         projectId, roomId, task, secrets: openSecrets(cfg.home),
         ...(briefing ? { briefing } : {}), ...(id ? { id } : {}),
       });

@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, statSync, watch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import {
-  defaultFloor, type Building, type DivisionDef, type FloorDef, type RoomDef, type RoomOverrides,
+  DEFAULT_DIVISIONS, defaultFloor, type Building, type DivisionDef, type FloorDef, type RoomDef, type RoomOverrides,
 } from '../../shared/building.ts';
 import type { ProjectRow } from '../../shared/protocol.ts';
 import type { Harness } from '../../shared/harness.ts';
@@ -74,6 +74,19 @@ export class BuildingService {
   }
 
   snapshot(): Building { return this.built; }
+
+  /**
+   * One-shot read for the CLI: no watchers and no seeding (nothing is written). With no division files the defaults
+   * apply, as in `kubicle division list`. Returns the same Building the running office would hold.
+   */
+  loadOnce(projects: ProjectRow[]): Building {
+    this.projects = () => projects;
+    this.reload();
+    if (this.divisionFiles().length === 0 && this.built.divisions.length === 0) {
+      this.built = { ...this.built, divisions: DEFAULT_DIVISIONS.map((d) => ({ ...d, revision: 1 })) };
+    }
+    return this.built;
+  }
 
   floorFile(projectId: string): { file: string; origin: Origin } {
     if (!this.projects().some((p) => p.id === projectId && !p.archived)) {

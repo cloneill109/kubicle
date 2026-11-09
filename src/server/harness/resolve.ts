@@ -139,6 +139,8 @@ function tighten(dir: string): void {
 export function buildLaunch(o: {
   home: string; claudeSettings: string; building: Building; projectId: string; roomId: string;
   task: string; briefing?: string; secrets: Pick<SecretStore, 'has'>; id?: string;
+  /** Adds claude's `-p` (non-interactive print mode) before the task. */
+  print?: boolean;
 }): LaunchSpec {
   sweepRuns(o.home, Date.now());
   const id = o.id ?? randomUUID();
@@ -221,6 +223,7 @@ export function buildLaunch(o: {
     }
     if (eff.tools !== undefined) args.push('--tools', eff.tools.join(','));
     args.push('--permission-mode', claudePermissionMode(eff.permissionMode, o.building.settings?.default_permission_mode));
+    if (o.print) args.push('-p');
     if (task !== '') args.push('--', task);
 
     const env: Record<string, string> = { KUBICLE_ROOM: room.id, KUBICLE_LAUNCH: id };
