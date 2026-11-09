@@ -29,7 +29,7 @@ test('DEFAULT_DIVISIONS match constraints', () => {
       ['imagegen', 'Image gen', '#f38b3d'],
     ],
   );
-  for (const d of DEFAULT_DIVISIONS) assert.deepEqual(d.harness, {});
+  for (const d of DEFAULT_DIVISIONS) assert.deepEqual(Object.keys(d.harness), ['prompt']); // starter prompt only: no tools, MCP or skills
 });
 
 test('defaultFloor layout is valid', () => {

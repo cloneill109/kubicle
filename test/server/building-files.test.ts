@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import {
   BuildingFileError, RevisionConflict, slugFor, readDivision, readFloor, writeDivision, writeFloor, seedDivisions,
 } from '../../src/server/building/files.ts';
-import { defaultFloor, type DivisionDef } from '../../src/shared/building.ts';
+import { DEFAULT_DIVISIONS, defaultFloor, type DivisionDef } from '../../src/shared/building.ts';
+import { harnessProblems } from '../../src/shared/harness.ts';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'kub-bf-'));
 const div = (o: Partial<DivisionDef> = {}): DivisionDef => ({ id: 'qa', name: 'QA', color: '#62c4a0', harness: {}, revision: 1, ...o });
@@ -157,6 +158,26 @@ test('seedDivisions: 7 files on empty/missing dir, then false and no writes', ()
   const empty = join(tmp(), 'e'); mkdirSync(empty);
   assert.equal(seedDivisions(empty), true);
   assert.equal(readdirSync(empty).length, 7);
+});
+
+test('seedDivisions: starter prompts are short and valid, and an existing division file is never rewritten', () => {
+  const dir = join(tmp(), 'divisions');
+  seedDivisions(dir);
+  for (const d of DEFAULT_DIVISIONS) {
+    const h = readDivision(join(dir, `${d.id}.yaml`)).harness as Record<string, unknown>;
+    assert.deepEqual(Object.keys(h), ['prompt']);
+    assert.ok(typeof h.prompt === 'string' && h.prompt.length > 20 && h.prompt.length <= 300, d.id);
+    assert.deepEqual(harnessProblems(h), []);
+  }
+  // A user who already has divisions (even just one, with an empty harness) keeps them exactly as they are.
+  const mine = join(tmp(), 'mine');
+  writeDivision(mine, { id: 'qa', name: 'QA', color: '#62c4a0', harness: {}, revision: 0 }, 0);
+  const before = readFileSync(join(mine, 'qa.yaml'), 'utf8');
+  const mt = statSync(join(mine, 'qa.yaml')).mtimeMs;
+  assert.equal(seedDivisions(mine), false);
+  assert.deepEqual(readdirSync(mine), ['qa.yaml']);
+  assert.equal(readFileSync(join(mine, 'qa.yaml'), 'utf8'), before);
+  assert.equal(statSync(join(mine, 'qa.yaml')).mtimeMs, mt);
 });
 
 // ---- final review I1: refuse files that could hang or exhaust a read ----

@@ -1669,6 +1669,8 @@ test('room panel C1: the Default option names the mode the room would get', asyn
   await f.setDivision('qa', { permission_mode: 'acceptEdits' });
   await f.sign('qa');
   assert.equal(await f.page.locator('#rpMode option').first().innerText(), 'Default (Accept edits, from QA)');
+  assert.equal((await f.page.locator('#rpOutside').innerText()).trim(), 'Agents started outside Kubicle keep their own setup.');
+  assert.ok(await f.page.locator('#rpOutside').isVisible());
   await f.page.locator('#rpScopeDivision').check();
   assert.equal(await f.page.locator('#rpMode option').first().innerText(), 'Default (Auto, office setting)');
   assert.deepEqual(f.errors, []);

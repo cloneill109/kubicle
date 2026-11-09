@@ -1404,7 +1404,7 @@ test('Review Focus 1: a room whose division, override, MCP or settings file is b
   const projectId = snap.projects[0].id;
   const go = (room: string) => control(s, cookie, '/api/agents/start', { projectId, room, task: 'x' });
   const qa = join(s.home, 'divisions', 'qa.yaml');
-  writeFileSync(qa, readFileSync(qa, 'utf8').replace('harness: {}', 'harness: { mcps: [] }'));
+  writeFileSync(qa, readFileSync(qa, 'utf8').replace(/^harness:[\s\S]*?(?=^\w|(?![\s\S]))/m, 'harness: { mcps: [] }\n')); // the seeded file now has a starter prompt
   await c.waitFor((m) => m.t === 'building' && m.building.warnings.some((w) => w.includes('qa.yaml')));
   const r = await go('qa');
   assert.equal(r.status, 400);

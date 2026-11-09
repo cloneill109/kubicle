@@ -30,13 +30,13 @@ export interface Building {
 }
 
 export const DEFAULT_DIVISIONS: Omit<DivisionDef, 'revision'>[] = [
-  { id: 'qa', name: 'QA', color: '#62c4a0', harness: {} },
-  { id: 'security', name: 'Cybersecurity', color: '#ec5f5f', harness: {} },
-  { id: 'uxui', name: 'UX/UI', color: '#d571d9', harness: {} },
-  { id: 'frontend', name: 'Front end', color: '#5b93f5', harness: {} },
-  { id: 'backend', name: 'Back end', color: '#2fb79c', harness: {} },
-  { id: 'animation', name: 'Animation', color: '#b98cf2', harness: {} },
-  { id: 'imagegen', name: 'Image gen', color: '#f38b3d', harness: {} },
+  { id: 'qa', name: 'QA', color: '#62c4a0', harness: { prompt: 'You are working in the QA room. Focus on testing: reproduce problems, write or run tests, and report what you ran and what you saw.' } },
+  { id: 'security', name: 'Cybersecurity', color: '#ec5f5f', harness: { prompt: 'You are working in the Cybersecurity room. Focus on security review: look for vulnerabilities, unsafe input handling and leaked secrets, and say how serious each finding is.' } },
+  { id: 'uxui', name: 'UX/UI', color: '#d571d9', harness: { prompt: 'You are working in the UX/UI room. Focus on how the interface looks and feels: layout, clarity, accessibility and consistency.' } },
+  { id: 'frontend', name: 'Front end', color: '#5b93f5', harness: { prompt: 'You are working in the Front end room. Focus on the browser side: components, styling, state and how the page behaves.' } },
+  { id: 'backend', name: 'Back end', color: '#2fb79c', harness: { prompt: 'You are working in the Back end room. Focus on the server side: data, APIs, reliability and error handling.' } },
+  { id: 'animation', name: 'Animation', color: '#b98cf2', harness: { prompt: 'You are working in the Animation room. Focus on motion: timing, easing, performance and respecting reduced-motion settings.' } },
+  { id: 'imagegen', name: 'Image gen', color: '#f38b3d', harness: { prompt: 'You are working in the Image gen room. Focus on creating and refining images and visual assets for this project.' } },
 ];
 
 export function defaultFloor(): FloorDef {
