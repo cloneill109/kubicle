@@ -237,7 +237,7 @@ test('I2: hung listener -> perm shim (max 140) gives up within ~10 s', async () 
 
 test('I2: real server, opted-in wait with heartbeat: decision still delivered after > 3 s', async () => {
   const home = realpathSync(mkdtempSync('/tmp/ksr-'));
-  const srv = await startOffice({ ...loadConfig({ KUBICLE_HOME: home }), port: 0, approvalWaitMs: 8000 });
+  const srv = await startOffice({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0, approvalWaitMs: 8000 });
   try {
     const r0 = await fetch(srv.loginUrl, { redirect: 'manual' });
     const cookie = (r0.headers.get('set-cookie') ?? '').split(';')[0]!;
@@ -274,7 +274,7 @@ test('I2: real server, opted-in wait with heartbeat: decision still delivered af
 
 test('I2: real server, no office open: perm shim returns quickly with nothing (after Bubbles escalates)', async () => {
   const home = realpathSync(mkdtempSync('/tmp/ksr-'));
-  const srv = await startOffice({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 });
+  const srv = await startOffice({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0 });
   try {
     const r = await runShim({ KUBICLE_HOME: home }, ['140', 'perm'], permFixture);
     assert.equal(r.stdout, '');
@@ -447,7 +447,7 @@ test('prompt: kind event (an older `kubicle-hook 1` line) never prints an intake
 test('prompt: real office, slow intake (> 3 s): heartbeats keep the shim waiting and the briefing is printed', async () => {
   const home = realpathSync(mkdtempSync('/tmp/ksr-'));
   const proj = realpathSync(mkdtempSync('/tmp/ksp-'));
-  const srv = await startOffice({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, { bubbles: { env: { FAKE_CLAUDE_DELAY: '4000' } } });
+  const srv = await startOffice({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0 }, { bubbles: { env: { FAKE_CLAUDE_DELAY: '4000' } } });
   try {
     const ev = { ...JSON.parse(promptFixture), session_id: 'shim-intake', cwd: proj, prompt: 'fake-mode:intake-slow build the nav' };
     const r = await runShim({ KUBICLE_HOME: home }, ['10', 'prompt'], JSON.stringify(ev));

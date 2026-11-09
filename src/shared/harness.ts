@@ -163,3 +163,7 @@ export function effective(h: Harness): Effective {
   if (h.tools !== undefined) e.tools = uniq(h.tools);
   return e;
 }
+
+/** A room override that removes tools needs its division to list some: otherwise there is nothing to remove from. */
+export const removesToolsProblem = (roomId: string, tools: readonly string[] | undefined, divisionTools: readonly string[] | undefined): string | null =>
+  (tools?.some((t) => t.startsWith('-')) && !divisionTools?.length ? `Room "${roomId}" removes tools but its division lists none` : null);

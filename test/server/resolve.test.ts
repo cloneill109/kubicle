@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HarnessError, buildLaunch, pidAlive, resolveHarness, sweepRuns } from '../../src/server/harness/resolve.ts';
+import { cleanRoomHooks } from '../../src/server/harness/claude-settings.ts';
 import { DEFAULT_DIVISIONS, defaultFloor, type Building } from '../../src/shared/building.ts';
 import { PROMPT_MAX, type Harness, type PermissionMode } from '../../src/shared/harness.ts';
 import type { McpServerDef } from '../../src/shared/catalog.ts';
@@ -386,4 +387,51 @@ test('a room that removes tools from a division with no tools list cannot launch
   assert.deepEqual(resolveHarness(ok, PROJECT, 'qa').tools, ['Read']);
   const bad = building({ div: { qa: { tools: ['-Read'] } } });
   assert.throws(() => resolveHarness(bad, PROJECT, 'qa'), (e: unknown) => e instanceof HarnessError && e.problems[0] === 'Division "qa": tools entry "-Read" only works in a room override');
+});
+
+// ---------------------------------------------------------------- claude's own settings can undo the env strip (inherit: true only)
+const SECRET_VALUE = 'sk-ant-VERYSECRETVALUE-123';
+function envSettings(dir: string, env: unknown, hooks: unknown = { SessionStart: [{ hooks: [KUBICLE_START] }] }): string {
+  const f = join(dir, 'settings.json');
+  writeFileSync(f, JSON.stringify({ env, hooks }));
+  return f;
+}
+const launchWith = (b: Building, claudeSettingsFile: string) => buildLaunch({ home: tmp(), claudeSettings: claudeSettingsFile, building: b, projectId: PROJECT, roomId: 'qa', task: 'x', secrets: fakeSecrets([]), id: ID });
+
+test('inherit:true warns about ANTHROPIC_*/CLAUDE_CODE_USE_* in Claude settings env, by name only, never the value', () => {
+  const f = envSettings(tmp(), { ANTHROPIC_API_KEY: SECRET_VALUE, FOO: 'bar', CLAUDE_CODE_USE_BEDROCK: '1' });
+  const spec = launchWith(building(), f);
+  assert.deepEqual(spec.warnings, ['Your Claude settings set ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK, so this agent may not use your subscription.']);
+  assert.equal(JSON.stringify(spec).includes(SECRET_VALUE), false);
+  assert.equal(readFileSync(join(spec.runDir, 'settings.json'), 'utf8').includes(SECRET_VALUE), false);
+  assert.equal(readFileSync(join(spec.runDir, 'launch.json'), 'utf8').includes(SECRET_VALUE), false);
+});
+
+test('inherit:false never reads those settings in: no subscription warning', () => {
+  const f = envSettings(tmp(), { ANTHROPIC_API_KEY: SECRET_VALUE });
+  assert.deepEqual(launchWith(building({ over: { qa: { inherit: false } } }), f).warnings, []);
+});
+
+test('no matching variables, or an env block that is not a map, or an unreadable file: no warning', () => {
+  for (const env of [{ FOO: 'bar' }, {}, ['ANTHROPIC_API_KEY'], 'ANTHROPIC_API_KEY', null]) {
+    assert.deepEqual(launchWith(building(), envSettings(tmp(), env)).warnings, [], JSON.stringify(env));
+  }
+  const bad = join(tmp(), 'settings.json');
+  writeFileSync(bad, '{ not json');
+  assert.deepEqual(launchWith(building(), bad).warnings, []);
+  assert.deepEqual(launchWith(building(), join(tmp(), 'missing.json')).warnings, []);
+});
+
+test('a variable name that is not a plain name is not echoed', () => {
+  const f = envSettings(tmp(), { 'ANTHROPIC_X\nrm -rf': 'v', ANTHROPIC_BASE_URL: 'v' });
+  assert.deepEqual(launchWith(building(), f).warnings, ['Your Claude settings set ANTHROPIC_BASE_URL, so this agent may not use your subscription.']);
+});
+
+test('cleanRoomHooks is the check buildLaunch uses: same text, same verdict', () => {
+  const none = join(tmp(), 'settings.json');
+  assert.deepEqual(cleanRoomHooks(none), { hooks: null, problem: `Kubicle's hooks are not installed in ${none}: run kubicle install-hooks` });
+  assert.deepEqual(problemsOf(() => buildLaunch({ home: tmp(), claudeSettings: none, building: building({ over: { qa: { inherit: false } } }), projectId: PROJECT, roomId: 'qa', task: '', secrets: fakeSecrets([]) })), [cleanRoomHooks(none).problem]);
+  const ok = claudeSettings(tmp());
+  assert.equal(cleanRoomHooks(ok).problem, null);
+  assert.deepEqual(Object.keys(cleanRoomHooks(ok).hooks!).sort(), ['PreToolUse', 'SessionStart']);
 });

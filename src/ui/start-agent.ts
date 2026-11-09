@@ -24,14 +24,19 @@ export class StartAgentUi {
   #hint = $('startHint');
   #go = $<HTMLButtonElement>('startGo');
   #setup = $<HTMLButtonElement>('startSetup');
+  #cancel = $<HTMLButtonElement>('startCancel');
+  #done = $<HTMLButtonElement>('startDone');
   #opener: HTMLElement | null = null;
   #busy = false;
+  /** The agent has started and the dialog is only showing its warnings: nothing here can start another. */
+  #notice = false;
 
   constructor(o: StartAgentOptions) {
     this.#o = o;
     $('startForm').addEventListener('submit', (e) => { e.preventDefault(); void this.#start(); });
     $('startClose').addEventListener('click', () => this.close());
-    $('startCancel').addEventListener('click', () => this.close());
+    this.#cancel.addEventListener('click', () => this.close());
+    this.#done.addEventListener('click', () => this.close());
     this.#task.addEventListener('input', () => this.#syncChoose());
     this.#room.addEventListener('change', () => this.#syncChoose());
     this.#setup.addEventListener('click', () => this.#setUp());
@@ -42,6 +47,7 @@ export class StartAgentUi {
   get isOpen(): boolean { return this.#dlg.open; }
 
   open(room?: string, opener?: HTMLElement | null): void {
+    this.#setNotice(false);
     const floor = this.#o.floor();
     const rooms = this.#o.rooms(floor);
     const opt = (id: string, name: string) => { const op = document.createElement('option'); op.value = id; op.textContent = name; return op; };
@@ -59,6 +65,14 @@ export class StartAgentUi {
   }
 
   close(): void { if (this.#dlg.open) this.#dlg.close(); }
+
+  #setNotice(on: boolean): void {
+    this.#notice = on;
+    this.#go.hidden = this.#cancel.hidden = on;
+    this.#done.hidden = !on;
+    this.#room.disabled = this.#task.disabled = on;
+    if (on) this.#setup.disabled = true;
+  }
 
   /** "Let Bubbles choose" reads the task, so it needs one: disabled (with a hint) while the task is empty. */
   #syncChoose(): void {
@@ -102,7 +116,7 @@ export class StartAgentUi {
   }
 
   async #start(): Promise<void> {
-    if (this.#busy) return;
+    if (this.#busy || this.#notice) return;
     const floor = this.#o.floor(), room = this.#room.value, task = this.#task.value;
     this.#busy = true; this.#go.disabled = true; this.#go.textContent = 'Starting…'; this.#setMsg('');
     try {
@@ -110,7 +124,14 @@ export class StartAgentUi {
       if (r.status === 202) {
         try { localStorage.setItem(LAST_KEY + floor, room); } catch { /* blocked storage */ }
         this.#task.value = '';
-        this.close();
+        const ok = await r.json().catch(() => null) as { room?: unknown; warnings?: unknown } | null;
+        const warnings = Array.isArray(ok?.warnings) ? ok.warnings.filter((x): x is string => typeof x === 'string') : [];
+        if (warnings.length === 0) { this.close(); return; }
+        // Something in the room's setup did not load: this stays up until it has been read.
+        const name = this.#o.rooms(floor).find((x) => x.id === ok?.room)?.name;
+        this.#setMsg(`The agent started${name ? ` in ${name}` : ''}, with ${warnings.length === 1 ? 'a warning' : 'warnings'}:`, warnings);
+        this.#setNotice(true);
+        this.#done.focus();
         return;
       }
       let why = `Could not start it (${r.status}).`;

@@ -377,3 +377,44 @@ test('testMcp: an abort kills the child at once; aborted before start spawns not
     assert.ok(!existsSync(pidFile), 'nothing was started');
   } finally { rmSync(pidFile, { force: true }); }
 });
+
+const overrideQa = (s: ReturnType<typeof setup>, body: string) => {
+  mkdirSync(join(s.home, 'overrides'), { recursive: true });
+  writeFileSync(join(s.home, 'overrides', `${slugFor(s.project)}.yaml`), `revision: 1\nrooms:\n  qa:\n${body}`);
+};
+
+test('harness resolve refuses a clean room with no Kubicle hooks, exactly as run does; installed hooks clear both', () => {
+  const s = setup();
+  overrideQa(s, '    inherit: false\n');
+  const text = `Kubicle's hooks are not installed in ${join(s.claude, 'settings.json')}: run kubicle install-hooks`;
+  const res = s.run(['harness', 'resolve', 'qa']);
+  assert.equal(res.status, 1);
+  assert.equal(res.stdout, '', 'a room that cannot start prints no setup');
+  assert.ok(res.stderr.includes(text), res.stderr);
+  const run = s.run(['run', 'qa', '--', 'x']);
+  assert.equal(run.status, 1);
+  assert.ok(run.stderr.includes(text), run.stderr);
+  assert.equal(existsSync(s.argsFile), false);
+
+  writeFileSync(join(s.claude, 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: '/x/kubicle-hook 1' }] }] } }));
+  const ok = s.run(['harness', 'resolve', 'qa']);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /^inherit: false$/m);
+  assert.equal(s.run(['run', 'qa', '--', 'x']).status, 7);
+});
+
+test('run and harness resolve print launch warnings on stderr: skipped optional items, and Claude settings that undo the env strip (names only)', () => {
+  const s = setup();
+  overrideQa(s, '    mcp: [gone]\n    optional: [gone]\n');
+  writeFileSync(join(s.claude, 'settings.json'), JSON.stringify({ env: { ANTHROPIC_API_KEY: TOKEN, EDITOR: 'vi' } }));
+  const lines = ['warning: MCP server "gone" is not in mcp.yaml', 'warning: Your Claude settings set ANTHROPIC_API_KEY, so this agent may not use your subscription.'];
+  const r = s.run(['run', 'qa', '--print', '--', 'x']);
+  assert.equal(r.status, 7, r.stderr);
+  const res = s.run(['harness', 'resolve', 'qa']);
+  assert.equal(res.status, 0, res.stderr);
+  for (const out of [r, res]) {
+    for (const l of lines) assert.ok(out.stderr.split('\n').includes(l), out.stderr);
+    assert.equal((out.stdout + out.stderr).includes(TOKEN), false);
+    assert.equal(out.stderr.includes('EDITOR'), false);
+  }
+});

@@ -26,6 +26,8 @@ export interface Building {
   importable: SkillInfo[];
   /** Names (never values) of the secrets mcp.yaml refers to that are set, so the room panel can warn before a launch. */
   secretsSet: string[];
+  /** Set when Kubicle's hooks are missing from Claude's settings: why a clean room (inherit: false) cannot start. */
+  hooksProblem?: string;
   warnings: string[];
 }
 

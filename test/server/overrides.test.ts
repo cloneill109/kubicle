@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readOverrides, writeOverride } from '../../src/server/building/overrides.ts';
+import { OverrideNotFound, readOverrides, writeOverride } from '../../src/server/building/overrides.ts';
 import { BuildingFileError, RevisionConflict, slugFor } from '../../src/server/building/files.ts';
 import { BuildingService } from '../../src/server/building/service.ts';
 import type { ProjectRow } from '../../src/shared/protocol.ts';
@@ -84,4 +84,67 @@ test('an override file may hold -Tool', () => {
   const file = join(dir, 'o.yaml');
   assert.equal(writeOverride(file, 'qa', { tools: ['-Bash'] }, 0).revision, 1);
   rmSync(dir, { recursive: true, force: true });
+});
+
+function floorProject(dir: string): { root: string; home: string } {
+  const home = join(dir, 'home');
+  const root = join(dir, 'proj');
+  mkdirSync(join(root, '.kubicle'), { recursive: true });
+  writeFileSync(join(root, '.kubicle', 'floor.yaml'), 'revision: 1\nrooms:\n  - {id: bullpen, name: Bullpen, band: bottom, width: 14}\n  - {id: qa, name: QA, division: qa, band: top, width: 12}\n  - {id: lab, name: Lab, band: top, width: 12}\n');
+  return { root, home };
+}
+
+test('saveOverride: a stale override can be removed (null only); an unknown room otherwise stays not found', () => {
+  const dir = tmp();
+  const { root, home } = floorProject(dir);
+  const svc = new BuildingService(home, { debounceMs: 20, sweepMs: 10_000 });
+  svc.start(() => [row(root)]);
+  try {
+    const file = join(home, 'overrides', `${slugFor(root)}.yaml`);
+    mkdirSync(join(home, 'overrides'), { recursive: true });
+    writeFileSync(file, 'revision: 3\nrooms:\n  qa: { model: opus }\n  docs: { model: haiku }\n');
+    svc.refresh();
+    assert.deepEqual(svc.snapshot().warnings, [`override for unknown room "docs" (${file})`]);
+    assert.throws(() => svc.saveOverride(root, 'docs', {}, 3), (e: unknown) => e instanceof OverrideNotFound && e.message === 'no room "docs" on this floor');
+    assert.throws(() => svc.saveOverride(root, 'ghost', null, 3), (e: unknown) => e instanceof OverrideNotFound && e.message === 'no room "ghost" on this floor');
+    assert.throws(() => svc.saveOverride(root, 'docs', null, 2), RevisionConflict);
+    const stored = svc.saveOverride(root, 'docs', null, 3);
+    assert.deepEqual(stored, { revision: 4, rooms: { qa: { model: 'opus' } } });
+    assert.deepEqual(svc.snapshot().warnings, []);
+    assert.throws(() => svc.saveOverride(root, 'docs', null, 4), OverrideNotFound);
+    assert.deepEqual(readOverrides(file), stored);
+  } finally { svc.stop(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('saveOverride refuses tool removals the room could not launch with, with the launch-time message', () => {
+  const dir = tmp();
+  const { root, home } = floorProject(dir);
+  const svc = new BuildingService(home, { debounceMs: 20, sweepMs: 10_000 });
+  svc.start(() => [row(root)]);
+  try {
+    const file = join(home, 'overrides', `${slugFor(root)}.yaml`);
+    const refused = (id: string) => (e: unknown) => e instanceof BuildingFileError && e.message === `Room "${id}" removes tools but its division lists none`;
+    assert.throws(() => svc.saveOverride(root, 'lab', { tools: ['-Bash'] }, 0), refused('lab'));
+    assert.throws(() => svc.saveOverride(root, 'qa', { tools: ['Read', '-Bash'] }, 0), refused('qa'));
+    assert.equal(existsSync(file), false, 'nothing was written');
+    svc.saveDivisionHarness('qa', { tools: ['Read', 'Bash'] }, svc.snapshot().divisions.find((d) => d.id === 'qa')!.revision);
+    assert.deepEqual(svc.saveOverride(root, 'qa', { tools: ['-Bash'] }, 0).rooms, { qa: { tools: ['-Bash'] } });
+    assert.equal(svc.saveOverride(root, 'lab', { tools: ['Read'] }, 1).revision, 2, 'adding tools needs no division');
+  } finally { svc.stop(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the snapshot says when Kubicle hooks are missing, and notices an install', async () => {
+  const dir = tmp();
+  const { root, home } = floorProject(dir);
+  const claudeDir = join(dir, 'claude');
+  mkdirSync(claudeDir);
+  const svc = new BuildingService(home, { debounceMs: 20, sweepMs: 25, claudeDir });
+  svc.start(() => [row(root)]);
+  try {
+    const settings = join(claudeDir, 'settings.json');
+    assert.equal(svc.snapshot().hooksProblem, `Kubicle's hooks are not installed in ${settings}: run kubicle install-hooks`);
+    writeFileSync(settings, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: '/x/kubicle-hook 1' }] }] } }));
+    for (let i = 0; i < 80 && svc.snapshot().hooksProblem !== undefined; i++) await new Promise((r) => setTimeout(r, 25));
+    assert.equal(svc.snapshot().hooksProblem, undefined, 'the sweep picks up install-hooks');
+  } finally { svc.stop(); rmSync(dir, { recursive: true, force: true }); }
 });

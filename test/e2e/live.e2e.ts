@@ -136,7 +136,7 @@ async function settle(page: Page): Promise<void> {
 
 test('live office: state, floors, approvals, rooms, lobby, styles, narrow view, disconnect', async () => {
   const home = join(tmp, 'home');
-  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, { openBrowser: false });
+  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0 }, { openBrowser: false });
 
   const alpha = repo('alpha'), beta = repo('beta');
   const S1 = 'aaaaaaaa-0000-4000-8000-000000000001', S2 = 'bbbbbbbb-0000-4000-8000-000000000002', SUB = 'a1b2c3d4e5f6a7b8c';
@@ -496,7 +496,7 @@ test('live office: state, floors, approvals, rooms, lobby, styles, narrow view, 
   await page.screenshot({ path: join(outDir, 'live-disconnected.png') });
 
   // ---- server restarts (same port and home): the old cookie is gone, so ask to sign in again ----
-  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port }, { openBrowser: false });
+  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port }, { openBrowser: false });
   await page.waitForFunction(() => /The office server restarted\. Open the login link it printed to sign in again\./.test(document.getElementById('disconnected')!.innerText), null, { timeout: 10000 });
   assert.ok(await page.locator('#disconnected').isVisible());
   await page.screenshot({ path: join(outDir, 'live-relogin.png') });
@@ -523,7 +523,7 @@ async function drag(page: Page, from: { x: number; y: number }, to: { x: number;
 test('floor edit mode: drag, resize, add, remove, save; conflict, 400, 404, network failure, cancel, keyboard, 400px', async () => {
   await srv?.close();
   const home = join(tmp, 'home-edit');
-  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, { openBrowser: false });
+  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0 }, { openBrowser: false });
   const gamma = repo('gamma');
   const S = 'cccccccc-0000-4000-8000-000000000003';
   await postOk({ session_id: S, hook_event_name: 'SessionStart', cwd: gamma, source: 'startup' });
@@ -776,7 +776,7 @@ test('floor edit mode: drag, resize, add, remove, save; conflict, 400, 404, netw
 test('CLI parity: kubicle edits show up live in the office, and UI saves show in kubicle; conflicts match', async () => {
   await srv?.close();
   const home = join(tmp, 'home-cli');
-  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, { openBrowser: false });
+  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0 }, { openBrowser: false });
   const delta = repo('delta');
   await postOk({ session_id: 'dddddddd-0000-4000-8000-000000000004', hook_event_name: 'SessionStart', cwd: delta, source: 'startup' });
   const kubicle = (args: string[], env: Record<string, string> = {}) => spawnSync(join(root, 'bin', 'kubicle'), args, { cwd: delta, encoding: 'utf8', env: { ...process.env, KUBICLE_HOME: home, ...env } });
@@ -859,7 +859,7 @@ const logKinds = (page: Page) => page.$$eval('#logRows tr', (trs) => trs.map((tr
 test('Bubbles: Lobby card, protected push notes, Log view, B marker, escaping, CLI confirmation, panel', async () => {
   await srv?.close();
   const home = join(tmp, 'home-bub');
-  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, { openBrowser: false });
+  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0 }, { openBrowser: false });
   const eps = repo('epsilon');
   const S = 'eeeeeeee-0000-4000-8000-000000000005';
   const transcript = join(tmp, 'eps-transcript.jsonl');
@@ -1100,7 +1100,7 @@ test('Bubbles: Lobby card, protected push notes, Log view, B marker, escaping, C
 test('Bubbles intake: the inspector says who placed the session and shows suggestions; the Log view lists the intake row', async () => {
   await srv?.close();
   const home = join(tmp, 'home-intake');
-  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, { openBrowser: false });
+  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0 }, { openBrowser: false });
   const zeta = repo('zeta');
   const S = 'ffffffff-0000-4000-8000-000000000006';
   const transcript = join(tmp, 'zeta-transcript.jsonl');
@@ -1154,7 +1154,7 @@ test('Start agent: header button and the panel from a door sign open the dialog;
   // What the test compares: where the built launch runs, and its task (the argument after `--`).
   const seen = (r: { cwd: string; room: string; args: string[] }) => ({ cwd: r.cwd, room: r.room, task: r.args.includes('--') ? r.args.at(-1)! : '' });
   let failNext = false;
-  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, {
+  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0 }, {
     openBrowser: false,
     launch: async (r) => { if (failNext) { failNext = false; throw new (await import('../../src/server/launcher.ts')).LaunchError('could not open Terminal: test'); } launched.push(seen(r)); },
   });
@@ -1734,5 +1734,54 @@ test('room panel M4: a broken overrides file for this floor shows in the panel',
   await f.sign('qa');
   assert.ok(await f.page.locator('#rpProblems').isVisible());
   assert.match(await f.page.locator('#rpProblems').innerText(), new RegExp(`${slug}\\.yaml`));
+  assert.deepEqual(f.errors, []);
+});
+
+test('Start dialog: a launch with warnings stays open to show them; the room panel names missing hooks; a stale override can be removed', async () => {
+  const f = await roomFloor('warnings');
+  const q = await f.page.evaluate(() => window.__office.floor());
+  const over = (room: string, body: unknown) => f.api(`/api/overrides/${encodeURIComponent(q)}/${room}`, body);
+  assert.equal(await over('qa', { baseRevision: 0, harness: { mcp: ['gone'], optional: ['gone'] } }), 200);
+  await f.page.locator('#startBtn').click();
+  await f.page.locator('#startDlg').waitFor({ state: 'visible', timeout: 3000 });
+  await f.page.locator('#startRoom').selectOption('qa');
+  await f.page.locator('#startTask').fill('x');
+  await f.page.locator('#startGo').click();
+  await f.page.waitForFunction(() => document.querySelectorAll('#startMsg li').length === 1, null, { timeout: 5000 });
+  assert.ok(await f.page.locator('#startDlg').isVisible(), 'stays open');
+  assert.equal(await f.page.locator('#startMsg li').innerText(), 'MCP server "gone" is not in mcp.yaml');
+  assert.match(await f.page.locator('#startMsg').innerText(), /started in QA/);
+  assert.ok(await f.page.locator('#startGo').isHidden(), 'no second launch from here');
+  assert.ok(await f.page.locator('#startDone').isVisible());
+  assert.equal(await f.page.evaluate(() => document.activeElement?.id), 'startDone');
+  await f.page.waitForFunction(() => /Warning: MCP server "gone"/.test(document.getElementById('feed')!.textContent ?? ''), null, { timeout: 3000 });
+  await f.page.locator('#startDone').click();
+  await f.page.locator('#startDlg').waitFor({ state: 'hidden', timeout: 3000 });
+  await f.page.locator('#startBtn').click();
+  await f.page.locator('#startDlg').waitFor({ state: 'visible', timeout: 3000 });
+  assert.ok(await f.page.locator('#startGo').isVisible(), 'the next open is a normal dialog');
+  assert.ok(await f.page.locator('#startDone').isHidden());
+  assert.ok(await f.page.locator('#startMsg').isHidden());
+  await f.page.locator('#startCancel').click();
+
+  // A clean room with no hooks installed: the panel says what Start would say, and only for a clean room.
+  await f.sign('qa');
+  assert.ok(!/hooks are not installed/.test(await f.page.locator('#rpProblems').innerText()));
+  await f.page.locator('#rpClean').check();
+  await f.page.waitForFunction(() => /Kubicle's hooks are not installed in .*settings\.json: run kubicle install-hooks/.test(document.getElementById('rpProblems')!.textContent ?? ''), null, { timeout: 3000 });
+  await f.page.locator('#rpClean').uncheck();
+  await f.page.waitForFunction(() => !/hooks are not installed/.test(document.getElementById('rpProblems')!.textContent ?? ''), null, { timeout: 3000 });
+
+  // A setup left behind by a removed room: its warning has a button that removes it.
+  const d = join(f.home, 'overrides'), file = join(d, readdirSync(d)[0]!);
+  const cur = f.overridesFile();
+  writeFileSync(file, yamlText({ revision: cur.revision + 1, rooms: { ...cur.rooms, ghost: { model: 'haiku' } } }));
+  const remove = f.page.locator('#rpProblems button');
+  await remove.waitFor({ state: 'visible', timeout: 5000 });
+  assert.equal(await remove.innerText(), 'Remove the ghost setup');
+  await remove.click();
+  await f.page.waitForFunction(() => !/unknown room "ghost"/.test(document.getElementById('rpProblems')!.textContent ?? ''), null, { timeout: 5000 });
+  assert.equal(Object.hasOwn(f.overridesFile().rooms, 'ghost'), false);
+  assert.ok(Object.hasOwn(f.overridesFile().rooms, 'qa'), 'other setups stay');
   assert.deepEqual(f.errors, []);
 });

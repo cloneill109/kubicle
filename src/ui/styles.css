@@ -394,6 +394,7 @@ body.editing #map:focus-visible { outline: 2px solid var(--accent); outline-offs
 .rp-scope label, .rp-radios label, .rp-check { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; min-width: 0; }
 .rp input[type="radio"], .rp input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; flex: none; }
 .rp-problems { list-style: none; margin: 0; padding: 8px 12px; display: grid; gap: 4px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--line)); background: color-mix(in srgb, var(--danger) 10%, var(--panel)); font-size: 13px; overflow-wrap: anywhere; }
+.rp-stale { margin-left: 8px; }
 .rp-form { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .rp-fields { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
 .rp-fields:disabled { opacity: .75; }

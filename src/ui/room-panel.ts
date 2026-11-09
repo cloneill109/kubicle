@@ -2,8 +2,8 @@
 // for its division everywhere, and offers the MCP catalog, skill library and "Start agent here". Everything agents, the
 // CLI or files wrote is set with textContent only; secret values never reach the office, only the names that are set.
 import { secretRefs, type McpServerDef } from '../shared/catalog.ts';
-import type { DivisionDef, RoomDef } from '../shared/building.ts';
-import { PROMPT_MAX, effective, mergeHarness, type Harness, type PermissionMode } from '../shared/harness.ts';
+import { ID_RE, type DivisionDef, type RoomDef } from '../shared/building.ts';
+import { PROMPT_MAX, effective, mergeHarness, removesToolsProblem, type Harness, type PermissionMode } from '../shared/harness.ts';
 import { cleanText, type OfficeState } from './state.ts';
 import { post } from './panel.ts';
 
@@ -114,6 +114,12 @@ export const needsSecrets = (def: McpServerDef, set: readonly string[]): string[
 const shellWord = (s: string): string => (/^[A-Za-z0-9_/.:@%+=,-]+$/.test(s) ? s : `'${s.replaceAll("'", "'\\''")}'`);
 /** The command that starts this room's harness from a terminal. */
 export const runCommand = (room: string, project: string): string => `kubicle run ${shellWord(room)} --project ${shellWord(project)}`;
+
+/** The room id in an `override for unknown room "docs" (<file>)` warning, or null for any other warning. */
+export function staleOverrideRoom(warning: string): string | null {
+  const id = /^override for unknown room "([^"]+)" \(/.exec(warning)?.[1];
+  return id !== undefined && ID_RE.test(id) ? id : null;
+}
 
 const lines = (s: string): string[] => [...new Set(s.split('\n').map((l) => l.trim()).filter(Boolean))];
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text?: string): HTMLElementTagNameMap[K] => {
@@ -385,7 +391,10 @@ export class RoomPanelUi {
     for (const w of b.warnings) {
       if (w.includes('mcp.yaml') || (div && w.includes(`/divisions/${div}.yaml`)) || (slug && /overrides[\\/]/.test(w) && w.includes(`${slug}.yaml`))) out.push(w);
     }
-    if (this.#scope === 'room' && this.#own().tools?.some((t) => t.startsWith('-')) && !this.#inherited()?.tools?.length) out.push(`Room "${this.#room?.id}" removes tools but its division lists none`);
+    if (this.#scope === 'room') { const removes = removesToolsProblem(this.#room?.id ?? '', this.#own().tools, this.#inherited()?.tools); if (removes) out.push(removes); }
+    // In the division scope a room override of `inherit` still wins for this room.
+    const clean = this.#scope === 'room' ? f.clean : (this.#override().inherit ?? !f.clean) === false;
+    if (clean && b.hooksProblem) out.push(b.hooksProblem);
     for (const name of f.mcp) {
       if (!Object.hasOwn(b.mcp.servers, name)) { out.push(`MCP server "${name}" is not in mcp.yaml`); continue; }
       for (const s of needsSecrets(b.mcp.servers[name]!, b.secretsSet)) out.push(`Secret "${s}" is not set: run kubicle secret set ${s}`);
@@ -393,7 +402,30 @@ export class RoomPanelUi {
     for (const name of f.skills) if (!b.skills.some((s) => s.name === name)) out.push(`Skill "${name}" is not in the skill library`);
     const box = $('rpProblems');
     box.hidden = out.length === 0;
-    box.replaceChildren(...[...new Set(out)].map((p) => el('li', '', p)));
+    box.replaceChildren(...[...new Set(out)].map((p) => this.#problemRow(p)));
+  }
+
+  #problemRow(text: string): HTMLLIElement {
+    const li = el('li', '', text);
+    const stale = this.#readOnly ? null : staleOverrideRoom(text);
+    if (stale) {
+      const btn = el('button', 'btn rp-stale', `Remove the ${stale} setup`); btn.type = 'button';
+      btn.addEventListener('click', () => void this.#removeStale(stale));
+      li.append(btn);
+    }
+    return li;
+  }
+
+  /** Drops an override whose room has left the floor. The building broadcast redraws the panel. */
+  async #removeStale(room: string): Promise<void> {
+    if (this.#dirty()) { this.#msg('Save your changes first, then remove it.'); return; } // the removal changes the overrides revision
+    const floor = this.#floor;
+    try {
+      const r = await post(`/api/overrides/${encodeURIComponent(floor)}/${encodeURIComponent(room)}`, { baseRevision: this.#state.building.overrides[floor]?.revision ?? 0, harness: null });
+      if (r.ok) return;
+      const d = await r.json().catch(() => null) as { error?: string } | null;
+      if (this.#dlg.open) this.#msg(r.status === 409 ? CONFLICT_TEXT : r.status === 401 || r.status === 403 ? EXPIRED_TEXT : d?.error ?? `Couldn't remove it (HTTP ${r.status}).`, r.status === 409);
+    } catch { if (this.#dlg.open) this.#msg('Couldn\'t reach the office server.'); }
   }
 
   /** Redraws a checkbox list, keeping focus on the same control. */

@@ -36,7 +36,7 @@ async function start(opts: { home?: string; env?: Record<string, string>; timeou
   mkdirSync(cwd, { recursive: true });
   cleanup.push(() => rmSync(cwd, { recursive: true, force: true }));
   const fakeLog = join(home, 'fake.jsonl');
-  const s = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0, ...patch }, {
+  const s = await startServer({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0, ...patch }, {
     bubbles: { bin: FAKE, env: { FAKE_CLAUDE_LOG: fakeLog, ...opts.env }, ...(opts.timeouts ? { timeouts: opts.timeouts } : {}) },
   });
   let closed = false;

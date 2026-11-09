@@ -753,6 +753,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     let room = floor?.rooms.find((r) => r.id === roomId);
     if (!room) return err(400, `no room "${roomId}" on this floor`);
     let spec: LaunchSpec;
+    let fallback: string | undefined; // set when Bubbles' pick could not start and the Bullpen took over
     const prepare = (rid: string, brief?: string) => d.prepareLaunch!({ projectId: project_.id, roomId: rid, task: task_, id, ...(brief ? { briefing: brief } : {}) });
     try { spec = prepare(room.id, briefing); }
     catch (e) {
@@ -765,7 +766,8 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
         if (e2 instanceof HarnessError) return send(res, 400, JSON.stringify({ error: e2.message, problems: e2.problems }), JSON_HDR);
         throw e2;
       }
-      spec.warnings = [`Bubbles picked ${room.name}, but it can't start: ${e.problems[0] ?? e.message}. Started in the Bullpen instead.`, ...spec.warnings];
+      fallback = `Bubbles picked ${room.name}, but it can't start: ${e.problems[0] ?? e.message}. Started in the Bullpen instead.`;
+      spec.warnings = [fallback, ...spec.warnings];
       room = bullpen; by = 'default';
     }
     // Registered before the terminal opens: a fast agent can check in before `launch` returns.
@@ -778,9 +780,18 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       throw e;
     }
     launched = true;
-    const item: FeedItem = { ts: t, event: 'Launch', agentName: 'Office', detail: `Opened a terminal for a new agent in ${room.name}` };
-    d.pushFeed(item);
-    broadcast({ t: 'feed', item });
+    const feed = (detail: string): void => {
+      const item: FeedItem = { ts: t, event: 'Launch', agentName: 'Office', detail };
+      d.pushFeed(item);
+      broadcast({ t: 'feed', item });
+    };
+    feed(`Opened a terminal for a new agent in ${room.name}`);
+    for (const w of spec.warnings) feed(`Warning: ${w}`); // anything that did not load is shown, never just dropped
+    if (fallback !== undefined) {
+      // Bubbles already said which room he picked; this row is what corrects him on the floor.
+      try { d.bubbles.log.append({ ts: now(), kind: 'intake', projectId: project_.id, sessionId: `launch-${id}`, decision: BULLPEN, outcome: 'fallback', detail: fallback }); }
+      catch (e) { d.log(`launch fallback log failed: ${String(e)}`); }
+    }
     sendJson(res, 202, { room: room.id, by, launch: spec.id, warnings: spec.warnings });
     }
   }

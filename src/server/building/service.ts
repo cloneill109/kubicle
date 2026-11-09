@@ -1,15 +1,16 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, statSync, watch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import {
-  DEFAULT_DIVISIONS, defaultFloor, type Building, type DivisionDef, type FloorDef, type RoomDef, type RoomOverrides,
+  BULLPEN, DEFAULT_DIVISIONS, defaultFloor, type Building, type DivisionDef, type FloorDef, type RoomDef, type RoomOverrides,
 } from '../../shared/building.ts';
 import type { ProjectRow } from '../../shared/protocol.ts';
-import type { Harness } from '../../shared/harness.ts';
+import { removesToolsProblem, type Harness } from '../../shared/harness.ts';
 import { readCatalog, writeServer } from '../harness/catalog.ts';
+import { cleanRoomHooks } from '../harness/claude-settings.ts';
 import { importSkill, listImportable, listLibrary } from '../harness/skills.ts';
 import { secretRefs, type McpCatalog, type McpServerDef, type SkillInfo } from '../../shared/catalog.ts';
 import type { SecretStore } from '../harness/secrets.ts';
-import { readOverrides, writeOverride, OverrideNotFound } from './overrides.ts';
+import { readOverrides, writeOverride, OverrideNotFound, OverrideRefused } from './overrides.ts';
 import { DEFAULT_SETTINGS, readSettings, settingsFile, writeSettings } from '../settings.ts';
 import type { KubicleSettings } from '../../shared/building.ts';
 import type { PermissionMode } from '../../shared/harness.ts';
@@ -127,11 +128,21 @@ export class BuildingService {
   saveOverride(projectId: string, roomId: string, harness: Harness | null, baseRevision: number): RoomOverrides {
     if (!this.projects().some((p) => p.id === projectId && !p.archived)) throw new OverrideNotFound(projectId, 'unknown project');
     const floor = this.built.floors[projectId] ?? defaultFloor();
-    if (!floor.rooms.some((r) => r.id === roomId)) throw new OverrideNotFound(projectId, `no room "${roomId}" on this floor`);
+    const room = floor.rooms.find((r) => r.id === roomId);
+    const notFound = () => new OverrideNotFound(projectId, `no room "${roomId}" on this floor`);
+    if (!room && harness !== null) throw notFound();
     const file = this.overrideFile(projectId);
+    let current: RoomOverrides | null = null;
     if (existsSync(file)) {
-      try { readOverrides(file); }
+      try { current = readOverrides(file); }
       catch { throw new BuildingFileError(file, `fix or delete ${file} before editing these overrides`); }
+    }
+    // A room that left the floor keeps its override until someone removes it (the warning names it): null may do that.
+    if (!room && !(current && Object.hasOwn(current.rooms, roomId))) throw notFound();
+    if (room && harness) {
+      const div = room.division && room.id !== BULLPEN ? this.built.divisions.find((d) => d.id === room.division) : undefined;
+      const removes = removesToolsProblem(roomId, harness.tools, (div?.harness as Harness | undefined)?.tools);
+      if (removes) throw new OverrideRefused(file, removes);
     }
     const stored = writeOverride(file, roomId, harness, baseRevision);
     this.refresh();
@@ -284,8 +295,18 @@ export class BuildingService {
       skills: listLibrary(this.home),
       importable: this.claudeDir ? listImportable(this.claudeDir) : [],
       secretsSet: this.secretsSet(),
+      ...this.hooksProblem(),
       warnings: [...warn.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([, m]) => m),
     };
+  }
+
+  private claudeSettings(): string | null { return this.claudeDir ? join(this.claudeDir, 'settings.json') : null; }
+
+  /** Why a clean room cannot start, for the room panel: the same check the launch makes. */
+  private hooksProblem(): { hooksProblem?: string } {
+    const file = this.claudeSettings();
+    const problem = file ? cleanRoomHooks(file).problem : null;
+    return problem ? { hooksProblem: problem } : {};
   }
 
   /** Which secrets the catalog refers to are set: names only, through `has` only. A store that throws counts as not set. */
@@ -310,6 +331,8 @@ export class BuildingService {
     try { files.push(this.divisionsDir()); } catch { /* ignore */ }
     for (const p of this.projects()) { files.push(this.homeFile(p.id), this.repoFile(p.id), this.overrideFile(p.id)); }
     files.push(this.mcpFile(), this.skillsDir(), settingsFile(this.home), join(this.home, 'secret-names.yaml'));
+    const claude = this.claudeSettings();
+    if (claude) files.push(claude); // `kubicle install-hooks` while the office runs
     try {
       for (const n of readdirSync(this.skillsDir()).sort()) files.push(join(this.skillsDir(), n), join(this.skillsDir(), n, 'SKILL.md'));
     } catch { /* no library yet */ }

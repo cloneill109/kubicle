@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { slugFor } from '../../src/server/building/files.ts';
 import { WebSocket } from 'ws';
 import { loadConfig, type Config } from '../../src/server/config.ts';
 import { startServer } from '../../src/server/main.ts';
@@ -1702,5 +1703,66 @@ test('building.secretsSet: names of set secrets the catalog uses, never values; 
   assert.deepEqual(after.building.secretsSet, ['github', 'linear']);
   store.remove('github');
   await c.waitFor((m) => m.t === 'building' && !m.building.secretsSet.includes('github'));
+  await c.close();
+});
+
+const feedDetail = (c: Awaited<ReturnType<typeof owner>>, detail: string) => c.waitFor((m) => m.t === 'feed' && m.item.event === 'Launch' && m.item.detail === detail);
+
+test('Start agent: every launch warning goes to the feed; a fallback from Bubbles\' pick logs a follow-up row', async () => {
+  const { c, launched, go, s, cookie } = await startWithIntake();
+  assert.equal((await control(s, cookie, '/api/divisions/frontend/harness', { baseRevision: 1, harness: { mcp: ['nope'] } })).status, 200);
+  await c.waitFor((m) => m.t === 'building' && JSON.stringify(m.building.divisions).includes('nope'));
+  const r = await go('', 'fake-mode:intake-frontend build the nav bar');
+  assert.equal(r.status, 202);
+  const text = 'Bubbles picked Front end, but it can\'t start: MCP server "nope" is not in mcp.yaml. Started in the Bullpen instead.';
+  await feedDetail(c, `Warning: ${text}`);
+  const row = await c.waitFor((m) => m.t === 'log' && m.entry.kind === 'intake' && m.entry.outcome === 'fallback');
+  assert.ok(row.t === 'log');
+  assert.equal(row.entry.sessionId, `launch-${launched[0]!.id}`);
+  assert.equal(row.entry.decision, 'bullpen');
+  await c.close();
+});
+
+test('Start agent: skipped optional items are fed one by one', async () => {
+  const launched: LaunchSpec[] = [];
+  const s = await start(undefined, {}, { launch: async (r) => { launched.push(r); } });
+  const cookie = await login(s);
+  const { c, proj } = await withProject(s, cookie);
+  const save = await control(s, cookie, `/api/overrides/${encodeURIComponent(proj)}/qa`, { baseRevision: 0, harness: { mcp: ['gone'], skills: ['lost'], optional: ['gone', 'lost'] } });
+  assert.equal(save.status, 200);
+  await c.waitFor((m) => m.t === 'building' && m.building.overrides[proj]?.revision === 1);
+  const r = await control(s, cookie, '/api/agents/start', { projectId: proj, room: 'qa', task: 'x' });
+  assert.equal(r.status, 202);
+  assert.deepEqual((await r.json() as { warnings: string[] }).warnings, ['MCP server "gone" is not in mcp.yaml', 'Skill "lost" is not in the skill library']);
+  await feedDetail(c, 'Warning: MCP server "gone" is not in mcp.yaml');
+  await feedDetail(c, 'Warning: Skill "lost" is not in the skill library');
+  await c.close();
+});
+
+test('POST /api/overrides: null removes a stale override for a room no longer on the floor; anything else stays 404', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const { proj, c } = await withProject(s, cookie);
+  const file = join(s.home, 'overrides', `${slugFor(proj)}.yaml`);
+  mkdirSync(join(s.home, 'overrides'), { recursive: true });
+  writeFileSync(file, 'revision: 2\nrooms:\n  ghost: { model: haiku }\n');
+  await c.waitFor((m) => m.t === 'building' && m.building.warnings.some((w) => w.includes('unknown room "ghost"')));
+  const path = `/api/overrides/${encodeURIComponent(proj)}/ghost`;
+  assert.equal((await control(s, cookie, path, { baseRevision: 2, harness: { model: 'opus' } })).status, 404);
+  assert.equal((await control(s, cookie, `/api/overrides/${encodeURIComponent(proj)}/nothing`, { baseRevision: 2, harness: null })).status, 404);
+  const ok = await control(s, cookie, path, { baseRevision: 2, harness: null });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(await ok.json(), { revision: 3, rooms: {} });
+  await c.waitFor((m) => m.t === 'building' && !m.building.warnings.some((w) => w.includes('ghost')));
+  await c.close();
+});
+
+test('POST /api/overrides: a tool removal the room could not launch with is a 400 with the launch-time text', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const { proj, c } = await withProject(s, cookie);
+  const r = await control(s, cookie, `/api/overrides/${encodeURIComponent(proj)}/qa`, { baseRevision: 0, harness: { tools: ['-Bash'] } });
+  assert.equal(r.status, 400);
+  assert.deepEqual(await r.json(), { error: 'Room "qa" removes tools but its division lists none' });
   await c.close();
 });

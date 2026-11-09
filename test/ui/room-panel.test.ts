@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultModeLabel, formFrom, harnessFrom, harnessRows, needsSecrets, promptNote, runCommand, toolsWarning, type RoomForm } from '../../src/ui/room-panel.ts';
+import { defaultModeLabel, formFrom, harnessFrom, harnessRows, needsSecrets, promptNote, runCommand, staleOverrideRoom, toolsWarning, type RoomForm } from '../../src/ui/room-panel.ts';
 import { mergeHarness, type Harness } from '../../src/shared/harness.ts';
 
 const row = (rows: ReturnType<typeof harnessRows>, field: string) => rows.filter((r) => r.field === field);
@@ -118,4 +118,10 @@ test('promptNote: inherited text, or that it is replaced', () => {
   assert.equal(promptNote('QA', 'be nice', 'mine', undefined), 'from QA: be nice');
   assert.equal(promptNote('QA', 'be nice', 'mine', 'replace'), 'Replaces the prompt from QA: be nice');
   assert.equal(promptNote('QA', 'be nice', '   ', 'replace'), 'from QA: be nice', 'an empty prompt replaces nothing');
+});
+
+test('staleOverrideRoom reads the room out of the unknown-room warning only', () => {
+  assert.equal(staleOverrideRoom('override for unknown room "docs" (/h/overrides/x.yaml)'), 'docs');
+  assert.equal(staleOverrideRoom('/h/overrides/x.yaml: rooms.qa: tools must be a list'), null);
+  assert.equal(staleOverrideRoom('override for unknown room "Bad Id" (/h/overrides/x.yaml)'), null);
 });

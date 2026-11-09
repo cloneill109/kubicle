@@ -6,11 +6,12 @@ import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, sta
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { BULLPEN, defaultFloor, type Building, type RoomDef } from '../../shared/building.ts';
-import { PROMPT_MAX, effective, harnessProblems, mergeHarness, permissionModeProblem, type Effective, type Harness, type PermissionMode } from '../../shared/harness.ts';
+import { PROMPT_MAX, effective, harnessProblems, mergeHarness, permissionModeProblem, removesToolsProblem, type Effective, type Harness, type PermissionMode } from '../../shared/harness.ts';
 import { writeAtomic } from '../fsutil.ts';
 import { DIR_MODE, FILE_MODE } from '../building/files.ts';
 import { TASK_MAX } from '../launcher.ts';
 import { secretRefs, toClaudeMcp } from './catalog.ts';
+import { cleanRoomHooks, subscriptionWarning } from './claude-settings.ts';
 import { copyContained, listLibrary } from './skills.ts';
 import type { SecretStore } from './secrets.ts';
 
@@ -56,7 +57,8 @@ function resolve(b: Building, projectId: string, roomId: string): Resolved {
       base = div.harness as Harness;
     }
   }
-  if (override?.tools?.some((t) => t.startsWith('-')) && !base.tools?.length) problems.push(`Room "${roomId}" removes tools but its division lists none`);
+  const removes = removesToolsProblem(roomId, override?.tools, base.tools);
+  if (removes) problems.push(removes);
   if (problems.length > 0) throw new HarnessError(problems);
   return { room, eff: effective(mergeHarness(base, override ?? {})), warnings };
 }
@@ -104,27 +106,6 @@ export function sweepRuns(home: string, nowMs: number, alive: (pid: number) => b
 function claudePermissionMode(room: PermissionMode | undefined, global: unknown): string {
   const mode = room ?? (permissionModeProblem('', global) === null ? global as PermissionMode : 'auto');
   return mode === 'manual' ? 'default' : mode;
-}
-
-/** The installed Kubicle hook groups from Claude's user settings (other hooks dropped). Null when none. */
-function kubicleHooks(claudeSettings: string): Record<string, unknown[]> | null {
-  let s: unknown;
-  try { s = JSON.parse(readFileSync(claudeSettings, 'utf8')); } catch { return null; }
-  const hooks = (s as { hooks?: unknown } | null)?.hooks;
-  if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return null;
-  const out: Record<string, unknown[]> = {};
-  for (const [ev, groups] of Object.entries(hooks)) {
-    if (!Array.isArray(groups)) continue;
-    const kept: unknown[] = [];
-    for (const g of groups) {
-      if (!g || typeof g !== 'object' || !Array.isArray((g as { hooks?: unknown }).hooks)) continue;
-      const hs = ((g as { hooks: unknown[] }).hooks).filter((h) =>
-        !!h && typeof h === 'object' && typeof (h as { command?: unknown }).command === 'string' && (h as { command: string }).command.includes('kubicle-hook'));
-      if (hs.length > 0) kept.push({ ...(g as object), hooks: hs });
-    }
-    if (kept.length > 0) out[ev] = kept;
-  }
-  return Object.keys(out).length > 0 ? out : null;
 }
 
 /** chmod a copied tree: dirs 0700, files keep only the owner bits (0600, or 0700 if executable). */
@@ -179,8 +160,12 @@ export function buildLaunch(o: {
 
   let hooks: Record<string, unknown[]> | null = null;
   if (!eff.inherit) {
-    hooks = kubicleHooks(o.claudeSettings);
-    if (!hooks) problems.push(`Kubicle's hooks are not installed in ${o.claudeSettings}: run kubicle install-hooks`);
+    const clean = cleanRoomHooks(o.claudeSettings);
+    hooks = clean.hooks;
+    if (clean.problem) problems.push(clean.problem);
+  } else {
+    const w = subscriptionWarning(o.claudeSettings);
+    if (w) warnings.push(w);
   }
   if (problems.length > 0) throw new HarnessError(problems);
 

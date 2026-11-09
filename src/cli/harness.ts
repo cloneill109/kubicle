@@ -1,5 +1,6 @@
 // `kubicle harness resolve <room-or-division> [--project dir]`: the room's effective harness as YAML. Secrets appear as
 // `secret:<name>` references only; this command never asks the secret store for a value (only whether one is set).
+import { join } from 'node:path';
 import { stringify } from 'yaml';
 import { BULLPEN, defaultFloor, type Building, type RoomDef } from '../shared/building.ts';
 import type { ProjectRow } from '../shared/protocol.ts';
@@ -8,6 +9,7 @@ import { BuildingService } from '../server/building/service.ts';
 import type { Config } from '../server/config.ts';
 import { HarnessError, resolveHarness } from '../server/harness/resolve.ts';
 import { secretRefs } from '../server/harness/catalog.ts';
+import { cleanRoomHooks, subscriptionWarning } from '../server/harness/claude-settings.ts';
 import { openSecrets, type SecretStore } from '../server/harness/secrets.ts';
 import { CliError, UsageError, expectPositionals, parseArgs } from './args.ts';
 import { currentFloor, projectOf } from './floor.ts';
@@ -53,6 +55,10 @@ export function harnessCommand(argv: string[], cfg: Config, deps: { secrets?: Pi
   }
   const library = new Set(building.skills.map((s) => s.name));
   for (const name of eff.skills) if (!library.has(name)) note(name, `Skill "${name}" is not in the skill library`);
+
+  const claudeSettings = join(cfg.claudeDir, 'settings.json');
+  if (!eff.inherit) { const p = cleanRoomHooks(claudeSettings).problem; if (p) problems.push(p); }
+  else { const w = subscriptionWarning(claudeSettings); if (w) warnings.push(w); }
 
   const out: Record<string, unknown> = { room: room.id };
   if (room.division) out.division = room.division;

@@ -16,6 +16,15 @@ export class OverrideNotFound extends BuildingFileError {
   }
 }
 
+/** A setup the room could not launch with; the message is user-facing as is. */
+export class OverrideRefused extends BuildingFileError {
+  constructor(file: string, reason: string) {
+    super(file, reason);
+    this.name = 'OverrideRefused';
+    this.message = reason;
+  }
+}
+
 function problems(rooms: unknown, revision: unknown): string[] {
   const errs: string[] = [];
   if (!validRev(revision)) errs.push('revision must be an integer >= 1');
