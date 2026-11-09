@@ -58,6 +58,8 @@ export interface AgentView {
   /** Hints from KUBICLE_DIVISION / KUBICLE_ROOM; a session keeps the first non-empty ones. */
   division?: string;
   room?: string;
+  /** The office launch (id) that started this session, from KUBICLE_LAUNCH; a session keeps the first one. */
+  launch?: string;
   /** Owner-set room (id) for this session; subagents follow their parent. */
   roomLabel?: string;
   /** Room (id) Bubbles assigned from the session's first prompt; the owner's roomLabel outranks it. */

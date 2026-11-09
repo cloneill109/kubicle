@@ -310,6 +310,21 @@ test('KUBICLE_DIVISION / KUBICLE_ROOM with a bad pattern are not sent', async ()
   }
 });
 
+test('KUBICLE_LAUNCH is forwarded as X-Kubicle-Launch only when uuid-shaped', async () => {
+  const home = homeWithToken();
+  const id = 'abcdef12-2222-4333-8444-555555555555';
+  for (const [v, want] of [[id, id], ['x; rm -rf ~', undefined], ['11111111-2222-4333-8444-55555555555', undefined], [`${id}\nX-Evil: 1`, undefined], ['', undefined], [id.toUpperCase(), undefined]] as const) {
+    const s = await startServer(home, () => ({ status: 200 }));
+    try {
+      const r = await runShim({ KUBICLE_HOME: home, KUBICLE_LAUNCH: v });
+      assert.equal(r.code, 0);
+      assert.equal(s.hits.length, 1, `still delivers for ${JSON.stringify(v)}`);
+      assert.equal(s.hits[0]!.headers['x-kubicle-launch'], want, v);
+      assert.equal(s.hits[0]!.headers['x-evil'], undefined);
+    } finally { s.close(); }
+  }
+});
+
 // ---- kind `pre`: only the exact guard "ask" is ever printed ----
 test('pre: exact GUARD_ASK is printed (trimmed); the kind header is sent', async () => {
   const home = homeWithToken();

@@ -1,20 +1,35 @@
 // Shared harness model: validation, merge and effective view. Browser-safe (no Node imports).
 import { ID_RE } from './building.ts';
 
+/** Claude Code permission modes a room (or the global default) may use. The bypass modes are never allowed. */
+export const PERMISSION_MODES = ['auto', 'acceptEdits', 'manual', 'plan'] as const;
+export type PermissionMode = typeof PERMISSION_MODES[number];
+const REFUSED_MODES = ['bypassPermissions', 'dontAsk'];
+
+/** null when `v` is an allowed mode; else the problem, naming `key`. */
+export function permissionModeProblem(key: string, v: unknown): string | null {
+  if (typeof v === 'string' && (PERMISSION_MODES as readonly string[]).includes(v)) return null;
+  if (typeof v === 'string' && REFUSED_MODES.includes(v)) return `${key} "${v}" is not allowed: it would skip your approvals`;
+  return `${key} must be auto, acceptEdits, manual or plan`;
+}
+
+const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:\[\]-]*$/;
+const TOOL_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
+
 export interface Harness {
-  inherit?: boolean; model?: string; prompt?: string; prompt_mode?: 'append' | 'replace';
+  inherit?: boolean; model?: string; prompt?: string; prompt_mode?: 'append' | 'replace'; permission_mode?: PermissionMode;
   tools?: string[]; allow?: string[]; ask?: string[]; deny?: string[];
   mcp?: string[]; skills?: string[]; optional?: string[];
 }
 
 export interface Effective {
-  inherit: boolean; model?: string; prompt?: string; promptMode: 'append' | 'replace';
+  inherit: boolean; model?: string; prompt?: string; promptMode: 'append' | 'replace'; permissionMode?: PermissionMode;
   tools?: string[]; allow: string[]; ask: string[]; deny: string[];
   mcp: string[]; skills: string[]; optional: Set<string>;
 }
 
 export const HARNESS_KEYS: readonly string[] = [
-  'inherit', 'model', 'prompt', 'prompt_mode', 'tools', 'allow', 'ask', 'deny', 'mcp', 'skills', 'optional',
+  'inherit', 'model', 'prompt', 'prompt_mode', 'permission_mode', 'tools', 'allow', 'ask', 'deny', 'mcp', 'skills', 'optional',
 ];
 
 export const PROMPT_MAX = 20000;
@@ -29,12 +44,17 @@ export function harnessProblems(h: unknown): string[] {
   const out: string[] = [];
   for (const k of Object.keys(o)) if (!HARNESS_KEYS.includes(k)) out.push(`harness has unknown key "${k}"`);
   if ('inherit' in o && typeof o.inherit !== 'boolean') out.push('inherit must be true or false');
-  if ('model' in o && typeof o.model !== 'string') out.push('model must be text');
+  if ('model' in o) {
+    if (typeof o.model !== 'string') out.push('model must be text');
+    else if (!MODEL_RE.test(o.model)) out.push(`model "${o.model}" is not a model name`);
+  }
   if ('prompt' in o) {
     if (typeof o.prompt !== 'string') out.push('prompt must be text');
     else if (o.prompt.length > PROMPT_MAX) out.push(`prompt must be at most ${PROMPT_MAX} characters`);
+    else if (o.prompt.includes('\0')) out.push('prompt must not contain NUL characters');
   }
   if ('prompt_mode' in o && o.prompt_mode !== 'append' && o.prompt_mode !== 'replace') out.push('prompt_mode must be append or replace');
+  if ('permission_mode' in o) { const p = permissionModeProblem('permission_mode', o.permission_mode); if (p) out.push(p); }
   const list = (key: string): unknown[] | null => {
     if (!(key in o)) return null;
     const v = o[key];
@@ -47,6 +67,8 @@ export function harnessProblems(h: unknown): string[] {
     if (!v) continue;
     if (v.some((x) => typeof x !== 'string')) out.push(`${key} entries must be text`);
     else if (v.some((x) => (x as string).trim() === '')) out.push(`${key} entries must not be empty`);
+    else if (key === 'tools') { for (const x of v as string[]) if (!TOOL_RE.test(x)) out.push(`tool name "${x}" is invalid`); }
+    else if (v.some((x) => (x as string).includes('\0'))) out.push(`${key} entries must not contain NUL characters`);
   }
   for (const key of NAME_LISTS) {
     const v = list(key);
@@ -83,6 +105,8 @@ export function mergeHarness(base: Harness, over: Harness): Harness {
   if (inherit !== undefined) out.inherit = inherit;
   const model = over.model ?? base.model;
   if (model !== undefined) out.model = model;
+  const pm = over.permission_mode ?? base.permission_mode;
+  if (pm !== undefined) out.permission_mode = pm;
   const mode = over.prompt_mode ?? base.prompt_mode;
   if (mode !== undefined) out.prompt_mode = mode;
   let prompt: string | undefined;
@@ -114,6 +138,7 @@ export function effective(h: Harness): Effective {
     optional: new Set(h.optional ?? []),
   };
   if (h.model !== undefined) e.model = h.model;
+  if (h.permission_mode !== undefined) e.permissionMode = h.permission_mode;
   if (h.prompt !== undefined) e.prompt = h.prompt;
   if (h.tools !== undefined) e.tools = uniq(h.tools);
   return e;

@@ -9,6 +9,9 @@ import { readCatalog, writeServer } from '../harness/catalog.ts';
 import { importSkill, listImportable, listLibrary } from '../harness/skills.ts';
 import type { McpCatalog, McpServerDef, SkillInfo } from '../../shared/catalog.ts';
 import { readOverrides, writeOverride, OverrideNotFound } from './overrides.ts';
+import { DEFAULT_SETTINGS, readSettings, settingsFile, writeSettings } from '../settings.ts';
+import type { KubicleSettings } from '../../shared/building.ts';
+import type { PermissionMode } from '../../shared/harness.ts';
 import { BuildingFileError, RefusedFileError, readDivision, readFloor, seedDivisions, slugFor, writeDivision, writeFloor } from './files.ts';
 
 type Origin = 'home' | 'repo';
@@ -29,8 +32,11 @@ export class BuildingService {
   private repoFloors = new Map<string, FloorDef>();
   private overrideFiles = new Map<string, RoomOverrides>();
   private catalog: McpCatalog = { revision: 0, servers: {} };
-  private built: Building = { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], warnings: [] };
+  private settings: KubicleSettings = { ...DEFAULT_SETTINGS };
+  private built: Building = { settings: { ...DEFAULT_SETTINGS }, divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], warnings: [] };
   private builtJson = JSON.stringify(this.built);
+  /** Files that failed to load at the last reload (their last good version is in use). */
+  private broken = new Set<string>();
   private sig = '';
 
   private watchers = new Map<string, FSWatcher>();
@@ -124,6 +130,29 @@ export class BuildingService {
       catch { throw new BuildingFileError(file, `fix or delete ${file} before editing the MCP catalog`); }
     }
     const stored = writeServer(file, name, server, baseRevision);
+    this.refresh();
+    return stored;
+  }
+
+  /**
+   * Why a room must not launch right now: any file its harness comes from (its division, the project's overrides,
+   * the MCP catalog, the settings) failed to load, so only a last good version is in memory (Review Focus 1).
+   */
+  launchBlockers(projectId: string, roomId: string): string[] {
+    const room = (this.built.floors[projectId] ?? defaultFloor()).rooms.find((r) => r.id === roomId);
+    const files = [this.overrideFile(projectId), this.mcpFile(), settingsFile(this.home)];
+    if (room?.division) files.unshift(join(this.divisionsDir(), `${room.division}.yaml`));
+    return files.filter((f) => this.broken.has(f)).map((f) => `${f} has a problem; fix it before starting an agent in this room`);
+  }
+
+  /** Rewrites <home>/settings.yaml (revision-checked). */
+  saveSettings(patch: { default_permission_mode: PermissionMode }, baseRevision: number): KubicleSettings {
+    const file = settingsFile(this.home);
+    if (existsSync(file)) {
+      try { readSettings(this.home); }
+      catch { throw new BuildingFileError(file, `fix or delete ${file} before editing the settings`); }
+    }
+    const stored = writeSettings(this.home, patch, baseRevision);
     this.refresh();
     return stored;
   }
@@ -223,10 +252,15 @@ export class BuildingService {
     try { this.catalog = readCatalog(this.mcpFile()); } catch (e) { problem(this.mcpFile(), e); }
     if (!existsSync(this.mcpFile())) this.catalog = { revision: 0, servers: {} };
 
+    // Settings: a broken file keeps the last good settings.
+    try { this.settings = readSettings(this.home); } catch (e) { problem(settingsFile(this.home), e); }
+
+    this.broken = new Set(warn.keys());
     this.sig = this.signature();
     const sortedFloors: Record<string, FloorDef> = {};
     for (const k of Object.keys(floors).sort()) sortedFloors[k] = floors[k]!;
     this.built = {
+      settings: this.settings,
       divisions: [...this.divisions.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
       floors: sortedFloors,
       overrides: Object.fromEntries(Object.keys(overrides).sort().map((k) => [k, overrides[k]!])),
@@ -249,7 +283,7 @@ export class BuildingService {
     const files = [...this.divisionFiles()];
     try { files.push(this.divisionsDir()); } catch { /* ignore */ }
     for (const p of this.projects()) { files.push(this.homeFile(p.id), this.repoFile(p.id), this.overrideFile(p.id)); }
-    files.push(this.mcpFile(), this.skillsDir());
+    files.push(this.mcpFile(), this.skillsDir(), settingsFile(this.home));
     try {
       for (const n of readdirSync(this.skillsDir()).sort()) files.push(join(this.skillsDir(), n), join(this.skillsDir(), n, 'SKILL.md'));
     } catch { /* no library yet */ }
@@ -270,7 +304,7 @@ export class BuildingService {
     if (name === null) return true;
     const n = name.split('\\').join('/');
     if (!isHome) return n === 'floor.yaml';
-    return n === 'divisions' || n === 'floors' || n === 'overrides' || n === 'mcp.yaml' || n === 'skills' || n.startsWith('skills/')
+    return n === 'divisions' || n === 'floors' || n === 'overrides' || n === 'mcp.yaml' || n === 'settings.yaml' || n === 'skills' || n.startsWith('skills/')
       || /^(divisions|floors|overrides)\/[^/]*\.yaml$/.test(n);
   }
 

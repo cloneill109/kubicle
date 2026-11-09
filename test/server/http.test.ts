@@ -14,11 +14,14 @@ import { STALE_HOOKS_BANNER, STALE_PROMPT_HOOK_BANNER } from '../../src/server/m
 import { shouldIntake } from '../../src/server/http.ts';
 import type { AgentEvent } from '../../src/shared/events.ts';
 import type { ServerMsg, AgentView } from '../../src/shared/protocol.ts';
+import type { LaunchSpec } from '../../src/server/harness/resolve.ts';
 
 // Bubbles triage runs on every PermissionRequest now: never the real claude here. The fake escalates by
 // default, so these office-approval tests still reach the owner.
 process.env.KUBICLE_CLAUDE_BIN = join(import.meta.dirname, '..', 'fixtures', 'fake-claude.mjs');
 process.env.FAKE_CLAUDE_MODE ??= 'escalate';
+// Launches open the secret store: never the OS keyring in tests.
+process.env.KUBICLE_SECRETS_STORE = 'file';
 
 const FIX = join(import.meta.dirname, '..', 'fixtures', 'hooks');
 const fixture = (name: string): Record<string, unknown> => JSON.parse(readFileSync(join(FIX, `${name}.json`), 'utf8'));
@@ -1126,8 +1129,8 @@ test('shouldIntake: the gate, case by case', () => {
   assert.equal(shouldIntake(e(), 'hi', { count: 3 }, view, T), false);
 });
 
-test('POST /api/agents/start: owner only, validates project/room/task, launches, feeds, rate-limits', async () => {
-  const launched: { cwd: string; room: string; task: string }[] = [];
+test('POST /api/agents/start: owner only, validates project/room/task, builds the launch, feeds, rate-limits', async () => {
+  const launched: LaunchSpec[] = [];
   let fail: Error | null = null;
   const s = await start(undefined, {}, { launch: async (r) => { if (fail) throw fail; launched.push(r); } });
   const cookie = await login(s);
@@ -1147,26 +1150,125 @@ test('POST /api/agents/start: owner only, validates project/room/task, launches,
   assert.equal((await control(s, cookie, path, { projectId, room: 'qa', task: 'x'.repeat(4001) })).status, 400);
   assert.equal((await control(s, cookie, path, { room: 'qa' })).status, 400);
   assert.equal(launched.length, 0);
-  // success
+  // success: the launcher gets a built spec whose files are on disk
   const r = await control(s, cookie, path, { projectId, room: 'frontend', task: "fix the nav; don't push" });
   assert.equal(r.status, 202);
-  assert.deepEqual(launched, [{ cwd: projectId, room: 'frontend', task: "fix the nav; don't push" }]);
+  const body = await r.json() as { room: string; launch: string; warnings: string[] };
+  assert.equal(launched.length, 1);
+  const spec = launched[0]!;
+  assert.equal(body.launch, spec.id);
+  assert.equal(body.room, 'frontend');
+  assert.deepEqual(body.warnings, []);
+  assert.equal(spec.cwd, projectId);
+  assert.equal(spec.room, 'frontend');
+  assert.equal(spec.runDir, join(s.home, 'run', spec.id));
+  assert.deepEqual(spec.args.slice(-4), ['--permission-mode', 'auto', '--', "fix the nav; don't push"]);
+  assert.ok(existsSync(join(spec.runDir, 'launch.json')));
   const feed = await c.waitFor((m) => m.t === 'feed' && m.item.event === 'Launch');
   assert.ok(feed.t === 'feed' && /Front end/.test(feed.item.detail));
-  // empty room = Bubbles picks
+  // empty room = the Bullpen for now (Bubbles intake before launch comes later)
   assert.equal((await control(s, cookie, path, { projectId, room: '', task: 't' })).status, 202);
-  assert.deepEqual(launched.at(-1), { cwd: projectId, room: '', task: 't' });
+  assert.equal(launched.at(-1)!.room, 'bullpen');
+  // a harness that cannot launch: 400 with the problem, nothing launched, no files left
+  const div = await control(s, cookie, '/api/divisions/qa/harness', { baseRevision: 1, harness: { mcp: ['nope'] } });
+  assert.equal(div.status, 200);
+  await c.waitFor((m) => m.t === 'building' && JSON.stringify(m.building.divisions).includes('nope'));
+  const runsBefore = readdirSync(join(s.home, 'run')).length;
+  const h = await control(s, cookie, path, { projectId, room: 'qa' });
+  assert.equal(h.status, 400);
+  assert.deepEqual(await h.json(), { error: 'MCP server "nope" is not in mcp.yaml' });
+  assert.equal(launched.length, 2);
+  assert.equal(readdirSync(join(s.home, 'run')).length, runsBefore);
   // launcher failure → error text, not counted
   fail = new (await import('../../src/server/launcher.ts')).LaunchError('could not open Terminal: boom');
-  const bad = await control(s, cookie, path, { projectId, room: 'qa' });
+  const bad = await control(s, cookie, path, { projectId, room: 'frontend' });
   assert.equal(bad.status, 500);
   assert.match((await bad.json() as { error: string }).error, /boom/);
   fail = null;
   // rate limit: 6 a minute
-  for (let i = 0; i < 4; i++) assert.equal((await control(s, cookie, path, { projectId, room: 'qa' })).status, 202);
-  assert.equal((await control(s, cookie, path, { projectId, room: 'qa' })).status, 429);
+  for (let i = 0; i < 4; i++) assert.equal((await control(s, cookie, path, { projectId, room: 'frontend' })).status, 202);
+  assert.equal((await control(s, cookie, path, { projectId, room: 'frontend' })).status, 429);
   assert.equal(launched.length, 6);
-  assert.equal(launched[0].room, 'frontend');
+  assert.equal(launched[0]!.room, 'frontend');
+  await c.close();
+});
+
+test('POST /api/settings: owner only, revision-checked, refuses bypass modes; launches use the default mode', async () => {
+  const launched: LaunchSpec[] = [];
+  const s = await start(undefined, {}, { launch: async (r) => { launched.push(r); } });
+  const cookie = await login(s);
+  const { c, snap } = await withProject(s, cookie);
+  assert.ok(snap.t === 'snapshot');
+  assert.deepEqual(snap.building.settings, { revision: 0, default_permission_mode: 'auto' });
+  const path = '/api/settings';
+  assert.equal((await fetch(`${s.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ baseRevision: 0, default_permission_mode: 'plan' }) })).status, 401);
+  assert.equal((await control(s, cookie, path, { baseRevision: 0, default_permission_mode: 'plan' }, { 'x-kubicle-csrf': '' })).status, 403);
+  assert.equal((await control(s, cookie, path, { baseRevision: 0, default_permission_mode: 'plan' }, { origin: 'http://evil.example' })).status, 403);
+  assert.equal(existsSync(join(s.home, 'settings.yaml')), false);
+  const bypass = await control(s, cookie, path, { baseRevision: 0, default_permission_mode: 'bypassPermissions' });
+  assert.equal(bypass.status, 400);
+  assert.match((await bypass.json() as { error: string }).error, /"bypassPermissions" is not allowed/);
+  assert.equal((await control(s, cookie, path, { baseRevision: 'x', default_permission_mode: 'plan' })).status, 400);
+  assert.equal((await control(s, cookie, path, { baseRevision: 0, default_permission_mode: 'plan', extra: 1 })).status, 400);
+  const ok = await control(s, cookie, path, { baseRevision: 0, default_permission_mode: 'plan' });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(await ok.json(), { revision: 1, default_permission_mode: 'plan' });
+  assert.equal(statSync(join(s.home, 'settings.yaml')).mode & 0o777, 0o600);
+  await c.waitFor((m) => m.t === 'building' && m.building.settings.default_permission_mode === 'plan');
+  const stale = await control(s, cookie, path, { baseRevision: 0, default_permission_mode: 'acceptEdits' });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(await stale.json(), { error: 'conflict', current: 1 });
+  const projectId = snap.projects[0].id;
+  assert.equal((await control(s, cookie, '/api/agents/start', { projectId, room: 'frontend', task: 'x' })).status, 202);
+  assert.deepEqual(launched[0]!.args.slice(-4), ['--permission-mode', 'plan', '--', 'x']);
+  await c.close();
+});
+
+test('Review Focus 3: unclaimed launch reported after 60 s; a claimed one is not', async () => {
+  let clock = Date.now();
+  const launched: LaunchSpec[] = [];
+  const s = await start(undefined, {}, { launch: async (r) => { launched.push(r); }, now: () => clock, launchCheckMs: 10 });
+  const cookie = await login(s);
+  const { c, snap } = await withProject(s, cookie);
+  assert.ok(snap.t === 'snapshot');
+  const projectId = snap.projects[0].id;
+  assert.equal((await control(s, cookie, '/api/agents/start', { projectId, room: 'frontend', task: 'a' })).status, 202);
+  assert.equal((await control(s, cookie, '/api/agents/start', { projectId, room: 'qa', task: 'b' })).status, 202);
+  const [unclaimed, claimed] = launched;
+  // the qa agent's SessionStart carries its launch id (from KUBICLE_LAUNCH via the shim)
+  const ev = await sockFetch(s, '/hooks', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken, 'x-kubicle-launch': claimed!.id, 'x-kubicle-room': 'qa' },
+    body: JSON.stringify({ ...fixture('SessionStart'), session_id: 'launched-1', cwd: projectId }),
+  });
+  assert.equal(ev.status, 200);
+  const view = await c.waitFor((m) => m.t === 'agent' && m.agent.sessionId === 'launched-1');
+  assert.ok(view.t === 'agent' && view.agent.launch === claimed!.id);
+  const missed = (m: ServerMsg) => m.t === 'feed' && /did not check in/.test(m.item.detail);
+  clock += 59_000;
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(c.msgs.some(missed), false, 'not yet at 59 s');
+  clock += 2_000;
+  const item = await c.waitFor(missed, 2000);
+  assert.ok(item.t === 'feed');
+  assert.equal(item.item.detail, 'The agent started in Front end did not check in. Check the terminal window.');
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(c.msgs.filter(missed).length, 1, 'reported once, and never for the claimed qa launch');
+  assert.ok(unclaimed);
+  await c.close();
+});
+
+test('a bad X-Kubicle-Launch header is ignored', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  await sockFetch(s, '/hooks', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-kubicle-token': s.ingestToken, 'x-kubicle-launch': 'not-a-uuid' },
+    body: JSON.stringify({ ...fixture('SessionStart'), session_id: 'badlaunch-1', cwd: tmpHome() }),
+  });
+  const view = await c.waitFor((m) => m.t === 'agent' && m.agent.sessionId === 'badlaunch-1');
+  assert.ok(view.t === 'agent' && view.agent.launch === undefined);
   await c.close();
 });
 
@@ -1287,4 +1389,32 @@ test('POST /api/mcp/:name and /api/skills/import: owner only, broadcast, validat
     assert.equal(r.status, 400);
     if ('source' in body && typeof body.source === 'string') assert.deepEqual(await r.json(), { error: 'not an importable skill' });
   }
+});
+
+test('Review Focus 1: a room whose division, override, MCP or settings file is broken does not launch (no last-good harness)', async () => {
+  const launched: LaunchSpec[] = [];
+  const s = await start(undefined, {}, { launch: async (r) => { launched.push(r); } });
+  const cookie = await login(s);
+  const { c, snap } = await withProject(s, cookie);
+  assert.ok(snap.t === 'snapshot');
+  const projectId = snap.projects[0].id;
+  const go = (room: string) => control(s, cookie, '/api/agents/start', { projectId, room, task: 'x' });
+  const qa = join(s.home, 'divisions', 'qa.yaml');
+  writeFileSync(qa, readFileSync(qa, 'utf8').replace('harness: {}', 'harness: { mcps: [] }'));
+  await c.waitFor((m) => m.t === 'building' && m.building.warnings.some((w) => w.includes('qa.yaml')));
+  const r = await go('qa');
+  assert.equal(r.status, 400);
+  assert.equal((await r.json() as { error: string }).error, `${qa} has a problem; fix it before starting an agent in this room`);
+  assert.equal((await go('frontend')).status, 202, 'other rooms still launch');
+  writeFileSync(join(s.home, 'mcp.yaml'), 'revision: [');
+  await c.waitFor((m) => m.t === 'building' && m.building.warnings.some((w) => w.includes('mcp.yaml')));
+  assert.equal((await go('frontend')).status, 400, 'a broken MCP catalog blocks every room');
+  rmSync(join(s.home, 'mcp.yaml'));
+  writeFileSync(join(s.home, 'settings.yaml'), 'revision: 1\ndefault_permission_mode: dontAsk\n');
+  await c.waitFor((m) => m.t === 'building' && m.building.warnings.some((w) => w.includes('settings.yaml')));
+  const st = await go('frontend');
+  assert.equal(st.status, 400, 'a broken settings file blocks every room');
+  assert.match((await st.json() as { error: string }).error, /settings\.yaml has a problem/);
+  assert.equal(launched.length, 1);
+  await c.close();
 });

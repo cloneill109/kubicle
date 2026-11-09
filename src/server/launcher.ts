@@ -1,90 +1,85 @@
-// "Start agent" from the office: opens a new macOS Terminal window running interactive `claude`
-// in the project, placed in a room (KUBICLE_ROOM), with the owner's task as the first prompt.
-// Runs on the owner's subscription like any terminal session: every ANTHROPIC_* / CLAUDE_CODE_USE_*
-// variable is unset first (the same rule as Bubbles). No model call is made by Kubicle itself.
+// "Start agent" from the office: opens a new terminal window that runs `kubicle agent <launch-id>`, which reads the
+// launch Kubicle built (<home>/run/<id>/launch.json: argv, env, secret names) and execs claude in the project.
 //
-// The task never passes through AppleScript or a shell command line built by us: it is written,
-// single-quoted, into a one-time 0700 script under <home>/run that `open -a <app>` runs, and that
-// script deletes itself as its first step.
-import { execFile } from 'node:child_process';
-import { readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { ID_RE } from '../shared/building.ts';
+// No task text, secret value or claude flag passes through AppleScript, a shell line or a terminal's argv: the window
+// only gets the launch id and the Kubicle home. Subscription only: `kubicle agent` drops every ANTHROPIC_* /
+// CLAUDE_CODE_USE_* variable. No model call is made by Kubicle itself.
+import { execFile, spawn } from 'node:child_process';
+import { accessSync, constants, rmSync, writeFileSync } from 'node:fs';
+import { delimiter, join, resolve } from 'node:path';
+import type { LaunchSpec } from './harness/resolve.ts';
+import { LaunchError, terminalCommand } from './terminal.ts';
+
+export { LaunchError, shq } from './terminal.ts';
 
 export const TASK_MAX = 4000;
-const STALE_MS = 60 * 60 * 1000;
 
-/** `room` '' = no KUBICLE_ROOM: Bubbles' intake picks the room and briefs the agent. */
-export interface LaunchRequest { cwd: string; room: string; task: string }
-export type Launch = (r: LaunchRequest) => Promise<void>;
+export type Launch = (spec: LaunchSpec) => Promise<void>;
 
-export class LaunchError extends Error {}
+const KUBICLE_BIN = resolve(import.meta.dirname, '..', '..', 'bin', 'kubicle');
 
-/** POSIX single-quoting: the only character that needs care inside '...' is ' itself. */
-export const shq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
+/** Office settings the window must share; a new terminal window does not inherit the office's env. */
+const FORWARDED = ['KUBICLE_CLAUDE_BIN', 'KUBICLE_SECRETS_STORE'] as const;
 
-/** Throws LaunchError for anything the script must not contain. */
-export function checkRequest(r: LaunchRequest): void {
-  if (r.room !== '' && !ID_RE.test(r.room)) throw new LaunchError('bad room');
-  if (typeof r.task !== 'string' || Array.from(r.task).length > TASK_MAX) throw new LaunchError(`task must be at most ${TASK_MAX} characters`);
-  if (/\0/.test(r.task) || /\0/.test(r.cwd)) throw new LaunchError('bad characters');
-  if (!r.cwd.startsWith('/')) throw new LaunchError('bad project folder');
+/** The argv the new window runs. On POSIX, FORWARDED variables set in the office go first via /usr/bin/env. */
+export function agentArgv(id: string, home: string, platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): string[] {
+  const argv = [process.execPath, '--disable-warning=ExperimentalWarning', KUBICLE_BIN, 'agent', id, '--home', home];
+  const fwd = platform === 'win32' ? [] : FORWARDED.filter((k) => env[k]).map((k) => `${k}=${env[k]}`);
+  return fwd.length > 0 ? ['/usr/bin/env', ...fwd, ...argv] : argv;
 }
 
-/** The launch script's text. Pure (tested). */
-export function launchScript(r: LaunchRequest): string {
-  checkRequest(r);
-  const task = r.task.replace(/\r\n?/g, '\n').trim();
-  return [
-    '#!/bin/bash',
-    '# One-time Kubicle launcher (deletes itself).',
-    'rm -f -- "$0"',
-    `cd -- ${shq(r.cwd)} || { echo "Kubicle: project folder is gone"; exit 1; }`,
-    // Subscription only: drop API keys and provider switches, as Bubbles does.
-    'for v in $(compgen -e); do case "$v" in ANTHROPIC_*|CLAUDE_CODE_USE_*) unset "$v";; esac; done',
-    r.room ? `export KUBICLE_ROOM=${shq(r.room)}` : 'unset KUBICLE_ROOM KUBICLE_DIVISION',
-    `printf '\\033]0;%s\\007' ${shq(`Kubicle · ${r.room || 'Bubbles picks the room'}`)}`,
-    task ? `exec claude -- ${shq(task)}` : 'exec claude',
-    '',
-  ].join('\n');
-}
-
-/** Old scripts whose Terminal never ran them (e.g. the app failed to open). */
-function sweep(dir: string, now: number): void {
-  let names: string[] = [];
-  try { names = readdirSync(dir); } catch { return; }
-  for (const n of names) {
-    if (!/^launch-[0-9a-f-]+\.command$/.test(n)) continue;
-    try { if (now - statSync(join(dir, n)).mtimeMs > STALE_MS) unlinkSync(join(dir, n)); } catch { /* gone */ }
+/** Whether `bin` is an executable on PATH (PATHEXT-aware on Windows). */
+export function onPath(bin: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const exts = process.platform === 'win32' ? ['', ...(env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';')] : [''];
+  for (const dir of (env.PATH ?? '').split(delimiter)) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      try { accessSync(join(dir, bin + ext), constants.X_OK); return true; } catch { /* next */ }
+    }
   }
+  return false;
 }
 
 export interface LauncherOptions {
-  /** Directory for the one-time scripts (<home>/run, mode 0700). */
-  runDir: string;
-  /** Terminal app name for `open -a` (KUBICLE_TERMINAL; default Terminal). */
+  /** Kubicle home (passed to `kubicle agent --home`, since the new window does not inherit KUBICLE_HOME). */
+  home: string;
+  /** KUBICLE_TERMINAL: app name for `open -a` on darwin (default Terminal), a `{cmd}` template on linux. */
   app?: string;
   platform?: NodeJS.Platform;
-  /** Test seam: runs `open`. */
-  open?: (args: string[]) => Promise<void>;
+  /** Test seam: runs the terminal command. */
+  run?: (file: string, args: string[], cwd: string) => Promise<void>;
+  /** Test seam: is a binary on PATH. */
+  which?: (bin: string) => boolean;
+  /** The office's env (default process.env): only FORWARDED variables are read from it. */
+  env?: NodeJS.ProcessEnv;
+}
+
+/** darwin: wait for `open` (it exits at once, and reports an unknown app). Elsewhere the terminal keeps running: detach. */
+function defaultRun(platform: NodeJS.Platform, app: string) {
+  return (file: string, args: string[], cwd: string) => new Promise<void>((ok, fail) => {
+    if (platform === 'darwin') {
+      execFile(file, args, { timeout: 10_000 }, (err, _out, stderr) => (err ? fail(new LaunchError(`could not open ${app || 'Terminal'}: ${String(stderr || err.message).trim()}`)) : ok()));
+      return;
+    }
+    const child = spawn(file, args, { cwd, detached: true, stdio: 'ignore', windowsHide: false });
+    child.once('error', (e) => fail(new LaunchError(`could not open a terminal (${file}): ${e.message}`)));
+    child.once('spawn', () => { child.unref(); ok(); });
+  });
 }
 
 export function makeLauncher(o: LauncherOptions): Launch {
   const platform = o.platform ?? process.platform;
-  const app = o.app || 'Terminal';
-  const open = o.open ?? ((args: string[]) => new Promise<void>((ok, fail) => {
-    execFile('/usr/bin/open', args, { timeout: 10_000 }, (err, _out, stderr) => (err ? fail(new LaunchError(`could not open ${app}: ${String(stderr || err.message).trim()}`)) : ok()));
-  }));
-  return async (r) => {
-    if (platform !== 'darwin') throw new LaunchError('Starting agents from the office needs macOS (it opens a Terminal window).');
-    const text = launchScript(r);
-    sweep(o.runDir, Date.now());
-    const file = join(o.runDir, `launch-${randomUUID()}.command`);
-    writeFileSync(file, text, { mode: 0o700, flag: 'wx' });
-    try { await open(['-a', app, file]); } catch (err) {
-      try { unlinkSync(file); } catch { /* already gone */ }
-      throw err instanceof LaunchError ? err : new LaunchError(String(err));
+  const run = o.run ?? defaultRun(platform, o.app ?? '');
+  const which = o.which ?? ((b: string) => onPath(b));
+  return async (spec) => {
+    try {
+      const cmd = terminalCommand(platform, { app: o.app, argv: agentArgv(spec.id, o.home, platform, o.env ?? process.env), cwd: spec.cwd, scriptDir: spec.runDir, which });
+      if (cmd.script) writeFileSync(cmd.script.path, cmd.script.text, { mode: 0o700, flag: 'wx' });
+      await run(cmd.file, cmd.args, spec.cwd);
+    } catch (err) {
+      // Nothing will ever read this launch: remove its files now rather than in 24 h.
+      rmSync(spec.runDir, { recursive: true, force: true });
+      throw err instanceof LaunchError ? err : new LaunchError(String(err instanceof Error ? err.message : err));
     }
   };
 }

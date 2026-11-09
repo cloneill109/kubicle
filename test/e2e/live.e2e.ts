@@ -19,6 +19,8 @@ import { loadConfig } from '../../src/server/config.ts';
 // default, so these office-approval tests still reach the owner.
 process.env.KUBICLE_CLAUDE_BIN = join(import.meta.dirname, '..', 'fixtures', 'fake-claude.mjs');
 process.env.FAKE_CLAUDE_MODE ??= 'escalate';
+// Launches open the secret store: never the OS keyring in tests.
+process.env.KUBICLE_SECRETS_STORE = 'file';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const outDir = join(root, 'test-results');
@@ -1148,10 +1150,12 @@ test('Start agent: header button and door sign open the dialog; Start asks the s
   await srv?.close();
   const home = join(tmp, 'home-start');
   const launched: { cwd: string; room: string; task: string }[] = [];
+  // What the test compares: where the built launch runs, and its task (the argument after `--`).
+  const seen = (r: { cwd: string; room: string; args: string[] }) => ({ cwd: r.cwd, room: r.room, task: r.args.includes('--') ? r.args.at(-1)! : '' });
   let failNext = false;
   srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, {
     openBrowser: false,
-    launch: async (r) => { if (failNext) { failNext = false; throw new (await import('../../src/server/launcher.ts')).LaunchError('could not open Terminal: test'); } launched.push(r); },
+    launch: async (r) => { if (failNext) { failNext = false; throw new (await import('../../src/server/launcher.ts')).LaunchError('could not open Terminal: test'); } launched.push(seen(r)); },
   });
   const eta = repo('eta');
   const page = await (await browser.newContext({ viewport: { width: 1400, height: 1000 } })).newPage();
@@ -1173,7 +1177,7 @@ test('Start agent: header button and door sign open the dialog; Start asks the s
   await page.locator('#startGo').click();
   await page.locator('#startDlg').waitFor({ state: 'hidden', timeout: 3000 });
   assert.deepEqual(launched, [{ cwd: floorId, room: 'frontend', task: "fix the nav; it's broken" }]);
-  await page.waitForFunction(() => [...document.querySelectorAll('#feed li')].some((li) => /Opened a Terminal for a new agent in Front end/.test(li.textContent ?? '')), null, { timeout: 3000 });
+  await page.waitForFunction(() => [...document.querySelectorAll('#feed li')].some((li) => /Opened a terminal for a new agent in Front end/.test(li.textContent ?? '')), null, { timeout: 3000 });
   await page.screenshot({ path: join(outDir, 'live-start-feed.png') });
 
   // door sign → dialog preselects that room; a launcher failure shows its message and keeps the dialog open
@@ -1192,11 +1196,11 @@ test('Start agent: header button and door sign open the dialog; Start asks the s
   await page.waitForFunction(() => /could not open Terminal: test/.test(document.getElementById('startMsg')!.textContent ?? ''), null, { timeout: 3000 });
   assert.ok(await page.locator('#startDlg').isVisible());
   assert.equal(launched.length, 1);
-  // Let Bubbles choose: no room is sent
+  // Let Bubbles choose: no room is sent (the launch starts in the Bullpen until intake-before-launch lands)
   await page.locator('#startRoom').selectOption('');
   await page.locator('#startGo').click();
   await page.locator('#startDlg').waitFor({ state: 'hidden', timeout: 3000 });
-  assert.deepEqual(launched[1], { cwd: floorId, room: '', task: 'x' });
+  assert.deepEqual(launched[1], { cwd: floorId, room: 'bullpen', task: 'x' });
   // Bubbles' office sign does not start agents
   const bsign = await page.evaluate(() => {
     const r = window.__office.signs().find((x) => x.roomId === '@bubbles')!;

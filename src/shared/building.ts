@@ -1,4 +1,4 @@
-import type { Harness } from './harness.ts';
+import type { Harness, PermissionMode } from './harness.ts';
 import type { McpCatalog, SkillInfo } from './catalog.ts';
 
 // Shared building model: divisions, floors, rooms. Browser-safe (no Node imports).
@@ -11,7 +11,12 @@ export interface RoomDef { id: string; name: string; division?: string; band: 't
 export interface FloorDef { revision: number; rooms: RoomDef[]; source: 'default' | 'home' | 'repo' }
 export interface RoomOverrides { revision: number; rooms: Record<string, Harness> }
 /** floors and overrides keyed by project id; a project with no overrides file has no overrides key */
+/** ~/.kubicle/settings.yaml (revision 0 and the defaults when absent). */
+export interface KubicleSettings { revision: number; default_permission_mode: PermissionMode }
+
 export interface Building {
+  /** global settings */
+  settings: KubicleSettings;
   divisions: DivisionDef[]; floors: Record<string, FloorDef>; overrides: Record<string, RoomOverrides>;
   /** ~/.kubicle/mcp.yaml (revision 0 and no servers when absent) */
   mcp: McpCatalog;

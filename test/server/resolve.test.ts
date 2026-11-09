@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { HarnessError, buildLaunch, resolveHarness, sweepRuns } from '../../src/server/harness/resolve.ts';
+import { HarnessError, buildLaunch, pidAlive, resolveHarness, sweepRuns } from '../../src/server/harness/resolve.ts';
 import { DEFAULT_DIVISIONS, defaultFloor, type Building } from '../../src/shared/building.ts';
-import type { Harness } from '../../src/shared/harness.ts';
+import { PROMPT_MAX, type Harness, type PermissionMode } from '../../src/shared/harness.ts';
 import type { McpServerDef } from '../../src/shared/catalog.ts';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'kub-rs-'));
@@ -37,8 +37,9 @@ function claudeSettings(dir: string, hooks: unknown = {
   return f;
 }
 
-function building(o: { div?: Record<string, Harness>; over?: Record<string, Harness>; servers?: Record<string, McpServerDef> } = {}): Building {
+function building(o: { div?: Record<string, Harness>; over?: Record<string, Harness>; servers?: Record<string, McpServerDef>; mode?: PermissionMode } = {}): Building {
   return {
+    settings: { revision: o.mode ? 1 : 0, default_permission_mode: o.mode ?? 'auto' },
     divisions: DEFAULT_DIVISIONS.map((d) => ({ ...d, harness: (o.div?.[d.id] ?? {}) as Record<string, unknown>, revision: 1 })),
     floors: {},
     overrides: o.over ? { [PROJECT]: { revision: 1, rooms: o.over } } : {},
@@ -82,7 +83,7 @@ test('default harness: args are just --settings, then -- and the task; env carri
   assert.equal(spec.cwd, PROJECT);
   assert.equal(spec.room, 'qa');
   assert.equal(spec.division, 'qa');
-  assert.deepEqual(spec.args, ['--settings', join(runDir, 'settings.json'), '--', 'do it']);
+  assert.deepEqual(spec.args, ['--settings', join(runDir, 'settings.json'), '--permission-mode', 'auto', '--', 'do it']);
   assert.deepEqual(spec.env, { KUBICLE_ROOM: 'qa', KUBICLE_LAUNCH: ID, KUBICLE_DIVISION: 'qa' });
   assert.deepEqual(spec.secrets, {});
   assert.deepEqual(readJson(join(runDir, 'settings.json')), {});
@@ -99,14 +100,14 @@ test('bullpen has no division env; empty task means no -- separator; a random id
   assert.match(spec.id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   assert.equal(spec.division, undefined);
   assert.deepEqual(spec.env, { KUBICLE_ROOM: 'bullpen', KUBICLE_LAUNCH: spec.id });
-  assert.deepEqual(spec.args, ['--settings', join(spec.runDir, 'settings.json')]);
+  assert.deepEqual(spec.args, ['--settings', join(spec.runDir, 'settings.json'), '--permission-mode', 'auto']);
 });
 
 test('inherit:false: --setting-sources "" and --strict-mcp-config; only Kubicle hooks are injected', () => {
   const { home, run } = setup(building({ div: { qa: { inherit: false } } }));
   const spec = run();
   const s = join(home, 'run', ID, 'settings.json');
-  assert.deepEqual(spec.args, ['--settings', s, '--setting-sources', '', '--strict-mcp-config', '--', 'do it']);
+  assert.deepEqual(spec.args, ['--settings', s, '--setting-sources', '', '--strict-mcp-config', '--permission-mode', 'auto', '--', 'do it']);
   assert.deepEqual(readJson(s), {
     hooks: {
       PreToolUse: [{ matcher: '*', hooks: [KUBICLE_PRE] }],
@@ -137,7 +138,7 @@ test('MCP with a secret: mcp.json has ${KUBICLE_SECRET_GITHUB}, spec.secrets map
   const { home, run, secrets } = setup(building({ div: { qa: { mcp: ['github'] } }, servers: { github: GITHUB, unused: { command: 'x' } } }), 'qa', { secrets: ['github'] });
   const spec = run();
   const runDir = join(home, 'run', ID);
-  assert.deepEqual(spec.args, ['--settings', join(runDir, 'settings.json'), '--mcp-config', join(runDir, 'mcp.json'), '--', 'do it']);
+  assert.deepEqual(spec.args, ['--settings', join(runDir, 'settings.json'), '--mcp-config', join(runDir, 'mcp.json'), '--permission-mode', 'auto', '--', 'do it']);
   assert.deepEqual(readJson(join(runDir, 'mcp.json')), {
     mcpServers: { github: { command: 'npx', args: ['-y', 'gh'], env: { GITHUB_PERSONAL_ACCESS_TOKEN: '${KUBICLE_SECRET_GITHUB}' } } },
   });
@@ -166,7 +167,7 @@ test('Review Focus 2: missing secret, MCP server or skill is a HarnessError; opt
     'Skill "x" is not in the skill library',
   ]);
   assert.deepEqual(spec.secrets, {});
-  assert.deepEqual(spec.args, ['--settings', join(spec.runDir, 'settings.json'), '--', 'do it']);
+  assert.deepEqual(spec.args, ['--settings', join(spec.runDir, 'settings.json'), '--permission-mode', 'auto', '--', 'do it']);
   assert.ok(!('warnings' in readJson(join(spec.runDir, 'launch.json'))));
 });
 
@@ -181,7 +182,7 @@ test('a skill becomes a plugin dir named kubicle-room-<room> with SKILL.md copie
   symlinkSync(outside, join(lib, 'leak.txt'));
   const spec = run();
   const plugin = join(spec.runDir, 'plugin');
-  assert.deepEqual(spec.args, ['--settings', join(spec.runDir, 'settings.json'), '--plugin-dir', plugin, '--', 'do it']);
+  assert.deepEqual(spec.args, ['--settings', join(spec.runDir, 'settings.json'), '--plugin-dir', plugin, '--permission-mode', 'auto', '--', 'do it']);
   assert.equal(readJson(join(plugin, '.claude-plugin', 'plugin.json')).name, 'kubicle-room-qa');
   assert.equal(readFileSync(join(plugin, 'skills', 'frontend-design', 'SKILL.md'), 'utf8'), '---\nname: frontend-design\ndescription: d\n---\nbody\n');
   assert.ok(existsSync(join(plugin, 'skills', 'frontend-design', 'scripts', 'a.sh')));
@@ -215,6 +216,7 @@ test('model, prompt, tools and briefing args in order', () => {
     '--model', 'sonnet',
     '--append-system-prompt', 'Be QA.\n\n[Kubicle/Bubbles briefing]\nLook at login.',
     '--tools', 'Read,Grep',
+    '--permission-mode', 'auto',
     '--', '-starts with a dash',
   ]);
   const rep = setup(building({ div: { qa: { prompt: 'Only this.', prompt_mode: 'replace' } } }));
@@ -264,7 +266,8 @@ test('resolveHarness: division then override; bullpen and custom rooms use the o
 
 test('task limits: too long or NUL is a HarnessError', () => {
   assert.deepEqual(problemsOf(setup(building(), 'qa', { task: 'a\0b' }).run), ['The task contains characters that cannot be passed to claude.']);
-  assert.deepEqual(problemsOf(setup(building({ div: { qa: { prompt: 'p\0' } } })).run), ['The task contains characters that cannot be passed to claude.']);
+  assert.deepEqual(problemsOf(setup(building({ div: { qa: { prompt: 'p\0' } } })).run), ['Division "qa": prompt must not contain NUL characters']);
+  assert.deepEqual(problemsOf(setup(building(), 'qa', { briefing: 'b\0' }).run), ['The task contains characters that cannot be passed to claude.']);
   assert.deepEqual(problemsOf(setup(building(), 'qa', { task: 'x'.repeat(4001) }).run), ['The task must be at most 4000 characters.']);
   setup(building(), 'qa', { task: 'x'.repeat(4000) }).run();
 });
@@ -314,4 +317,64 @@ test('a failure while writing removes the partial runDir', () => {
   } finally { chmodSync(join(lib, 'sub'), 0o700); }
   assert.ok(!existsSync(join(home, 'run', ID)));
   assert.ok(existsSync(join(home, 'run')));
+});
+
+test("--permission-mode: the room's mode, else the global default, else auto; manual is passed as default", () => {
+  const at = (args: string[]) => args.slice(args.indexOf('--permission-mode'), args.indexOf('--permission-mode') + 2);
+  assert.deepEqual(at(setup(building()).run().args), ['--permission-mode', 'auto']);
+  assert.deepEqual(at(setup(building({ mode: 'plan' })).run().args), ['--permission-mode', 'plan']);
+  assert.deepEqual(at(setup(building({ mode: 'plan', div: { qa: { permission_mode: 'acceptEdits' } } })).run().args), ['--permission-mode', 'acceptEdits']);
+  assert.deepEqual(at(setup(building({ mode: 'plan', div: { qa: { permission_mode: 'acceptEdits' } }, over: { qa: { permission_mode: 'manual' } } })).run().args), ['--permission-mode', 'default']);
+  const old = building();
+  delete (old as Partial<Building>).settings; // a building from before settings existed
+  assert.deepEqual(at(setup(old).run().args), ['--permission-mode', 'auto']);
+  // a bypass mode smuggled past validation (e.g. an older file) never reaches claude
+  assert.deepEqual(problemsOf(setup(building({ div: { qa: { permission_mode: 'bypassPermissions' as PermissionMode } } })).run),
+    ['Division "qa": permission_mode "bypassPermissions" is not allowed: it would skip your approvals']);
+  const bad = building();
+  bad.settings.default_permission_mode = 'dontAsk' as PermissionMode;
+  assert.deepEqual(at(setup(bad).run().args), ['--permission-mode', 'auto']);
+});
+
+test('the briefing is capped at PROMPT_MAX', () => {
+  setup(building(), 'qa', { briefing: 'b'.repeat(PROMPT_MAX) }).run();
+  assert.deepEqual(problemsOf(setup(building(), 'qa', { briefing: 'b'.repeat(PROMPT_MAX + 1) }).run), [`The briefing must be at most ${PROMPT_MAX} characters.`]);
+});
+
+test('an existing run root is tightened to 0700', () => {
+  const { home, run } = setup(building());
+  mkdirSync(join(home, 'run'), { mode: 0o755 });
+  chmodSync(join(home, 'run'), 0o755);
+  run();
+  assert.equal(statSync(join(home, 'run')).mode & 0o777, 0o700);
+});
+
+test('sweepRuns keeps an old dir whose pid file names a live process', () => {
+  const home = tmp();
+  const run = join(home, 'run');
+  const ids = ['00000000-0000-4000-8000-00000000000a', '00000000-0000-4000-8000-00000000000b', '00000000-0000-4000-8000-00000000000c', '00000000-0000-4000-8000-00000000000d'];
+  const pids: Record<string, string | null> = { [ids[0]!]: '4242', [ids[1]!]: '4343', [ids[2]!]: null, [ids[3]!]: 'garbage' };
+  const now = Date.now();
+  const past = new Date(now - 25 * 3600_000);
+  for (const id of ids) {
+    const d = join(run, id);
+    mkdirSync(d, { recursive: true });
+    if (pids[id] !== null) writeFileSync(join(d, 'pid'), pids[id]!);
+    utimesSync(d, past, past);
+  }
+  const asked: number[] = [];
+  sweepRuns(home, now, (pid) => { asked.push(pid); return pid === 4242; });
+  assert.ok(existsSync(join(run, ids[0]!)), 'live claude: kept');
+  assert.ok(!existsSync(join(run, ids[1]!)), 'dead pid: swept');
+  assert.ok(!existsSync(join(run, ids[2]!)), 'no pid file: swept');
+  assert.ok(!existsSync(join(run, ids[3]!)), 'unreadable pid: swept');
+  assert.deepEqual(asked.sort(), [4242, 4343]);
+});
+
+test('pidAlive: this process is alive, a reaped child is not, EPERM counts as alive', () => {
+  assert.equal(pidAlive(process.pid), true);
+  assert.equal(pidAlive(1), true, 'launchd/init: EPERM, still alive');
+  assert.equal(pidAlive(0), false);
+  assert.equal(pidAlive(-1), false);
+  assert.equal(pidAlive(2 ** 22 + 12345), false);
 });

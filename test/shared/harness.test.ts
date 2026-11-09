@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { harnessProblems, mergeHarness, effective, HARNESS_KEYS } from '../../src/shared/harness.ts';
+import { harnessProblems, mergeHarness, effective, HARNESS_KEYS, PERMISSION_MODES } from '../../src/shared/harness.ts';
 
 test('harnessProblems accepts valid harnesses', () => {
   assert.deepEqual(harnessProblems({}), []);
@@ -32,7 +32,35 @@ test('harnessProblems other invalid shapes', () => {
 });
 
 test('HARNESS_KEYS lists every key', () => {
-  assert.deepEqual([...HARNESS_KEYS].sort(), ['allow', 'ask', 'deny', 'inherit', 'mcp', 'model', 'optional', 'prompt', 'prompt_mode', 'skills', 'tools']);
+  assert.deepEqual([...HARNESS_KEYS].sort(), ['allow', 'ask', 'deny', 'inherit', 'mcp', 'model', 'optional', 'permission_mode', 'prompt', 'prompt_mode', 'skills', 'tools']);
+});
+
+test('model and tools must look like a model id and tool names', () => {
+  for (const m of ['sonnet', 'claude-opus-4-1', 'claude-sonnet-4-5[1m]', 'us.anthropic.claude:v1', 'opus_4.1']) assert.deepEqual(harnessProblems({ model: m }), [], m);
+  for (const m of ['', '-p', '--dangerously-skip-permissions', 'a b', 'x\0', 'sonnet;rm']) assert.deepEqual(harnessProblems({ model: m }), [`model "${m}" is not a model name`], m);
+  assert.deepEqual(harnessProblems({ tools: ['Read', 'Grep', 'NotebookEdit', 'mcp_x'] }), []);
+  for (const t of ['Bash(git:*)', '-Read', 'Read,Write', '1x', 'Re ad']) assert.deepEqual(harnessProblems({ tools: [t] }), [`tool name "${t}" is invalid`], t);
+});
+
+test('NUL is refused in the prompt and in permission rules', () => {
+  assert.deepEqual(harnessProblems({ prompt: 'a\0b' }), ['prompt must not contain NUL characters']);
+  for (const k of ['allow', 'ask', 'deny']) assert.deepEqual(harnessProblems({ [k]: ['Bash(\0)'] }), [`${k} entries must not contain NUL characters`], k);
+});
+
+test('permission_mode: auto, acceptEdits, manual or plan; the bypass modes are refused by name', () => {
+  for (const m of PERMISSION_MODES) assert.deepEqual(harnessProblems({ permission_mode: m }), [], m);
+  assert.deepEqual([...PERMISSION_MODES], ['auto', 'acceptEdits', 'manual', 'plan']);
+  assert.deepEqual(harnessProblems({ permission_mode: 'bypassPermissions' }), ['permission_mode "bypassPermissions" is not allowed: it would skip your approvals']);
+  assert.deepEqual(harnessProblems({ permission_mode: 'dontAsk' }), ['permission_mode "dontAsk" is not allowed: it would skip your approvals']);
+  assert.deepEqual(harnessProblems({ permission_mode: 'yolo' }), ['permission_mode must be auto, acceptEdits, manual or plan']);
+  assert.deepEqual(harnessProblems({ permission_mode: 3 }), ['permission_mode must be auto, acceptEdits, manual or plan']);
+});
+
+test('merge: permission_mode is a scalar the override replaces', () => {
+  assert.equal(mergeHarness({ permission_mode: 'plan' }, {}).permission_mode, 'plan');
+  assert.equal(mergeHarness({ permission_mode: 'plan' }, { permission_mode: 'acceptEdits' }).permission_mode, 'acceptEdits');
+  assert.equal(effective(mergeHarness({}, { permission_mode: 'manual' })).permissionMode, 'manual');
+  assert.equal(effective({}).permissionMode, undefined);
 });
 
 test('merge: prompt concatenates, lists merge with removal', () => {

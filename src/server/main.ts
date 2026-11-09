@@ -4,6 +4,9 @@ import { createServer, type Server } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { makeLauncher, type Launch } from './launcher.ts';
+import { LaunchWatch, checkInMessage } from './launch-watch.ts';
+import { HarnessError, buildLaunch } from './harness/resolve.ts';
+import { openSecrets } from './harness/secrets.ts';
 import { fileURLToPath } from 'node:url';
 import type { BubblesState, FeedItem } from '../shared/protocol.ts';
 import { loadBubblesConfig } from './bubbles/config.ts';
@@ -112,8 +115,10 @@ export interface StartOpts {
   bubbles?: { bin?: string; env?: Record<string, string | undefined>; timeouts?: Partial<Timeouts> };
   /** Test hook: the clock for hook event timestamps and the intake idle gate. */
   now?: () => number;
-  /** Test hook: replaces opening a Terminal for "Start agent". */
+  /** Test hook: replaces opening a terminal for "Start agent". */
   launch?: Launch;
+  /** Test hook: how often unclaimed launches are checked (default 5 s). */
+  launchCheckMs?: number;
 }
 
 export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<RunningServer> {
@@ -228,9 +233,21 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
     onAgent: (a) => hub.broadcast({ t: 'agent', agent: a }),
     onError: log,
   });
+  const clock = opts.now ?? Date.now;
+  const launchWatch = new LaunchWatch();
   const handler = createHandler({
     cfg, ingestToken, auth, store, writer, projects, registry, building, approvals, hub, pushFeed, rootDir: ROOT, port, log, flow,
-    launch: opts.launch ?? makeLauncher({ runDir: dirname(cfg.hookSocket), app: process.env.KUBICLE_TERMINAL }),
+    launch: opts.launch ?? makeLauncher({ home: cfg.home, app: process.env.KUBICLE_TERMINAL }),
+    // The secret store is opened per launch and only asked `has`: values are read by `kubicle agent`, never here.
+    prepareLaunch: ({ projectId, roomId, task }) => {
+      const blockers = building.launchBlockers(projectId, roomId);
+      if (blockers.length > 0) throw new HarnessError(blockers);
+      return buildLaunch({
+      home: cfg.home, claudeSettings: join(cfg.claudeDir, 'settings.json'), building: building.snapshot(),
+        projectId, roomId, task, secrets: openSecrets(cfg.home),
+      });
+    },
+    launchWatch,
     bubbles: { policy, log: bubblesLog, state: bubblesState, ownerToggledOn: () => bubbles.ownerToggledOn(), changed: bubblesChanged, intake: (r) => bubbles.intake(r) },
     ...(opts.now ? { now: opts.now } : {}),
     onBadToken: () => {
@@ -284,6 +301,17 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
     } catch (err) { log(`tick failed: ${String(err)}`); }
   }, TICK_MS);
   tick.unref();
+  // Review Focus 3: a window that never ran `kubicle agent` (wrong terminal app, claude missing) is reported, once.
+  const launchCheck = setInterval(() => {
+    try {
+      for (const room of launchWatch.overdue(clock())) {
+        const item: FeedItem = { ts: clock(), event: 'Launch', agentName: 'Office', detail: checkInMessage(room) };
+        pushFeed(item);
+        hub.broadcast({ t: 'feed', item });
+      }
+    } catch (err) { log(`launch check failed: ${String(err)}`); }
+  }, opts.launchCheckMs ?? TICK_MS);
+  launchCheck.unref();
   const prune = () => { try { store.prune(Date.now() - KEEP_EVENTS_MS); } catch (err) { log(`prune failed: ${String(err)}`); } };
   prune();
   const pruner = setInterval(prune, PRUNE_MS);
@@ -301,6 +329,7 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   const close = () => closing ??= (async () => {
     clearInterval(tick);
     clearInterval(pruner);
+    clearInterval(launchCheck);
     approvals.releaseAll(); // pending hooks get an empty (no-decision) response
     await new Promise((r) => setImmediate(r));
     hub.close();

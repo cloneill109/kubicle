@@ -46,6 +46,10 @@ fi
 if [[ "${KUBICLE_ROOM:-}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]]; then
   extra+=(-H "X-Kubicle-Room: $KUBICLE_ROOM")
 fi
+# The office's launch id (kubicle agent sets it): lets the office see that a window it opened checked in.
+if [[ "${KUBICLE_LAUNCH:-}" =~ ^[0-9a-f-]{36}$ ]] && [ "${#KUBICLE_LAUNCH}" -eq 36 ]; then
+  extra+=(-H "X-Kubicle-Launch: $KUBICLE_LAUNCH")
+fi
 
 # While the office waits it sends a space every 0.5 s; a frozen server sends nothing, so
 # --speed-limit/--speed-time give up after ~3 s instead of holding the session for the full max.

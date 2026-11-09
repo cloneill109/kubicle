@@ -17,6 +17,8 @@ export interface AgentEvent {
   /** From the x-kubicle-division / x-kubicle-room ingest headers (ID_RE-valid only). */
   division?: string;
   room?: string;
+  /** From the x-kubicle-launch header (KUBICLE_LAUNCH, set by `kubicle agent`): the office launch this session is. */
+  launch?: string;
   cwd?: string;
   transcriptPath?: string;
   toolName?: string;

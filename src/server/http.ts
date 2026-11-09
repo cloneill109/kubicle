@@ -23,6 +23,9 @@ import type { Projects } from './projects.ts';
 import type { Registry } from './registry.ts';
 import type { EventWriter, Store } from './store.ts';
 import { LaunchError, TASK_MAX, type Launch } from './launcher.ts';
+import { HarnessError, type LaunchSpec } from './harness/resolve.ts';
+import type { LaunchWatch } from './launch-watch.ts';
+import { permissionModeProblem, type PermissionMode } from '../shared/harness.ts';
 
 export const BODY_LIMIT = 2 * 1024 * 1024;
 export const BODY_TIMEOUT_MS = 10_000;
@@ -30,6 +33,7 @@ export const BODY_TIMEOUT_MS = 10_000;
 export const HEARTBEAT_MS = 500;
 export const LOGIN_HINT = 'This login link was already used. Restart the server for a new one.';
 const NAME_MAX = 80;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ORDER_MAX = 999;
 
 // connect-src names the bound port; frame-ancestors blocks clickjacking from other local ports
@@ -74,8 +78,12 @@ export interface HttpDeps {
     intake(r: IntakeRequest): Promise<IntakeOutcome>;
   };
   pushFeed(item: FeedItem): void;
-  /** "Start agent": opens a Terminal running claude in a room (absent: the route answers 501). */
+  /** "Start agent": opens a terminal running `kubicle agent <id>` for a built launch (absent: the route answers 501). */
   launch?: Launch;
+  /** Builds a room's launch (buildLaunch with the current building and secret store). Throws HarnessError. */
+  prepareLaunch?(o: { projectId: string; roomId: string; task: string }): LaunchSpec;
+  /** Launches waiting for their session's first hook event (Review Focus 3). */
+  launchWatch?: LaunchWatch;
   /** A hook arrived with a missing or wrong ingest token (I4). */
   onBadToken?(): void;
   /**
@@ -233,6 +241,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       const { toolInput: _i, toolInputTruncated: _t, ...stored } = e;
       d.writer.push(stored);
     } else d.writer.push(e);
+    if (e.launch) d.launchWatch?.claim(e.launch);
     const r = d.registry.apply(e);
     broadcastAgents(r.changed);
     for (const x of r.removed) broadcast({ t: 'agentRemoved', id: x.id, reason: x.reason });
@@ -256,6 +265,8 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     const division = hint(req, 'x-kubicle-division'), room = hint(req, 'x-kubicle-room');
     if (division) e.division = division;
     if (room) e.room = room;
+    const launch = req.headers['x-kubicle-launch'];
+    if (typeof launch === 'string' && UUID_RE.test(launch)) e.launch = launch;
     const rawInput = isObj(raw) ? raw.tool_input : undefined;
     if (e.event === 'PreToolUse' && req.headers['x-kubicle-hook-kind'] === 'pre') {
       // The guard answers first and synchronously (no model, no wait); ingest happens after.
@@ -688,24 +699,54 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     if (!project) return err(404, 'unknown project');
     if (project.archived) return err(400, 'this floor is archived; restore it in the Lobby first');
     const floor = d.building.snapshot().floors[project.id];
-    const room = b.room === '' ? { id: '', name: 'a room Bubbles picks' } : floor?.rooms.find((r) => r.id === b.room);
+    // '' (let Bubbles choose) starts in the Bullpen for now; intake before launch comes with the briefing.
+    const roomId = b.room === '' ? BULLPEN : b.room;
+    const room = floor?.rooms.find((r) => r.id === roomId);
     if (!room) return err(400, `no room "${b.room}" on this floor`);
     try { if (!(await stat(project.id)).isDirectory()) throw new Error(); } catch { return err(400, `the project folder ${project.id} is missing`); }
-    if (!d.launch) return err(501, 'starting agents is not available here');
+    if (!d.launch || !d.prepareLaunch) return err(501, 'starting agents is not available here');
     const t = Date.now();
     while (launches.length && t - launches[0] > LAUNCH_WINDOW_MS) launches.shift();
     if (launches.length >= LAUNCH_MAX) return err(429, `at most ${LAUNCH_MAX} agents a minute; wait a moment`);
+    let spec: LaunchSpec;
+    try { spec = d.prepareLaunch({ projectId: project.id, roomId: room.id, task }); }
+    catch (e) {
+      if (e instanceof HarnessError) return err(400, e.message);
+      throw e;
+    }
     try {
-      await d.launch({ cwd: project.id, room: room.id, task });
+      await d.launch(spec);
     } catch (e) {
-      if (e instanceof LaunchError) return err(e.message.includes('macOS') ? 501 : 500, e.message);
+      if (e instanceof LaunchError) return err(500, e.message);
       throw e;
     }
     launches.push(t);
-    const item: FeedItem = { ts: t, event: 'Launch', agentName: 'Office', detail: `Opened a Terminal for a new agent in ${room.name}` };
+    d.launchWatch?.add(spec.id, room.name, now());
+    const item: FeedItem = { ts: t, event: 'Launch', agentName: 'Office', detail: `Opened a terminal for a new agent in ${room.name}` };
     d.pushFeed(item);
     broadcast({ t: 'feed', item });
-    sendJson(res, 202, { room: room.id });
+    sendJson(res, 202, { room: room.id, launch: spec.id, warnings: spec.warnings });
+  }
+
+  async function settingsSave(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!guard(req, res)) return;
+    const b = await readJson(req);
+    const err = (status: number, error: string) => send(res, status, JSON.stringify({ error }), JSON_HDR);
+    if (!isObj(b) || !Number.isInteger(b.baseRevision) || (b.baseRevision as number) < 0 || Object.keys(b).some((k) => k !== 'baseRevision' && k !== 'default_permission_mode')) {
+      return err(400, 'body must be { baseRevision: integer >= 0, default_permission_mode }');
+    }
+    const problem = permissionModeProblem('default_permission_mode', b.default_permission_mode);
+    if (problem) return err(400, problem);
+    try {
+      sendJson(res, 200, d.building.saveSettings({ default_permission_mode: b.default_permission_mode as PermissionMode }, b.baseRevision as number));
+    } catch (e) {
+      if (e instanceof RevisionConflict) {
+        d.building.refresh();
+        return send(res, 409, JSON.stringify({ error: 'conflict', current: e.current }), JSON_HDR);
+      }
+      if (e instanceof BuildingFileError) return err(400, e.message);
+      throw e;
+    }
   }
 
   function login(req: IncomingMessage, res: ServerResponse, url: URL): void {
@@ -767,6 +808,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       if (mm) return mcpSave(req, res, param(mm[1]));
       if (p === '/api/skills/import') return skillImport(req, res);
       if (p === '/api/agents/start') return agentStart(req, res);
+      if (p === '/api/settings') return settingsSave(req, res);
       mm = /^\/api\/agents\/([^/]+)\/room$/.exec(p);
       if (mm) return agentRoom(req, res, param(mm[1]));
       mm = /^\/api\/bubbles\/(enabled|instructions|grants|revoke)$/.exec(p);

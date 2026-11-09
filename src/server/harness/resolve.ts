@@ -6,7 +6,7 @@ import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, sta
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { BULLPEN, defaultFloor, type Building, type RoomDef } from '../../shared/building.ts';
-import { effective, harnessProblems, mergeHarness, type Effective, type Harness } from '../../shared/harness.ts';
+import { PROMPT_MAX, effective, harnessProblems, mergeHarness, permissionModeProblem, type Effective, type Harness, type PermissionMode } from '../../shared/harness.ts';
 import { writeAtomic } from '../fsutil.ts';
 import { DIR_MODE, FILE_MODE } from '../building/files.ts';
 import { TASK_MAX } from '../launcher.ts';
@@ -65,8 +65,24 @@ export function resolveHarness(b: Building, projectId: string, roomId: string): 
   return resolve(b, projectId, roomId).eff;
 }
 
-/** Removes <home>/run/<uuid> directories last modified more than 24 h before `nowMs`. Nothing else in run/ is touched. */
-export function sweepRuns(home: string, nowMs: number): void {
+/** Whether a process with this pid exists (EPERM: it exists but belongs to someone else). */
+export function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
+}
+
+/** The pid `kubicle agent` recorded for the claude it started in `dir`, or null. */
+function runPid(dir: string): number | null {
+  let text: string;
+  try { text = readFileSync(join(dir, 'pid'), 'utf8').trim(); } catch { return null; }
+  return /^[1-9][0-9]{0,9}$/.test(text) ? Number(text) : null;
+}
+
+/**
+ * Removes <home>/run/<uuid> directories last modified more than 24 h before `nowMs`, except one whose `pid` file
+ * names a live process (a claude session still using its settings and plugin files). Nothing else in run/ is touched.
+ */
+export function sweepRuns(home: string, nowMs: number, alive: (pid: number) => boolean = pidAlive): void {
   const run = join(home, 'run');
   let names: string[];
   try { names = readdirSync(run); } catch { return; }
@@ -75,9 +91,18 @@ export function sweepRuns(home: string, nowMs: number): void {
     const p = join(run, n);
     try {
       const st = lstatSync(p);
-      if (st.isDirectory() && nowMs - st.mtimeMs > SWEEP_MS) rmSync(p, { recursive: true, force: true });
+      if (!st.isDirectory() || nowMs - st.mtimeMs <= SWEEP_MS) continue;
+      const pid = runPid(p);
+      if (pid !== null && alive(pid)) continue;
+      rmSync(p, { recursive: true, force: true });
     } catch { /* raced or unreadable: leave it */ }
   }
+}
+
+/** The mode claude gets: the room's, else the global default, else auto. Kubicle's `manual` is Claude's `default`. */
+function claudePermissionMode(room: PermissionMode | undefined, global: unknown): string {
+  const mode = room ?? (permissionModeProblem('', global) === null ? global as PermissionMode : 'auto');
+  return mode === 'manual' ? 'default' : mode;
 }
 
 /** The installed Kubicle hook groups from Claude's user settings (other hooks dropped). Null when none. */
@@ -123,6 +148,7 @@ export function buildLaunch(o: {
   if (Array.from(task).length > TASK_MAX) throw new HarnessError([`The task must be at most ${TASK_MAX} characters.`]);
   const { room, eff, warnings } = resolve(o.building, o.projectId, o.roomId);
 
+  if (o.briefing && o.briefing.length > PROMPT_MAX) throw new HarnessError([`The briefing must be at most ${PROMPT_MAX} characters.`]);
   let prompt = eff.prompt;
   if (o.briefing) prompt = (prompt === undefined ? '' : `${prompt}\n\n`) + `[Kubicle/Bubbles briefing]\n${o.briefing}`;
   if ([task, prompt ?? '', o.projectId].some((s) => s.includes('\0'))) throw new HarnessError([BAD_CHARS]);
@@ -158,6 +184,7 @@ export function buildLaunch(o: {
   const runRoot = join(o.home, 'run');
   const runDir = join(runRoot, id);
   mkdirSync(runRoot, { recursive: true, mode: DIR_MODE });
+  chmodSync(runRoot, DIR_MODE); // an existing run/ may be looser
   mkdirSync(runDir, { mode: DIR_MODE }); // throws if it exists: never reuse or follow a planted path
   try {
     chmodSync(runDir, DIR_MODE);
@@ -193,6 +220,7 @@ export function buildLaunch(o: {
       args.push(replace ? '--system-prompt' : '--append-system-prompt', prompt);
     }
     if (eff.tools !== undefined) args.push('--tools', eff.tools.join(','));
+    args.push('--permission-mode', claudePermissionMode(eff.permissionMode, o.building.settings?.default_permission_mode));
     if (task !== '') args.push('--', task);
 
     const env: Record<string, string> = { KUBICLE_ROOM: room.id, KUBICLE_LAUNCH: id };

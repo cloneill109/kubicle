@@ -4,11 +4,12 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../server/config.ts';
 import { BuildingFileError } from '../server/building/files.ts';
-import { CliError, USAGE, UsageError } from './args.ts';
+import { CliError, USAGE, UsageError, expectPositionals, parseArgs } from './args.ts';
 import { bubblesCommand } from './bubbles.ts';
 import { divisionCommand } from './division.ts';
 import { floorCommand } from './floor.ts';
 import { secretCommand } from './secret.ts';
+import { agentMain } from './agent.ts';
 import { main as installMain } from './install.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -47,6 +48,11 @@ export async function main(argv: string[]): Promise<number> {
       case 'floor': return floorCommand(rest, home);
       case 'division': return divisionCommand(rest, home);
       case 'secret': return secretCommand(rest, home);
+      case 'agent': {
+        const p = parseArgs(rest, ['home']);
+        expectPositionals(p, 1, '`agent <launch-id>`');
+        return await agentMain(p.positionals[0]!, p.flags.get('home') || home);
+      }
       case 'grant': case 'instruct': case 'revoke': case 'bubbles': case 'log':
         return await bubblesCommand(cmd, rest, cfg);
       default:
