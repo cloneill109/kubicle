@@ -334,3 +334,21 @@ test('M2: skill remove unlinks a dangling symlink', () => {
   assert.equal(r.status, 0, r.stderr);
   assert.throws(() => lstatSync(link), /ENOENT/);
 });
+
+test('fix round 2: multi-line / tab / CRLF secrets echoed by the server are scrubbed before control characters are stripped', async () => {
+  const secrets = ['-----BEGIN\nABCDEF\n-----END', 'tab\tSECRETTAB', 'crlf\r\nSECRETCRLF'];
+  for (const secret of secrets) {
+    const st = store({ k: secret });
+    const parts = secret.split(/[\n\r\t]+/);
+    const none = (r: unknown) => { const j = JSON.stringify(r); for (const p of parts) assert.equal(j.includes(p), false, `${p} leaked in ${j}`); };
+    none(await testMcp({ command: process.execPath, args: [FIXTURE, 'env'], env: { FIXTURE_TOK: 'secret:k' } }, process.env, 5000, st));
+    none(await testMcp({ command: process.execPath, args: [FIXTURE, 'refuse'], env: { FIXTURE_MSG: 'x secret:k y' } }, process.env, 5000, st));
+    try {
+      // a newline cannot ride in a header, so for those secrets the http call fails to connect (still no leak); the tab secret does reach the server
+      const echoed = await httpServer((_q, res) => { res.setHeader('content-type', 'application/json'); res.end(rpc(secret)); });
+      try { none(await testMcp({ type: 'http', url: echoed.url, headers: { 'X-K': 'secret:k' } }, {}, 5000, st).catch(() => null)); } finally { echoed.close(); }
+      const refusing = await httpServer((_q, res) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -1, message: `x ${secret} y` } })); });
+      try { none(await testMcp({ type: 'http', url: refusing.url, headers: { 'X-K': 'secret:k' } }, {}, 5000, st)); } finally { refusing.close(); }
+    } finally { /* servers closed above */ }
+  }
+});

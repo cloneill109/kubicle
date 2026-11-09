@@ -63,7 +63,8 @@ export async function testMcp(server: McpServerDef, env: Record<string, string |
 }
 
 function clean(s: string, values: Set<string>): string {
-  const out = scrubAll(s.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' '), values);
+  // Order matters: scrub the raw text first (a secret may contain newlines or tabs), then strip, then cap.
+  const out = scrubAll(s, values).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
   return out.length > MAX_ERR ? `${out.slice(0, MAX_ERR)}...` : out;
 }
 
