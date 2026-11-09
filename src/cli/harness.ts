@@ -8,9 +8,9 @@ import { BuildingService } from '../server/building/service.ts';
 import type { Config } from '../server/config.ts';
 import { HarnessError, resolveHarness } from '../server/harness/resolve.ts';
 import { secretRefs } from '../server/harness/catalog.ts';
-import { openSecrets } from '../server/harness/secrets.ts';
+import { openSecrets, type SecretStore } from '../server/harness/secrets.ts';
 import { CliError, UsageError, expectPositionals, parseArgs } from './args.ts';
-import { projectOf } from './floor.ts';
+import { currentFloor, projectOf } from './floor.ts';
 
 export interface Loaded { root: string; service: BuildingService; building: Building; room: RoomDef }
 
@@ -18,6 +18,8 @@ export interface Loaded { root: string; service: BuildingService; building: Buil
 export function loadRoom(target: string, flags: Map<string, string>, cfg: Config): Loaded {
   const root = projectOf(flags, cfg.home, false);
   const row: ProjectRow = { id: root, name: root, order: 0, slug: slugFor(root), approvals: 'off', archived: false, firstSeen: 0 };
+  // The CLI has no last good floor to fall back on: a broken floor file would silently read as the default floor.
+  currentFloor(cfg.home, root);
   const service = new BuildingService(cfg.home, { claudeDir: cfg.claudeDir });
   const building = service.loadOnce([row]);
   const rooms = (building.floors[root] ?? defaultFloor()).rooms;
@@ -26,7 +28,7 @@ export function loadRoom(target: string, flags: Map<string, string>, cfg: Config
   return { root, service, building, room };
 }
 
-export function harnessCommand(argv: string[], cfg: Config): number {
+export function harnessCommand(argv: string[], cfg: Config, deps: { secrets?: Pick<SecretStore, 'has'> } = {}): number {
   if (argv[0] !== 'resolve') throw new UsageError('expected `harness resolve <room-or-division>`');
   const p = parseArgs(argv.slice(1), ['project']);
   expectPositionals(p, 1, '`harness resolve <room-or-division>`');
@@ -40,11 +42,11 @@ export function harnessCommand(argv: string[], cfg: Config): number {
     if (e instanceof HarnessError) { for (const m of [...problems, ...e.problems]) console.error(m); return 1; }
     throw e;
   }
-  const store = openSecrets(cfg.home);
+  const store = deps.secrets ?? openSecrets(cfg.home);
   const note = (name: string, msg: string): void => { (eff.optional.has(name) ? warnings : problems).push(msg); };
   const servers: Record<string, unknown> = {};
   for (const name of eff.mcp) {
-    const def = building.mcp.servers[name];
+    const def = Object.hasOwn(building.mcp.servers, name) ? building.mcp.servers[name] : undefined;
     if (!def) { note(name, `MCP server "${name}" is not in mcp.yaml`); continue; }
     servers[name] = def; // secret:<name> references, never values
     for (const s of secretRefs(def)) if (!store.has(s)) note(name, `Secret "${s}" is not set: run kubicle secret set ${s}`);

@@ -49,18 +49,22 @@ function reply(v: unknown): McpTestResult | undefined {
  */
 export async function testMcp(server: McpServerDef, env: Record<string, string | undefined>, timeoutMs = 10000, secrets?: Pick<SecretStore, 'get'>): Promise<McpTestResult> {
   const values = new Set<string>();
-  const scrub = (s: string): string => {
-    const out = scrubAll(s, values);
-    return out.length > MAX_ERR ? `${out.slice(0, MAX_ERR)}...` : out;
-  };
+  let r: McpTestResult;
   try {
     const type = server.type ?? 'stdio';
-    if (type === 'stdio') return await testStdio(server, env, timeoutMs, secrets, values);
-    if (type === 'http') return await testHttp(server, timeoutMs, secrets, values);
-    return { ok: false, error: 'sse servers cannot be tested here' };
+    if (type === 'stdio') r = await testStdio(server, env, timeoutMs, secrets, values);
+    else if (type === 'http') r = await testHttp(server, timeoutMs, secrets, values);
+    else r = { ok: false, error: 'sse servers cannot be tested here' };
   } catch (e) {
-    return { ok: false, error: scrub(e instanceof Fail ? e.message : 'the test failed unexpectedly') };
+    r = { ok: false, error: e instanceof Fail ? e.message : 'the test failed unexpectedly' };
   }
+  // Everything that leaves this function is server-controlled text: no control characters, no secret values, bounded length.
+  return r.ok ? { ok: true, name: clean(r.name, values) } : { ok: false, error: clean(r.error, values) };
+}
+
+function clean(s: string, values: Set<string>): string {
+  const out = scrubAll(s.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' '), values);
+  return out.length > MAX_ERR ? `${out.slice(0, MAX_ERR)}...` : out;
 }
 
 async function testStdio(server: McpServerDef, base: Record<string, string | undefined>, timeoutMs: number, secrets: Pick<SecretStore, 'get'> | undefined, values: Set<string>): Promise<McpTestResult> {
@@ -77,12 +81,29 @@ async function testStdio(server: McpServerDef, base: Record<string, string | und
       if (detached && child.pid !== undefined) { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* gone */ } }
       try { child.kill('SIGKILL'); } catch { /* gone */ }
     };
+    // The child holds the secrets in its env: it must not outlive us, however we end.
+    const onExit = (): void => kill();
+    const onSignal = (sig: NodeJS.Signals): void => {
+      kill();
+      unhook();
+      process.kill(process.pid, sig); // default action: the conventional 130/143 death
+    };
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+    const unhook = (): void => {
+      process.off('exit', onExit);
+      for (const g of signals) process.off(g, onSignal);
+    };
+    process.on('exit', onExit);
+    for (const g of signals) process.on(g, onSignal);
     const finish = (r: McpTestResult): void => {
       if (done) return;
       done = true;
       clearTimeout(timer);
       kill();
-      resolve(r.ok ? r : { ok: false, error: scrubAll(r.error, values) });
+      unhook();
+      child.stdin!.destroy();
+      child.stdout!.destroy(); // a grandchild that kept the pipe open must not keep us alive
+      resolve(r);
     };
     const timer = setTimeout(() => finish({ ok: false, error: `no answer within ${seconds(timeoutMs)} s` }), timeoutMs);
     child.once('error', (e: NodeJS.ErrnoException) => finish({ ok: false, error: e.code === 'ENOENT' ? `cannot start the server: "${server.command}" was not found` : `cannot start the server (${e.code ?? 'error'})` }));
@@ -109,7 +130,7 @@ async function testStdio(server: McpServerDef, base: Record<string, string | und
 
 function scrubAll(s: string, values: Set<string>): string {
   let out = s;
-  for (const v of values) if (v.length > 0) out = out.split(v).join('***');
+  for (const v of [...values].sort((x, y) => y.length - x.length)) if (v.length > 0) out = out.split(v).join('***');
   return out;
 }
 
@@ -121,13 +142,17 @@ async function testHttp(server: McpServerDef, timeoutMs: number, secrets: Pick<S
   try {
     const res = await fetch(server.url, { method: 'POST', headers, body: JSON.stringify(INIT), signal: ac.signal, redirect: 'error' });
     if (!res.ok) { void res.body?.cancel().catch(() => {}); return { ok: false, error: `the server answered HTTP ${res.status}` }; }
-    const text = (await res.text()).slice(0, 1_000_000);
-    const candidates = text.trimStart().startsWith('{') ? [text] : text.split(/\r?\n/).filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim());
-    for (const c of candidates) {
-      let v: unknown;
-      try { v = JSON.parse(c); } catch { continue; }
-      const r = reply(v);
-      if (r) return r.ok ? r : { ok: false, error: scrubAll(r.error, values) };
+    // Read incrementally and stop at the first complete JSON-RPC answer: an SSE reply may leave its stream open.
+    const reader = res.body?.getReader();
+    if (!reader) return { ok: false, error: 'the server did not answer initialize' };
+    const dec = new TextDecoder();
+    let text = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (value) text += dec.decode(value, { stream: !done });
+      const found = findReply(text, done);
+      if (found) return found;
+      if (done || text.length > 1_000_000) break;
     }
     return { ok: false, error: 'the server did not answer initialize' };
   } catch (e) {
@@ -137,4 +162,18 @@ async function testHttp(server: McpServerDef, timeoutMs: number, secrets: Pick<S
     clearTimeout(timer);
     ac.abort();
   }
+}
+
+/** The answer to initialize in a JSON body or in complete SSE `data:` lines, or undefined (yet). */
+function findReply(text: string, final: boolean): McpTestResult | undefined {
+  const candidates = text.trimStart().startsWith('{')
+    ? [text]
+    : text.split(/\r?\n/).slice(0, final ? undefined : -1).filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim());
+  for (const c of candidates) {
+    let v: unknown;
+    try { v = JSON.parse(c); } catch { continue; }
+    const r = reply(v);
+    if (r) return r;
+  }
+  return undefined;
 }

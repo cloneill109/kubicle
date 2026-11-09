@@ -98,7 +98,7 @@ test('testMcp: timeout kills the child; ANTHROPIC_* not inherited; secrets resol
   const ok = await testMcp({ command: process.execPath, args: [FIXTURE, 'env'], env: { FIXTURE_TOK: 'secret:tok' } },
     { ...process.env, ANTHROPIC_API_KEY: 'k', CLAUDE_CODE_USE_BEDROCK: '1', FIXTURE_ENVFILE: envFile }, 5000, store);
   assert.deepEqual(JSON.parse(readFileSync(envFile, 'utf8')), { a: null, c: null, tok: TOKEN });
-  assert.equal(ok.ok, true); // the fixture echoes the token as its name; success results are not rewritten
+  assert.deepEqual(ok, { ok: true, name: '***' }); // the fixture echoes the token as its name
   const missing = await testMcp({ command: process.execPath, args: [FIXTURE], env: { X: 'secret:nope' } }, process.env, 1000, store);
   assert.deepEqual(missing, { ok: false, error: 'Secret "nope" is not set' });
   const broken = await testMcp({ command: process.execPath, args: [FIXTURE], env: { X: 'secret:tok' } }, process.env, 1000,
@@ -157,4 +157,180 @@ test('skill: import copies, list, remove validates the name and stays in the lib
   assert.equal(existsSync(join(s.home, 'skills', 'my-skill')), false);
   assert.equal(existsSync(src), true);
   assert.equal(s.run(['skill', 'remove', 'my-skill']).status, 1);
+});
+
+// ---- fix round 1 ----
+import { createServer, type Server } from 'node:http';
+import { spawn } from 'node:child_process';
+import { lstatSync, symlinkSync } from 'node:fs';
+import { harnessCommand } from '../../src/cli/harness.ts';
+import { loadConfig } from '../../src/server/config.ts';
+
+const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const gone = async (pid: number): Promise<boolean> => { for (let i = 0; i < 40; i++) { if (!alive(pid)) return true; await new Promise((r) => setTimeout(r, 50)); } return false; };
+const store = (m: Record<string, string>) => ({ get: (n: string) => m[n] ?? null });
+
+/** An http MCP stand-in on 127.0.0.1; `handler` sees each request (with its Authorization header). */
+async function httpServer(handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void): Promise<{ url: string; close: () => void }> {
+  const srv: Server = createServer(handler);
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const port = (srv.address() as { port: number }).port;
+  return { url: `http://127.0.0.1:${port}/mcp`, close: () => { srv.closeAllConnections(); srv.close(); } };
+}
+const rpc = (name: string, extra: object = {}) => JSON.stringify({ jsonrpc: '2.0', id: 1, result: { serverInfo: { name }, ...extra } });
+
+test('C1: a server that echoes its secret as its name or error is scrubbed (stdio and http)', async () => {
+  const st = store({ tok: TOKEN });
+  const out = await testMcp({ command: process.execPath, args: [FIXTURE, 'env'], env: { FIXTURE_TOK: 'secret:tok' } }, process.env, 5000, st);
+  assert.deepEqual(out, { ok: true, name: '***' });
+  const refused = await testMcp({ command: process.execPath, args: [FIXTURE, 'refuse'], env: { FIXTURE_MSG: 'bad secret:tok' } }, process.env, 5000, st);
+  assert.deepEqual(refused, { ok: false, error: 'the server refused initialize: bad ***' });
+  const srv = await httpServer((req, res) => { res.setHeader('content-type', 'application/json'); res.end(rpc(String(req.headers.authorization ?? ''))); });
+  try {
+    const h = await testMcp({ type: 'http', url: srv.url, headers: { Authorization: 'Bearer secret:tok' } }, {}, 5000, st);
+    assert.equal(h.ok, true);
+    assert.equal(JSON.stringify(h).includes(TOKEN), false);
+    assert.deepEqual(h, { ok: true, name: 'Bearer ***' }); // header secrets are resolved (the server saw the real value)
+  } finally { srv.close(); }
+});
+
+test('M1/M6: overlapping secrets scrub longest first; messages and names are capped and lose control characters', async () => {
+  const st = store({ a: 'tok-AAA', b: 'tok-AAA-LONGER' });
+  const r = await testMcp({ command: process.execPath, args: [FIXTURE, 'refuse'], env: { FIXTURE_MSG: 'secret:a|secret:b' } }, process.env, 5000, st);
+  assert.deepEqual(r, { ok: false, error: 'the server refused initialize: ***|***' });
+  const long = await testMcp({ command: process.execPath, args: [FIXTURE, 'refuse'], env: { FIXTURE_MSG: `\u001b[31m${'x'.repeat(5000)}\nline` } }, process.env, 5000);
+  assert.equal(long.ok, false);
+  const e = (long as { error: string }).error;
+  assert.ok(e.length <= 210, String(e.length));
+  assert.equal(/[\u0000-\u001f]/.test(e), false);
+  const name = await testMcp({ command: process.execPath, args: [FIXTURE, 'env'], env: { FIXTURE_TOK: `\u001b]0;x\u0007${'n'.repeat(5000)}` } }, process.env, 5000);
+  assert.equal(name.ok, true);
+  assert.ok((name as { name: string }).name.length <= 210);
+  assert.equal(/[\u0000-\u001f]/.test((name as { name: string }).name), false);
+});
+
+test('http: redirects are refused, SSE answers with the stream left open are read, timeouts reported', async () => {
+  const redir = await httpServer((req, res) => {
+    if (req.url === '/mcp') { res.writeHead(302, { location: '/other' }); res.end(); } else { res.setHeader('content-type', 'application/json'); res.end(rpc('followed')); }
+  });
+  try {
+    const r = await testMcp({ type: 'http', url: redir.url }, {}, 3000);
+    assert.equal(r.ok, false);
+  } finally { redir.close(); }
+  const sse = await httpServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(`event: message\ndata: ${rpc('streamy')}\n\n`); });
+  try {
+    const t0 = Date.now();
+    assert.deepEqual(await testMcp({ type: 'http', url: sse.url }, {}, 5000), { ok: true, name: 'streamy' });
+    assert.ok(Date.now() - t0 < 2500);
+  } finally { sse.close(); }
+  const hang = await httpServer(() => { /* never answers */ });
+  try { assert.deepEqual(await testMcp({ type: 'http', url: hang.url }, {}, 300), { ok: false, error: 'no answer within 0.3 s' }); } finally { hang.close(); }
+  const e500 = await httpServer((_q, res) => { res.writeHead(500); res.end(); });
+  try { assert.deepEqual(await testMcp({ type: 'http', url: e500.url }, {}, 2000), { ok: false, error: 'the server answered HTTP 500' }); } finally { e500.close(); }
+});
+
+test('I3/M3: the whole process group is killed, and a grandchild holding stdout does not keep the CLI alive', async () => {
+  const d = tmp('kub-hc-gc-');
+  const gcFile = join(d, 'gc');
+  const r = await testMcp({ command: process.execPath, args: [FIXTURE, 'grandchild'] }, { ...process.env, FIXTURE_GCFILE: gcFile }, 700);
+  assert.equal(r.ok, false);
+  const gc = Number(readFileSync(gcFile, 'utf8'));
+  try { assert.equal(await gone(gc), true, 'grandchild survived'); } finally { try { process.kill(gc, 'SIGKILL'); } catch { /* gone */ } }
+
+  const s = setup();
+  s.run(['mcp', 'add', 'hold', '--command', process.execPath, '--arg', FIXTURE, '--arg', 'holdout']);
+  const t0 = Date.now();
+  const cli = spawnSync(BIN, ['mcp', 'test', 'hold'], { encoding: 'utf8', env: { ...process.env, KUBICLE_HOME: s.home, KUBICLE_SECRETS_STORE: 'file', FIXTURE_GCFILE: gcFile } });
+  const holder = Number(readFileSync(gcFile, 'utf8'));
+  try {
+    assert.equal(cli.stdout, 'ok fixture\n');
+    assert.ok(Date.now() - t0 < 5000, `CLI took ${Date.now() - t0} ms`);
+  } finally { try { process.kill(holder, 'SIGKILL'); } catch { /* gone */ } }
+});
+
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  test(`I1: ${sig} during mcp test stops the server child`, async () => {
+    const s = setup();
+    const pidFile = join(s.home, 'srv.pid');
+    s.run(['mcp', 'add', 'quiet', '--command', process.execPath, '--arg', FIXTURE, '--arg', 'silent']);
+    const cli = spawn(BIN, ['mcp', 'test', 'quiet'], { env: { ...process.env, KUBICLE_HOME: s.home, KUBICLE_SECRETS_STORE: 'file', FIXTURE_PIDFILE: pidFile }, stdio: 'ignore' });
+    const exited = new Promise<{ code: number | null; signal: string | null }>((r) => cli.on('exit', (code, signal) => r({ code, signal })));
+    try {
+      for (let i = 0; i < 100 && !existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 50));
+      const child = Number(readFileSync(pidFile, 'utf8'));
+      assert.ok(child > 0);
+      cli.kill(sig);
+      const e = await exited;
+      assert.ok(e.signal === sig || e.code === (sig === 'SIGINT' ? 130 : 143), JSON.stringify(e));
+      assert.equal(await gone(child), true, 'server child survived');
+    } finally { cli.kill('SIGKILL'); try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL'); } catch { /* gone */ } }
+  });
+}
+
+test('I2: a broken floor file stops harness resolve and run (no spawn)', () => {
+  const s = setup();
+  mkdirSync(join(s.home, 'floors'), { recursive: true });
+  const floor = join(s.home, 'floors', `${slugFor(s.project)}.yaml`);
+  writeFileSync(floor, 'revision: 1\nrooms: [oops');
+  for (const args of [['harness', 'resolve', 'qa'], ['run', 'qa', '--', 'x']]) {
+    const r = s.run(args);
+    assert.equal(r.status, 1, args[0]);
+    assert.ok(r.stderr.includes(floor), r.stderr);
+  }
+  assert.equal(existsSync(s.argsFile), false);
+});
+
+test('I3: room id wins over division; division finds the first room with it; defaults apply without seeding; dashed task words kept', () => {
+  const s = setup();
+  mkdirSync(join(s.home, 'floors'), { recursive: true });
+  writeFileSync(join(s.home, 'floors', `${slugFor(s.project)}.yaml`), [
+    'revision: 1', 'rooms:',
+    '  - { id: a, name: A, division: backend, band: top, width: 12 }',
+    '  - { id: backend, name: Backend two, division: qa, band: top, width: 12 }',
+    '  - { id: bullpen, name: Bullpen, band: bottom, width: 14 }', ''].join('\n'));
+  assert.match(s.run(['harness', 'resolve', 'backend']).stdout, /^room: backend$/m);
+  assert.match(s.run(['harness', 'resolve', 'qa']).stdout, /^room: backend$/m);
+  assert.match(s.run(['harness', 'resolve', 'a']).stdout, /^room: a$/m);
+
+  const f = setup(); // fresh home: no divisions dir
+  const r = f.run(['run', 'qa', '--', '--foo', 'bar']);
+  assert.equal(r.status, 7, r.stderr);
+  assert.equal(r.stderr.includes('unknown division'), false, r.stderr);
+  assert.deepEqual((JSON.parse(readFileSync(f.argsFile, 'utf8')) as string[]).slice(-2), ['--', '--foo bar']);
+  assert.equal(existsSync(join(f.home, 'divisions')), false);
+  assert.equal(f.run(['harness', 'resolve', 'qa']).status, 0);
+  assert.equal(existsSync(join(f.home, 'divisions')), false);
+});
+
+test('I3/M4: harness resolve never reads a secret value; prototype names are not servers', () => {
+  const s = setup();
+  withGithub(s);
+  const cfg = loadConfig({ ...process.env, KUBICLE_HOME: s.home, CLAUDE_CONFIG_DIR: s.claude });
+  const lines: string[] = [];
+  const w = process.stdout.write;
+  process.stdout.write = ((c: string) => { lines.push(String(c)); return true; }) as typeof process.stdout.write;
+  let code: number;
+  try {
+    code = harnessCommand(['resolve', 'qa', '--project', s.project], cfg, { secrets: { has: () => true, get: () => { throw new Error('get was called'); } } as never });
+  } finally { process.stdout.write = w; }
+  assert.equal(code, 0);
+  assert.match(lines.join(''), /secret:github/);
+
+  writeFileSync(join(s.home, 'overrides', `${slugFor(s.project)}.yaml`), 'revision: 1\nrooms:\n  qa:\n    mcp: [constructor]\n');
+  const r = s.run(['harness', 'resolve', 'qa']);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /MCP server "constructor" is not in mcp\.yaml/);
+  const t = s.run(['mcp', 'test', 'constructor']);
+  assert.equal(t.status, 1);
+  assert.match(t.stderr, /No MCP server named "constructor"/);
+});
+
+test('M2: skill remove unlinks a dangling symlink', () => {
+  const s = setup();
+  mkdirSync(join(s.home, 'skills'), { recursive: true });
+  const link = join(s.home, 'skills', 'dang');
+  symlinkSync('/nonexistent-kubicle-target', link);
+  const r = s.run(['skill', 'remove', 'dang']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.throws(() => lstatSync(link), /ENOENT/);
 });

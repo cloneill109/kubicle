@@ -1,5 +1,5 @@
 // `kubicle skill list|importable|import|remove`: the library at <home>/skills.
-import { existsSync, lstatSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, rmSync, unlinkSync } from 'node:fs';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { ID_RE } from '../shared/building.ts';
 import type { Config } from '../server/config.ts';
@@ -49,10 +49,11 @@ export function skillCommand(argv: string[], cfg: Config): number {
     const lib = resolve(libraryDir(cfg.home));
     const target = resolve(lib, name);
     if (!target.startsWith(lib + sep)) throw new CliError('That is not inside the skill library.');
-    let exists = existsSync(target);
-    try { exists = exists || lstatSync(target).isSymbolicLink(); } catch { /* absent */ }
+    let link = false, exists = existsSync(target);
+    try { link = lstatSync(target).isSymbolicLink(); exists = exists || link; } catch { /* absent */ }
     if (!exists) throw new CliError(`No skill named "${name}" in the library.`);
-    rmSync(target, { recursive: true, force: true }); // a symlink is unlinked, never followed
+    if (link) unlinkSync(target); // a symlink (even a dangling one) is unlinked, never followed
+    else rmSync(target, { recursive: true });
     console.log(`Removed skill "${name}".`);
     return 0;
   }

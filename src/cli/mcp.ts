@@ -96,7 +96,8 @@ export async function mcpCommand(argv: string[], cfg: Config): Promise<number> {
     const p = parseMulti(argv.slice(1), {});
     expectPositionals(p, 1, '`mcp test <name>`');
     const name = nameOf(p.positionals[0]);
-    const server = readCatalog(file).servers[name];
+    const servers = readCatalog(file).servers;
+    const server = Object.hasOwn(servers, name) ? servers[name] : undefined;
     if (!server) throw new CliError(`No MCP server named "${name}".`);
     const r = await testMcp(server, process.env, 10000, openSecrets(cfg.home));
     if (r.ok) { console.log(`ok ${r.name}`); return 0; }
