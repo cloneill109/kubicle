@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, join, resolve, sep } from 'node:path';
@@ -12,7 +13,7 @@ import type { McpServerDef } from '../shared/catalog.ts';
 import { harnessProblems, type Harness } from '../shared/harness.ts';
 import type { AgentView, BubblesState, FeedItem, ServerMsg, SessionCard } from '../shared/protocol.ts';
 import type { BubblesLog, LogKind, LogQuery } from './bubbles/log.ts';
-import { INTAKE_IDLE_MS, intakeResponse, type IntakeOutcome, type IntakeRequest } from './bubbles/intake.ts';
+import { INTAKE_ASSIGN_MIN, BRIEFING_PREFIX, INTAKE_IDLE_MS, intakeResponse, type IntakeOutcome, type IntakeRequest } from './bubbles/intake.ts';
 import { PolicyError, type PendingChange, type Policy } from './bubbles/policy.ts';
 import { GUARD_ASK, type PermissionFlow } from './permission-flow.ts';
 import { hookResponse, type Approvals } from './approvals.ts';
@@ -81,7 +82,7 @@ export interface HttpDeps {
   /** "Start agent": opens a terminal running `kubicle agent <id>` for a built launch (absent: the route answers 501). */
   launch?: Launch;
   /** Builds a room's launch (buildLaunch with the current building and secret store). Throws HarnessError. */
-  prepareLaunch?(o: { projectId: string; roomId: string; task: string }): LaunchSpec;
+  prepareLaunch?(o: { projectId: string; roomId: string; task: string; briefing?: string; id?: string }): LaunchSpec;
   /** Launches waiting for their session's first hook event (Review Focus 3). */
   launchWatch?: LaunchWatch;
   /** A hook arrived with a missing or wrong ingest token (I4). */
@@ -687,6 +688,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
 
   const launches: number[] = []; // times of recent launches (rate limit: a burst can't open dozens of windows)
   const LAUNCH_MAX = 6, LAUNCH_WINDOW_MS = 60_000;
+  const INTAKE_WAIT_MS = 20_000; // the whole wait for Bubbles before launch (his own call times out sooner)
 
   async function agentStart(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!guard(req, res)) return;
@@ -699,33 +701,61 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     if (!project) return err(404, 'unknown project');
     if (project.archived) return err(400, 'this floor is archived; restore it in the Lobby first');
     const floor = d.building.snapshot().floors[project.id];
-    // '' (let Bubbles choose) starts in the Bullpen for now; intake before launch comes with the briefing.
-    const roomId = b.room === '' ? BULLPEN : b.room;
-    const room = floor?.rooms.find((r) => r.id === roomId);
-    if (!room) return err(400, `no room "${b.room}" on this floor`);
+    if (b.room !== '' && !floor?.rooms.some((r) => r.id === b.room)) return err(400, `no room "${b.room}" on this floor`);
     try { if (!(await stat(project.id)).isDirectory()) throw new Error(); } catch { return err(400, `the project folder ${project.id} is missing`); }
     if (!d.launch || !d.prepareLaunch) return err(501, 'starting agents is not available here');
     const t = Date.now();
     while (launches.length && t - launches[0] > LAUNCH_WINDOW_MS) launches.shift();
     if (launches.length >= LAUNCH_MAX) return err(429, `at most ${LAUNCH_MAX} agents a minute; wait a moment`);
+    const id = randomUUID();
+    // Who picks the room: the owner, Bubbles (intake before launch, so the room's harness loads), or the default (Bullpen).
+    // Intake never blocks the launch: off, no task, a failure, a timeout or low confidence all mean the Bullpen.
+    let roomId = b.room, by: 'owner' | 'bubbles' | 'default' = 'owner', briefing: string | undefined;
+    if (b.room === '') {
+      roomId = BULLPEN; by = 'default';
+      if (task.trim() && floor && d.bubbles.state().status.state === 'on') {
+        const picked = await launchIntake({ id, task, project, floor });
+        if (picked) { roomId = picked.room; by = 'bubbles'; briefing = picked.briefing; }
+      }
+    }
+    const room = floor?.rooms.find((r) => r.id === roomId);
+    if (!room) return err(400, `no room "${roomId}" on this floor`);
     let spec: LaunchSpec;
-    try { spec = d.prepareLaunch({ projectId: project.id, roomId: room.id, task }); }
+    try { spec = d.prepareLaunch({ projectId: project.id, roomId: room.id, task, id, ...(briefing ? { briefing } : {}) }); }
     catch (e) {
-      if (e instanceof HarnessError) return err(400, e.message);
+      if (e instanceof HarnessError) return send(res, 400, JSON.stringify({ error: e.message, problems: e.problems }), JSON_HDR);
       throw e;
     }
+    // Registered before the terminal opens: a fast agent can check in before `launch` returns.
+    d.launchWatch?.add(spec.id, room.name, now());
     try {
       await d.launch(spec);
     } catch (e) {
+      d.launchWatch?.claim(spec.id);
       if (e instanceof LaunchError) return err(500, e.message);
       throw e;
     }
     launches.push(t);
-    d.launchWatch?.add(spec.id, room.name, now());
     const item: FeedItem = { ts: t, event: 'Launch', agentName: 'Office', detail: `Opened a terminal for a new agent in ${room.name}` };
     d.pushFeed(item);
     broadcast({ t: 'feed', item });
-    sendJson(res, 202, { room: room.id, launch: spec.id, warnings: spec.warnings });
+    sendJson(res, 202, { room: room.id, by, launch: spec.id, warnings: spec.warnings });
+  }
+
+  /** Bubbles' intake for a not-yet-started agent (session id `launch-<id>`); null unless it is confident. Never throws. */
+  async function launchIntake(o: { id: string; task: string; project: { id: string; name: string }; floor: { rooms: { id: string; name: string; division?: string }[] } }): Promise<{ room: string; briefing: string } | null> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const request: IntakeRequest = {
+        prompt: o.task, projectId: o.project.id, projectName: o.project.name, sessionId: `launch-${o.id}`, cwd: o.project.id,
+        rooms: o.floor.rooms.map((r) => ({ id: r.id, name: r.name, ...(r.division ? { division: r.division } : {}) })),
+      };
+      const wait = new Promise<null>((ok) => { timer = setTimeout(() => ok(null), INTAKE_WAIT_MS); });
+      const out = await Promise.race([d.bubbles.intake(request), wait]);
+      if (!out?.ok || out.verdict.confidence < INTAKE_ASSIGN_MIN || out.room === BULLPEN) return null;
+      return { room: out.room, briefing: out.context.startsWith(BRIEFING_PREFIX) ? out.context.slice(BRIEFING_PREFIX.length).trim() : out.context };
+    } catch (e) { d.log(`launch intake failed: ${String(e)}`); return null; }
+    finally { clearTimeout(timer); }
   }
 
   async function settingsSave(req: IncomingMessage, res: ServerResponse): Promise<void> {

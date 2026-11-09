@@ -48,6 +48,8 @@ test('sayFor turns Bubbles decisions into plain lines aimed at the agent', () =>
   assert.deepEqual(sayFor(entry({ kind: 'triage', outcome: 'approved', request: 'Bash {[REDACTED' }), 'p', get, room), { text: "OK'd for Wiry Otter: a routine step", target: 's1' });
   assert.deepEqual(sayFor(entry({ kind: 'escalation', agentId: 'a1', outcome: 'unsure' }), 'p', get, room), { text: "Checking Explore helper's request with you", target: 's1:a1' });
   assert.equal(sayFor(entry({ kind: 'triage', outcome: 'escalated:unsure' }), 'p', get, room), null);
+  assert.deepEqual(sayFor(entry({ sessionId: 'launch-1234', outcome: 'briefed', decision: 'frontend' }), 'p', get, room), { text: 'Sending a new agent to Front end', target: undefined });
+  assert.equal(sayFor(entry({ sessionId: 'launch-1234', outcome: 'timeout' }), 'p', get, room), null);
   assert.equal(sayFor(entry({ outcome: 'timeout' }), 'p', get, room), null);
   assert.equal(sayFor(entry({ outcome: 'briefed', decision: 'qa', projectId: 'other' }), 'p', get, room), null);
 });

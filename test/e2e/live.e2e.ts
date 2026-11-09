@@ -1171,7 +1171,12 @@ test('Start agent: header button and door sign open the dialog; Start asks the s
   // header button → dialog, Bullpen by default; pick Front end, type a task, Start
   await page.locator('#startBtn').click();
   await page.locator('#startDlg').waitFor({ state: 'visible', timeout: 3000 });
-  assert.equal(await page.locator('#startRoom').inputValue(), '', 'Bubbles chooses by default');
+  assert.ok(await page.locator('#startRoom option[value=""]').isDisabled(), 'Let Bubbles choose needs a task');
+  assert.equal(await page.locator('#startHint').innerText(), 'Type a task so Bubbles can choose');
+  assert.notEqual(await page.locator('#startRoom').inputValue(), '', 'falls back to a real room while the task is empty');
+  await page.locator('#startTask').fill('x');
+  assert.ok(await page.locator('#startRoom option[value=""]').isEnabled(), 'typing a task enables it');
+  assert.ok(await page.locator('#startHint').isHidden());
   await page.locator('#startRoom').selectOption('frontend');
   await page.locator('#startTask').fill("fix the nav; it's broken");
   await page.locator('#startGo').click();
@@ -1196,11 +1201,26 @@ test('Start agent: header button and door sign open the dialog; Start asks the s
   await page.waitForFunction(() => /could not open Terminal: test/.test(document.getElementById('startMsg')!.textContent ?? ''), null, { timeout: 3000 });
   assert.ok(await page.locator('#startDlg').isVisible());
   assert.equal(launched.length, 1);
-  // Let Bubbles choose: no room is sent (the launch starts in the Bullpen until intake-before-launch lands)
+  // Let Bubbles choose: intake runs first (fake claude answers `intake-frontend`), so the launch lands in Front end
   await page.locator('#startRoom').selectOption('');
+  await page.locator('#startTask').fill('fake-mode:intake-frontend build the nav');
   await page.locator('#startGo').click();
-  await page.locator('#startDlg').waitFor({ state: 'hidden', timeout: 3000 });
-  assert.deepEqual(launched[1], { cwd: floorId, room: 'bullpen', task: 'x' });
+  await page.locator('#startDlg').waitFor({ state: 'hidden', timeout: 10000 });
+  assert.deepEqual(launched[1], { cwd: floorId, room: 'frontend', task: 'fake-mode:intake-frontend build the nav' });
+  // a room whose harness cannot launch: the dialog lists the problems and nothing opens
+  const bad = await page.evaluate(() => fetch('/api/divisions/qa/harness', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'X-Kubicle-CSRF': '1' }, body: JSON.stringify({ baseRevision: 1, harness: { mcp: ['nope', 'also-nope'] } }) }).then((r) => r.status));
+  assert.equal(bad, 200);
+  await page.locator('#startBtn').click();
+  await page.locator('#startDlg').waitFor({ state: 'visible', timeout: 3000 });
+  await page.locator('#startRoom').selectOption('qa');
+  await page.locator('#startTask').fill('x');
+  await page.locator('#startGo').click();
+  await page.waitForFunction(() => document.querySelectorAll('#startMsg li').length === 2, null, { timeout: 5000 });
+  assert.deepEqual(await page.locator('#startMsg li').allInnerTexts(), ['MCP server "nope" is not in mcp.yaml', 'MCP server "also-nope" is not in mcp.yaml']);
+  assert.ok(await page.locator('#startDlg').isVisible());
+  assert.equal(launched.length, 2);
+  await page.screenshot({ path: join(outDir, 'live-start-problems.png') });
+  await page.locator('#startCancel').click();
   // Bubbles' office sign does not start agents
   const bsign = await page.evaluate(() => {
     const r = window.__office.signs().find((x) => x.roomId === '@bubbles')!;

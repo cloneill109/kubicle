@@ -1153,11 +1153,12 @@ test('POST /api/agents/start: owner only, validates project/room/task, builds th
   // success: the launcher gets a built spec whose files are on disk
   const r = await control(s, cookie, path, { projectId, room: 'frontend', task: "fix the nav; don't push" });
   assert.equal(r.status, 202);
-  const body = await r.json() as { room: string; launch: string; warnings: string[] };
+  const body = await r.json() as { room: string; by: string; launch: string; warnings: string[] };
   assert.equal(launched.length, 1);
   const spec = launched[0]!;
   assert.equal(body.launch, spec.id);
   assert.equal(body.room, 'frontend');
+  assert.equal(body.by, 'owner');
   assert.deepEqual(body.warnings, []);
   assert.equal(spec.cwd, projectId);
   assert.equal(spec.room, 'frontend');
@@ -1166,8 +1167,10 @@ test('POST /api/agents/start: owner only, validates project/room/task, builds th
   assert.ok(existsSync(join(spec.runDir, 'launch.json')));
   const feed = await c.waitFor((m) => m.t === 'feed' && m.item.event === 'Launch');
   assert.ok(feed.t === 'feed' && /Front end/.test(feed.item.detail));
-  // empty room = the Bullpen for now (Bubbles intake before launch comes later)
-  assert.equal((await control(s, cookie, path, { projectId, room: '', task: 't' })).status, 202);
+  // empty room with no task: nothing for Bubbles to read, so the Bullpen
+  const none = await control(s, cookie, path, { projectId, room: '', task: '  ' });
+  assert.equal(none.status, 202);
+  assert.equal((await none.json() as { by: string }).by, 'default');
   assert.equal(launched.at(-1)!.room, 'bullpen');
   // a harness that cannot launch: 400 with the problem, nothing launched, no files left
   const div = await control(s, cookie, '/api/divisions/qa/harness', { baseRevision: 1, harness: { mcp: ['nope'] } });
@@ -1176,7 +1179,7 @@ test('POST /api/agents/start: owner only, validates project/room/task, builds th
   const runsBefore = readdirSync(join(s.home, 'run')).length;
   const h = await control(s, cookie, path, { projectId, room: 'qa' });
   assert.equal(h.status, 400);
-  assert.deepEqual(await h.json(), { error: 'MCP server "nope" is not in mcp.yaml' });
+  assert.deepEqual(await h.json(), { error: 'MCP server "nope" is not in mcp.yaml', problems: ['MCP server "nope" is not in mcp.yaml'] });
   assert.equal(launched.length, 2);
   assert.equal(readdirSync(join(s.home, 'run')).length, runsBefore);
   // launcher failure → error text, not counted
@@ -1417,4 +1420,144 @@ test('Review Focus 1: a room whose division, override, MCP or settings file is b
   assert.match((await st.json() as { error: string }).error, /settings\.yaml has a problem/);
   assert.equal(launched.length, 1);
   await c.close();
+});
+
+// ---------------------------------------------------------------- Start agent: Bubbles picks the room before launch
+const appended = (spec: LaunchSpec): string => spec.args[spec.args.indexOf('--append-system-prompt') + 1] ?? '';
+
+async function startWithIntake(env: Record<string, string> = {}, opts: Record<string, unknown> = {}) {
+  const launched: LaunchSpec[] = [];
+  const s = await start(undefined, {}, { launch: async (r) => { launched.push(r); }, bubbles: { env: { ...env } }, ...opts } as Parameters<typeof startServer>[1]);
+  const cookie = await login(s);
+  const { c, snap } = await withProject(s, cookie);
+  assert.ok(snap.t === 'snapshot');
+  const projectId = snap.projects[0].id;
+  const go = (room: string, task: string) => control(s, cookie, '/api/agents/start', { projectId, room, task });
+  return { s, cookie, c, launched, go };
+}
+
+test('Start agent, Let Bubbles choose: a confident intake picks the room and its briefing reaches --append-system-prompt', async () => {
+  const { c, launched, go } = await startWithIntake();
+  const r = await go('', 'fake-mode:intake-frontend build the nav bar');
+  assert.equal(r.status, 202);
+  const body = await r.json() as { room: string; by: string; launch: string };
+  assert.equal(body.room, 'frontend');
+  assert.equal(body.by, 'bubbles');
+  assert.equal(launched.length, 1);
+  assert.equal(launched[0]!.room, 'frontend');
+  assert.equal(body.launch, launched[0]!.id);
+  const sys = appended(launched[0]!);
+  assert.ok(sys.includes(BRIEFING_PREFIX), sys);
+  assert.ok(sys.includes('Focus on src/ui.'));
+  // the log row names the not-yet-started agent
+  const row = await c.waitFor((m) => m.t === 'log' && m.entry.kind === 'intake' && m.entry.outcome === 'briefed');
+  assert.ok(row.t === 'log' && row.entry.sessionId === `launch-${launched[0]!.id}`);
+  await c.close();
+});
+
+test('Start agent, Let Bubbles choose: low confidence, a bad room, a failure, no task, or Bubbles off all give the Bullpen (by default)', async () => {
+  const { s, cookie, c, launched, go } = await startWithIntake();
+  for (const [task, why] of [['fake-mode:intake-low x', 'low'], ['fake-mode:intake-badroom x', 'badroom'], ['fake-mode:escalate x', 'not json'], ['', 'no task']] as const) {
+    const r = await go('', task);
+    assert.equal(r.status, 202, why);
+    const b = await r.json() as { room: string; by: string };
+    assert.deepEqual([b.room, b.by], ['bullpen', 'default'], why);
+    assert.equal(launched.at(-1)!.room, 'bullpen', why);
+    assert.ok(!appended(launched.at(-1)!).includes(BRIEFING_PREFIX), `${why}: no briefing`);
+  }
+  assert.equal((await control(s, cookie, '/api/bubbles/enabled', { enabled: false })).status, 204);
+  const off = await go('', 'fake-mode:intake-frontend x');
+  assert.deepEqual([(await off.json() as { room: string }).room, launched.at(-1)!.room], ['bullpen', 'bullpen']);
+  assert.equal(launched.length, 5);
+  await c.close();
+});
+
+test('Start agent, Let Bubbles choose: an intake that never answers does not block the launch', async () => {
+  // the model call hangs: Bubbles' own 8 s intake timeout answers, and the launch goes ahead in the Bullpen
+  const { c, launched, go } = await startWithIntake({ FAKE_CLAUDE_DELAY: '20000' });
+  const t0 = Date.now();
+  const r = await go('', 'fake-mode:intake-slow x');
+  assert.equal(r.status, 202);
+  assert.ok(Date.now() - t0 < 10_000);
+  assert.deepEqual([(await r.json() as { by: string }).by, launched[0]!.room], ['default', 'bullpen']);
+  await c.close();
+});
+
+test('Start agent: a room that cannot launch answers 400 with its problems and never calls launch', async () => {
+  const { c, launched, go, s, cookie } = await startWithIntake();
+  const div = await control(s, cookie, '/api/divisions/qa/harness', { baseRevision: 1, harness: { mcp: ['nope', 'also-nope'] } });
+  assert.equal(div.status, 200);
+  await c.waitFor((m) => m.t === 'building' && JSON.stringify(m.building.divisions).includes('also-nope'));
+  const r = await go('qa', 'x');
+  assert.equal(r.status, 400);
+  const b = await r.json() as { error: string; problems: string[] };
+  assert.deepEqual(b.problems, ['MCP server "nope" is not in mcp.yaml', 'MCP server "also-nope" is not in mcp.yaml']);
+  assert.equal(b.error, b.problems.join('; '));
+  assert.equal(launched.length, 0);
+  await c.close();
+});
+
+test('Start agent: the launch is registered before the terminal opens (a fast check-in is not lost) and dropped when it fails', async () => {
+  let clock = Date.now();
+  let fail = false;
+  let seenAtLaunch: boolean | null = null;
+  let srv: Awaited<ReturnType<typeof start>> | null = null;
+  const s = await start(undefined, {}, {
+    now: () => clock, launchCheckMs: 10,
+    launch: async (r) => {
+      // the agent checks in while the terminal is still opening
+      const ev = await sockFetch(srv!, '/hooks', { method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-kubicle-token': srv!.ingestToken, 'x-kubicle-launch': r.id, 'x-kubicle-room': r.room },
+        body: JSON.stringify({ ...fixture('SessionStart'), session_id: `fast-${r.id}`, cwd: r.cwd }) });
+      seenAtLaunch = ev.status === 200;
+      if (fail) throw new (await import('../../src/server/launcher.ts')).LaunchError('could not open Terminal: boom');
+    },
+  });
+  srv = s;
+  const cookie = await login(s);
+  const { c, snap } = await withProject(s, cookie);
+  assert.ok(snap.t === 'snapshot');
+  const projectId = snap.projects[0].id;
+  assert.equal((await control(s, cookie, '/api/agents/start', { projectId, room: 'frontend', task: 'a' })).status, 202);
+  assert.equal(seenAtLaunch, true);
+  clock += 120_000;
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(c.msgs.some((m) => m.t === 'feed' && /did not check in/.test(m.item.detail)), false, 'a check-in that raced the launch call still counts');
+  assert.equal(s.launchCheckArmed(), false, 'claimed: nothing pending, no timer');
+  // a failed launch is not left pending
+  fail = true;
+  assert.equal((await control(s, cookie, '/api/agents/start', { projectId, room: 'qa', task: 'b' })).status, 500);
+  assert.equal(s.launchCheckArmed(), false);
+  clock += 120_000;
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(c.msgs.some((m) => m.t === 'feed' && /did not check in/.test(m.item.detail)), false, 'no false report for a launch that never opened');
+  await c.close();
+});
+
+test('the unclaimed-launch check runs only while a launch is pending', async () => {
+  let clock = Date.now();
+  const s = await start(undefined, {}, { launch: async () => {}, now: () => clock, launchCheckMs: 10 });
+  const cookie = await login(s);
+  const { c, snap } = await withProject(s, cookie);
+  assert.ok(snap.t === 'snapshot');
+  assert.equal(s.launchCheckArmed(), false, 'idle: no timer');
+  assert.equal((await control(s, cookie, '/api/agents/start', { projectId: snap.projects[0].id, room: 'frontend', task: 'a' })).status, 202);
+  assert.equal(s.launchCheckArmed(), true, 'a launch is pending');
+  clock += 61_000;
+  await c.waitFor((m) => m.t === 'feed' && /did not check in/.test(m.item.detail), 2000);
+  assert.equal(s.launchCheckArmed(), false, 'reported and forgotten: timer stopped');
+  await c.close();
+});
+
+test('LaunchWatch: onActive on the first pending launch, onIdle when the last is claimed or reported', async () => {
+  const { LaunchWatch } = await import('../../src/server/launch-watch.ts');
+  const calls: string[] = [];
+  const w = new LaunchWatch({ onActive: () => calls.push('active'), onIdle: () => calls.push('idle') });
+  w.add('a', 'A', 0); w.add('b', 'B', 0);
+  w.claim('a'); w.claim('nope');
+  assert.deepEqual(calls, ['active']);
+  assert.deepEqual(w.overdue(60_000), ['B']);
+  assert.deepEqual(calls, ['active', 'idle']);
+  w.add('c', 'C', 0); w.claim('c');
+  assert.deepEqual(calls, ['active', 'idle', 'active', 'idle']);
 });

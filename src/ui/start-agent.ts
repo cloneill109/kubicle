@@ -19,6 +19,7 @@ export class StartAgentUi {
   #room = $<HTMLSelectElement>('startRoom');
   #task = $<HTMLTextAreaElement>('startTask');
   #msg = $('startMsg');
+  #hint = $('startHint');
   #go = $<HTMLButtonElement>('startGo');
   #opener: HTMLElement | null = null;
   #busy = false;
@@ -28,6 +29,7 @@ export class StartAgentUi {
     $('startForm').addEventListener('submit', (e) => { e.preventDefault(); void this.#start(); });
     $('startClose').addEventListener('click', () => this.close());
     $('startCancel').addEventListener('click', () => this.close());
+    this.#task.addEventListener('input', () => this.#syncChoose());
     this.#task.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void this.#start(); } });
     this.#dlg.addEventListener('close', () => { this.#opener?.focus?.(); this.#opener = null; });
   }
@@ -38,11 +40,12 @@ export class StartAgentUi {
     const floor = this.#o.floor();
     const rooms = this.#o.rooms(floor);
     const opt = (id: string, name: string) => { const op = document.createElement('option'); op.value = id; op.textContent = name; return op; };
-    this.#room.replaceChildren(opt('', 'Let Bubbles choose (he reads the task)'), ...rooms.map((r) => opt(r.id, r.name)));
+    this.#room.replaceChildren(opt('', 'Let Bubbles choose'), ...rooms.map((r) => opt(r.id, r.name)));
     let last: string | null = null;
     try { last = localStorage.getItem(LAST_KEY + floor); } catch { /* blocked storage */ }
     const pick = [room, last].find((id) => id !== undefined && id !== null && (id === '' || rooms.some((r) => r.id === id)));
     this.#room.value = pick ?? '';
+    this.#syncChoose();
     $('startWhere').textContent = `${this.#o.floorName(floor)} · ${floor}`;
     this.#setMsg('');
     this.#opener = opener ?? null;
@@ -52,7 +55,34 @@ export class StartAgentUi {
 
   close(): void { if (this.#dlg.open) this.#dlg.close(); }
 
-  #setMsg(text: string): void { this.#msg.textContent = text; this.#msg.hidden = !text; }
+  /** "Let Bubbles choose" reads the task, so it needs one: disabled (with a hint) while the task is empty. */
+  #syncChoose(): void {
+    const choose = this.#room.options[0];
+    if (!choose || choose.value !== '') return;
+    const empty = this.#task.value.trim() === '';
+    choose.disabled = empty;
+    this.#hint.hidden = !empty;
+    if (empty && this.#room.value === '') this.#room.value = this.#fallback();
+  }
+
+  /** The remembered room for this floor if it still exists, else the first room. */
+  #fallback(): string {
+    const floor = this.#o.floor();
+    const rooms = this.#o.rooms(floor);
+    let last: string | null = null;
+    try { last = localStorage.getItem(LAST_KEY + floor); } catch { /* blocked storage */ }
+    return rooms.find((r) => r.id === last)?.id ?? rooms[0]?.id ?? '';
+  }
+
+  #setMsg(text: string, problems: string[] = []): void {
+    this.#msg.replaceChildren(document.createTextNode(text));
+    if (problems.length > 0) {
+      const ul = document.createElement('ul');
+      for (const p of problems) { const li = document.createElement('li'); li.textContent = p; ul.append(li); }
+      this.#msg.append(ul);
+    }
+    this.#msg.hidden = !text && problems.length === 0;
+  }
 
   async #start(): Promise<void> {
     if (this.#busy) return;
@@ -67,9 +97,17 @@ export class StartAgentUi {
         return;
       }
       let why = `Could not start it (${r.status}).`;
-      try { const b = await r.json() as { error?: string }; if (b.error) why = b.error; } catch { /* plain text */ }
-      if (r.status === 401 || r.status === 403) why = 'Your office login expired. Restart the server for a new login link.';
-      this.#setMsg(why);
+      let problems: string[] = [];
+      try {
+        const b = await r.json() as { error?: string; problems?: unknown };
+        if (b.error) why = b.error;
+        if (Array.isArray(b.problems) && b.problems.length > 0) {
+          problems = b.problems.filter((x): x is string => typeof x === 'string');
+          if (problems.length > 0) why = problems.length === 1 ? '' : 'This room cannot start an agent yet:';
+        }
+      } catch { /* plain text */ }
+      if (r.status === 401 || r.status === 403) { why = 'Your office login expired. Restart the server for a new login link.'; problems = []; }
+      this.#setMsg(why, problems);
     } catch {
       this.#setMsg('The office server did not answer. Is it still running?');
     } finally {

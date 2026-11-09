@@ -37,6 +37,7 @@ export function sayFor(e: LogEntry, floor: string, agent: (id: string) => AgentV
   const target = v?.id;
   switch (e.kind) {
     case 'intake':
+      if (e.outcome === 'briefed' && e.decision && e.sessionId.startsWith('launch-')) return { text: `Sending a new agent to ${roomName(e.decision)}`, target };
       if (e.outcome === 'briefed' && e.decision) return { text: `Sending ${name} to ${roomName(e.decision)}`, target };
       return null;
     case 'triage':

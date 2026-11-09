@@ -70,6 +70,8 @@ export interface RunningServer {
   loginUrl: string;
   ingestToken: string;
   close(): Promise<void>;
+  /** Test hook: whether the unclaimed-launch check timer is running (only while a launch is pending). */
+  launchCheckArmed(): boolean;
 }
 
 function listen(server: Server, port: number): Promise<number> {
@@ -234,17 +236,22 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
     onError: log,
   });
   const clock = opts.now ?? Date.now;
-  const launchWatch = new LaunchWatch();
+  let launchCheck: NodeJS.Timeout | null = null;
+  const launchWatch = new LaunchWatch({
+    onActive: () => { launchCheck ??= startLaunchCheck(); },
+    onIdle: () => { if (launchCheck) { clearInterval(launchCheck); launchCheck = null; } },
+  });
   const handler = createHandler({
     cfg, ingestToken, auth, store, writer, projects, registry, building, approvals, hub, pushFeed, rootDir: ROOT, port, log, flow,
     launch: opts.launch ?? makeLauncher({ home: cfg.home, app: process.env.KUBICLE_TERMINAL }),
     // The secret store is opened per launch and only asked `has`: values are read by `kubicle agent`, never here.
-    prepareLaunch: ({ projectId, roomId, task }) => {
+    prepareLaunch: ({ projectId, roomId, task, briefing, id }) => {
       const blockers = building.launchBlockers(projectId, roomId);
       if (blockers.length > 0) throw new HarnessError(blockers);
       return buildLaunch({
       home: cfg.home, claudeSettings: join(cfg.claudeDir, 'settings.json'), building: building.snapshot(),
         projectId, roomId, task, secrets: openSecrets(cfg.home),
+        ...(briefing ? { briefing } : {}), ...(id ? { id } : {}),
       });
     },
     launchWatch,
@@ -302,16 +309,20 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   }, TICK_MS);
   tick.unref();
   // Review Focus 3: a window that never ran `kubicle agent` (wrong terminal app, claude missing) is reported, once.
-  const launchCheck = setInterval(() => {
-    try {
-      for (const room of launchWatch.overdue(clock())) {
-        const item: FeedItem = { ts: clock(), event: 'Launch', agentName: 'Office', detail: checkInMessage(room) };
-        pushFeed(item);
-        hub.broadcast({ t: 'feed', item });
-      }
-    } catch (err) { log(`launch check failed: ${String(err)}`); }
-  }, opts.launchCheckMs ?? TICK_MS);
-  launchCheck.unref();
+  // Armed only while a launch is pending (LaunchWatch onActive/onIdle): no idle work.
+  function startLaunchCheck(): NodeJS.Timeout {
+    const t = setInterval(() => {
+      try {
+        for (const room of launchWatch.overdue(clock())) {
+          const item: FeedItem = { ts: clock(), event: 'Launch', agentName: 'Office', detail: checkInMessage(room) };
+          pushFeed(item);
+          hub.broadcast({ t: 'feed', item });
+        }
+      } catch (err) { log(`launch check failed: ${String(err)}`); }
+    }, opts.launchCheckMs ?? TICK_MS);
+    t.unref();
+    return t;
+  }
   const prune = () => { try { store.prune(Date.now() - KEEP_EVENTS_MS); } catch (err) { log(`prune failed: ${String(err)}`); } };
   prune();
   const pruner = setInterval(prune, PRUNE_MS);
@@ -329,7 +340,7 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   const close = () => closing ??= (async () => {
     clearInterval(tick);
     clearInterval(pruner);
-    clearInterval(launchCheck);
+    if (launchCheck) clearInterval(launchCheck);
     approvals.releaseAll(); // pending hooks get an empty (no-decision) response
     await new Promise((r) => setImmediate(r));
     hub.close();
@@ -347,7 +358,7 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
     store.close();
   })();
 
-  return { url, hookSocket: cfg.hookSocket, loginUrl, ingestToken, close };
+  return { url, hookSocket: cfg.hookSocket, loginUrl, ingestToken, close, launchCheckArmed: () => launchCheck !== null };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
