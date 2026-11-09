@@ -9,6 +9,7 @@ import { HOOK_EVENTS, planInstall, planUninstall, quote } from '../../src/cli/in
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CLI = join(root, 'src', 'cli', 'install.ts');
+process.env.KUBICLE_SECRETS_STORE = 'file'; // never the OS keyring in tests
 const SHIM = '/opt/my kubicle/bin/kubicle-hook';
 // I4: the install-time home is baked into every command.
 const ENV = { home: '/Users/me/.kubicle' };

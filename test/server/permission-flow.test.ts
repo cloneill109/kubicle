@@ -15,6 +15,7 @@ import type { LogEntry } from '../../src/server/bubbles/log.ts';
 
 const FAKE = join(import.meta.dirname, '..', 'fixtures', 'fake-claude.mjs');
 process.env.KUBICLE_CLAUDE_BIN = FAKE; // belt and braces: nothing in this file may reach the real claude
+process.env.KUBICLE_SECRETS_STORE = 'file'; // never the OS keyring in tests
 
 const cleanup: (() => Promise<void> | void)[] = [];
 after(async () => { for (const f of cleanup.reverse()) await f(); });
@@ -35,7 +36,7 @@ async function start(opts: { home?: string; env?: Record<string, string>; timeou
   mkdirSync(cwd, { recursive: true });
   cleanup.push(() => rmSync(cwd, { recursive: true, force: true }));
   const fakeLog = join(home, 'fake.jsonl');
-  const s = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0, ...patch }, {
+  const s = await startServer({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0, ...patch }, {
     bubbles: { bin: FAKE, env: { FAKE_CLAUDE_LOG: fakeLog, ...opts.env }, ...(opts.timeouts ? { timeouts: opts.timeouts } : {}) },
   });
   let closed = false;
@@ -211,6 +212,20 @@ test('PermissionRequest: protected push, no UI: no model call, terminal within 1
   assert.deepEqual(es.map((e) => [e.kind, e.outcome]), [['triage', 'escalated:protected'], ['escalation', 'protected'], ['owner-answer', 'terminal']]);
   assert.equal(es[1]!.ref, es[0]!.seq);
   assert.equal(es[2]!.ref, es[1]!.seq);
+});
+
+test('GET /cli/session/:id shows a request waiting on the owner, with Bubbles\' reason, until it is answered', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  const pending = perm(s, 'p-card', 'git push origin main');
+  const m = await c.waitFor(agentMsg((a) => a.id === 'p-card' && a.pending?.answerable === true)) as Extract<ServerMsg, { t: 'agent' }>;
+  const card = JSON.parse((await cli(s, 'GET', '/cli/session/p-card')).body) as { waiting: { tool: string; reason?: string } | null };
+  assert.equal(card.waiting?.tool, 'Bash');
+  assert.match(card.waiting?.reason ?? '', /push/);
+  assert.equal((await control(s, cookie, `/api/approvals/${m.agent.pending!.id}`, { decision: 'deny' })).status, 204);
+  await pending;
+  assert.equal((JSON.parse((await cli(s, 'GET', '/cli/session/p-card')).body) as { waiting: unknown }).waiting, null);
 });
 
 test('PermissionRequest: protected push with a UI: the card carries why=protected; the owner answer is logged', async () => {
@@ -556,4 +571,19 @@ test('final M2: the office wait is shortened by the time triage took (total stay
   const ms = performance.now() - t0;
   assert.ok(ms < 2600, `triage + office wait took ${Math.round(ms)} ms (limit ~2000)`);
   assert.equal(s.fakeCalls(), 1);
+});
+
+test('AskUserQuestion is a question for the owner, not a permission: no triage, no office wait, straight to the terminal', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const c = await owner(s, cookie);
+  await c.waitFor((m) => m.t === 'snapshot' && 'bubbles' in m);
+  const t0 = performance.now();
+  const r = await perm(s, 'p-ask', '', { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Which layout?', options: [{ label: 'A' }, { label: 'B' }] }] } });
+  const ms = performance.now() - t0;
+  assert.equal(r.body.trim(), '');
+  assert.ok(ms < 1000, `took ${ms} ms`);
+  assert.equal(s.fakeCalls(), 0, 'Bubbles never triages a question');
+  assert.ok(!c.msgs.some((m) => m.t === 'agent' && m.agent.id === 'p-ask' && m.agent.pending?.answerable === true), 'no answerable office card');
+  assert.ok(!(await logOf(s)).some((e) => e.kind === 'triage'));
 });

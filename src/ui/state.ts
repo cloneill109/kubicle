@@ -42,7 +42,7 @@ export class OfficeState {
   projects: ProjectRow[] = [];
   feed: FeedItem[] = []; // newest first
   banner: string | null = null;
-  building: Building = { divisions: [], floors: {}, warnings: [] };
+  building: Building = { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], secretsSet: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' } };
   /** Bubbles' last state (null until the first snapshot). */
   bubbles: BubblesState | null = null;
   /** Bubbles log entries seen live or fetched, newest first (by seq), at most LOG_MAX, no duplicate seq. */

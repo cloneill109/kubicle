@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import {
   BuildingFileError, RevisionConflict, slugFor, readDivision, readFloor, writeDivision, writeFloor, seedDivisions,
 } from '../../src/server/building/files.ts';
-import { defaultFloor, type DivisionDef } from '../../src/shared/building.ts';
+import { DEFAULT_DIVISIONS, defaultFloor, type DivisionDef } from '../../src/shared/building.ts';
+import { harnessProblems } from '../../src/shared/harness.ts';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'kub-bf-'));
 const div = (o: Partial<DivisionDef> = {}): DivisionDef => ({ id: 'qa', name: 'QA', color: '#62c4a0', harness: {}, revision: 1, ...o });
@@ -159,6 +160,26 @@ test('seedDivisions: 7 files on empty/missing dir, then false and no writes', ()
   assert.equal(readdirSync(empty).length, 7);
 });
 
+test('seedDivisions: starter prompts are short and valid, and an existing division file is never rewritten', () => {
+  const dir = join(tmp(), 'divisions');
+  seedDivisions(dir);
+  for (const d of DEFAULT_DIVISIONS) {
+    const h = readDivision(join(dir, `${d.id}.yaml`)).harness as Record<string, unknown>;
+    assert.deepEqual(Object.keys(h), ['prompt']);
+    assert.ok(typeof h.prompt === 'string' && h.prompt.length > 20 && h.prompt.length <= 300, d.id);
+    assert.deepEqual(harnessProblems(h), []);
+  }
+  // A user who already has divisions (even just one, with an empty harness) keeps them exactly as they are.
+  const mine = join(tmp(), 'mine');
+  writeDivision(mine, { id: 'qa', name: 'QA', color: '#62c4a0', harness: {}, revision: 0 }, 0);
+  const before = readFileSync(join(mine, 'qa.yaml'), 'utf8');
+  const mt = statSync(join(mine, 'qa.yaml')).mtimeMs;
+  assert.equal(seedDivisions(mine), false);
+  assert.deepEqual(readdirSync(mine), ['qa.yaml']);
+  assert.equal(readFileSync(join(mine, 'qa.yaml'), 'utf8'), before);
+  assert.equal(statSync(join(mine, 'qa.yaml')).mtimeMs, mt);
+});
+
 // ---- final review I1: refuse files that could hang or exhaust a read ----
 import { symlinkSync } from 'node:fs';
 
@@ -235,4 +256,17 @@ test('M4/M5: room division and name are validated on read and on write', () => {
   assert.throws(() => writeFloor(w, { revision: 0, source: 'home', rooms: [bp, { id: 'a', name: 'A', division: 'Bad Div', band: 'top', width: 12 }] }, 0), /division of "a" is invalid/);
   assert.throws(() => writeFloor(w, { revision: 0, source: 'home', rooms: [bp, { id: 'a', name: 'x'.repeat(41), band: 'top', width: 12 }] }, 0), /name of "a" must be 1–40 characters/);
   assert.equal(existsSync(w), false);
+});
+
+test('division harness is validated: unknown key and bad types are rejected; {} still loads', () => {
+  const d = tmp();
+  const f = join(d, 'qa.yaml');
+  const w = (harness: string) => writeFileSync(f, `id: qa\nname: QA\ncolor: "#62c4a0"\nharness: ${harness}\nrevision: 1\n`);
+  w('{}'); assert.deepEqual(readDivision(f).harness, {});
+  w('{ model: sonnet, tools: [Read] }'); assert.equal(readDivision(f).harness.model, 'sonnet');
+  w('{ mcps: [] }');
+  assert.throws(() => readDivision(f), (e: any) => e instanceof BuildingFileError && e.message.includes('harness has unknown key "mcps"'));
+  w('{ tools: Read }');
+  assert.throws(() => readDivision(f), (e: any) => e instanceof BuildingFileError && e.message.includes('tools must be a list'));
+  assert.throws(() => writeDivision(d, div({ harness: { mcps: [] } }), 0), /harness has unknown key "mcps"/);
 });

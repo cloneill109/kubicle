@@ -1,3 +1,6 @@
+import type { Harness, PermissionMode } from './harness.ts';
+import type { McpCatalog, SkillInfo } from './catalog.ts';
+
 // Shared building model: divisions, floors, rooms. Browser-safe (no Node imports).
 
 export const ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -6,17 +9,36 @@ export const BULLPEN = 'bullpen';
 export interface DivisionDef { id: string; name: string; color: string; harness: Record<string, unknown>; revision: number }
 export interface RoomDef { id: string; name: string; division?: string; band: 'top' | 'bottom'; width: number }
 export interface FloorDef { revision: number; rooms: RoomDef[]; source: 'default' | 'home' | 'repo' }
-/** floors keyed by project id */
-export interface Building { divisions: DivisionDef[]; floors: Record<string, FloorDef>; warnings: string[] }
+export interface RoomOverrides { revision: number; rooms: Record<string, Harness> }
+/** floors and overrides keyed by project id; a project with no overrides file has no overrides key */
+/** ~/.kubicle/settings.yaml (revision 0 and the defaults when absent). */
+export interface KubicleSettings { revision: number; default_permission_mode: PermissionMode }
+
+export interface Building {
+  /** global settings */
+  settings: KubicleSettings;
+  divisions: DivisionDef[]; floors: Record<string, FloorDef>; overrides: Record<string, RoomOverrides>;
+  /** ~/.kubicle/mcp.yaml (revision 0 and no servers when absent) */
+  mcp: McpCatalog;
+  /** the skill library, ~/.kubicle/skills */
+  skills: SkillInfo[];
+  /** skills in the user's Claude config that can be imported */
+  importable: SkillInfo[];
+  /** Names (never values) of the secrets mcp.yaml refers to that are set, so the room panel can warn before a launch. */
+  secretsSet: string[];
+  /** Set when Kubicle's hooks are missing from Claude's settings: why a clean room (inherit: false) cannot start. */
+  hooksProblem?: string;
+  warnings: string[];
+}
 
 export const DEFAULT_DIVISIONS: Omit<DivisionDef, 'revision'>[] = [
-  { id: 'qa', name: 'QA', color: '#62c4a0', harness: {} },
-  { id: 'security', name: 'Cybersecurity', color: '#ec5f5f', harness: {} },
-  { id: 'uxui', name: 'UX/UI', color: '#d571d9', harness: {} },
-  { id: 'frontend', name: 'Front end', color: '#5b93f5', harness: {} },
-  { id: 'backend', name: 'Back end', color: '#2fb79c', harness: {} },
-  { id: 'animation', name: 'Animation', color: '#b98cf2', harness: {} },
-  { id: 'imagegen', name: 'Image gen', color: '#f38b3d', harness: {} },
+  { id: 'qa', name: 'QA', color: '#62c4a0', harness: { prompt: 'You are working in the QA room. Focus on testing: reproduce problems, write or run tests, and report what you ran and what you saw.' } },
+  { id: 'security', name: 'Cybersecurity', color: '#ec5f5f', harness: { prompt: 'You are working in the Cybersecurity room. Focus on security review: look for vulnerabilities, unsafe input handling and leaked secrets, and say how serious each finding is.' } },
+  { id: 'uxui', name: 'UX/UI', color: '#d571d9', harness: { prompt: 'You are working in the UX/UI room. Focus on how the interface looks and feels: layout, clarity, accessibility and consistency.' } },
+  { id: 'frontend', name: 'Front end', color: '#5b93f5', harness: { prompt: 'You are working in the Front end room. Focus on the browser side: components, styling, state and how the page behaves.' } },
+  { id: 'backend', name: 'Back end', color: '#2fb79c', harness: { prompt: 'You are working in the Back end room. Focus on the server side: data, APIs, reliability and error handling.' } },
+  { id: 'animation', name: 'Animation', color: '#b98cf2', harness: { prompt: 'You are working in the Animation room. Focus on motion: timing, easing, performance and respecting reduced-motion settings.' } },
+  { id: 'imagegen', name: 'Image gen', color: '#f38b3d', harness: { prompt: 'You are working in the Image gen room. Focus on creating and refining images and visual assets for this project.' } },
 ];
 
 export function defaultFloor(): FloorDef {
@@ -64,14 +86,22 @@ export function validateFloor(f: FloorDef, _divisionIds: Set<string>): string[] 
   return errs;
 }
 
-export function resolveRoom(floor: FloorDef, hint: { label?: string; room?: string; division?: string; assigned?: string }): string {
+export type RoomHint = { label?: string; room?: string; division?: string; assigned?: string };
+/** Who put the agent in its room: the owner's label, a launch hint, Bubbles, or nobody (Bullpen). */
+export type PlacedBy = 'owner' | 'launch' | 'bubbles' | 'default';
+
+export function placeRoom(floor: FloorDef, hint: RoomHint): { id: string; by: PlacedBy } {
   const has = (id: string | undefined): id is string => !!id && floor.rooms.some((r) => r.id === id);
-  if (has(hint.label)) return hint.label;
-  if (has(hint.room)) return hint.room;
+  if (has(hint.label)) return { id: hint.label, by: 'owner' };
+  if (has(hint.room)) return { id: hint.room, by: 'launch' };
   if (hint.division) {
     const r = floor.rooms.find((x) => x.division === hint.division);
-    if (r) return r.id;
+    if (r) return { id: r.id, by: 'launch' };
   }
-  if (has(hint.assigned)) return hint.assigned;
-  return BULLPEN;
+  if (has(hint.assigned)) return { id: hint.assigned, by: 'bubbles' };
+  return { id: BULLPEN, by: 'default' };
+}
+
+export function resolveRoom(floor: FloorDef, hint: RoomHint): string {
+  return placeRoom(floor, hint).id;
 }

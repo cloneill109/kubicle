@@ -72,7 +72,7 @@ export function makeCozy(): Renderer {
       if (k === 'unknown') { g.strokeStyle = 'rgba(90,90,100,.12)'; g.lineWidth = 1; g.strokeRect(X + .5, Y + .5, T - 1, T - 1); }
       if (k === 'bullpen') { g.fillStyle = 'rgba(110,70,35,.16)'; g.fillRect(X, Y + T * .48, T, 1); g.fillRect(X + ((x * 7 + y * 3) % 10) / 10 * T, Y, 1, T * .48); }
     }
-    for (const rm of w.rooms) if (rm.kind === 'division') {
+    for (const rm of w.rooms) if (rm.kind !== 'bullpen') {
       g.strokeStyle = 'rgba(255,255,255,.55)'; g.lineWidth = 1.5; g.setLineDash([]);
       rr(g, ox + (rm.x0 + .5) * T, oy + (rm.y0 + .5) * T, (rm.x1 - rm.x0) * T, (rm.y1 - rm.y0) * T, T * .6); g.stroke();
     }

@@ -21,6 +21,9 @@ function target(home: string, root: string): Target {
   return { root, file: join(home, 'floors', `${slugFor(root)}.yaml`), origin: 'home' };
 }
 
+/** Throws BuildingFileError when the project's floor file exists but is invalid. */
+export function currentFloor(home: string, root: string): FloorDef { return current(target(home, root)); }
+
 /** The current floor and the revision a write must name (0 = no file yet: the default floor). */
 function current(t: Target): FloorDef {
   return existsSync(t.file) ? readFloor(t.file, t.origin) : defaultFloor();

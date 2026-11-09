@@ -199,6 +199,7 @@ export class Registry {
       if (target.kind === 'session') {
         if (!target.division && e.division) target.division = e.division;
         if (!target.room && e.room) target.room = e.room;
+        if (!target.launch && e.launch) target.launch = e.launch;
       }
       if (e.transcriptPath) this.#transcripts.set(target.id, e.transcriptPath);
       if (e.cwd && (e.event === 'CwdChanged' || e.event === 'SessionStart' || !target.cwd || target.projectId === '')) {
@@ -228,6 +229,7 @@ export class Registry {
         case 'PreToolUse':
           setStatus(t, 'working');
           t.activity = e.activity ?? e.toolName ?? '';
+          if (e.summary) t.summary = e.summary; else delete t.summary;
           this.#pushLog(t, t.activity);
           break;
         case 'PostToolUse':

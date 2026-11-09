@@ -9,6 +9,8 @@ import { loadConfig } from '../../src/server/config.ts';
 import { startServer } from '../../src/server/main.ts';
 import { main } from '../../src/cli/kubicle.ts';
 
+process.env.KUBICLE_SECRETS_STORE = 'file'; // never the OS keyring in tests
+
 process.env.KUBICLE_CLAUDE_BIN = join(import.meta.dirname, '..', 'fixtures', 'fake-claude.mjs');
 process.env.FAKE_CLAUDE_MODE ??= 'escalate';
 
@@ -21,7 +23,7 @@ async function office() {
   const home = join(base, 'h');
   const repo = join(base, 'proj');
   mkdirSync(join(repo, '.git'), { recursive: true });
-  const s = await startServer({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 });
+  const s = await startServer({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0 });
   cleanup.push(() => s.close());
   // The office learns the project from a hook event.
   const hook = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'fixtures', 'hooks', 'SessionStart.json'), 'utf8'));

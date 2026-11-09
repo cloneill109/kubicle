@@ -19,10 +19,12 @@
     <span class="lbl">Floor</span><span class="name">Lobby</span><span class="glow" hidden></span><span class="caret" aria-hidden="true">▾</span>
   </button>
   <button class="btn edit-btn" id="editBtn" type="button" aria-pressed="false" aria-controls="editSheet" title="Rearrange this floor's rooms" hidden>Edit floor</button>
+  <button class="btn primary" id="startBtn" type="button" aria-haspopup="dialog" aria-controls="startDlg" title="Open a new Terminal running Claude in a room on this floor" hidden>Start agent</button>
   <div class="counts" id="counts" aria-live="polite"></div>
   <div class="tools">
     <button class="btn bub-dot" id="bubblesDot" type="button" data-state="" aria-haspopup="dialog" aria-controls="bubblesPanel" aria-label="Bubbles: connecting. Open the Bubbles panel"><i class="dot" aria-hidden="true"></i>Bubbles<span class="glow" hidden></span></button>
     <button class="btn" id="logBtn" type="button" aria-haspopup="dialog" aria-controls="logView" title="Everything Bubbles decided, and why">Log</button>
+    <button class="btn" id="settingsBtn" type="button" aria-haspopup="dialog" aria-controls="settingsDlg">Settings</button>
     <button class="btn chime" id="chime" type="button" aria-pressed="false" title="Play a sound when an agent starts waiting on you">Chime off</button>
     <nav class="styles" role="tablist" aria-label="Visual style" id="styleTabs"></nav>
   </div>
@@ -178,6 +180,129 @@
     <ol class="log bub-recent" id="bubblesRecent"></ol>
     <button class="btn" id="bubblesOpenLog" type="button">Open the full log</button>
   </section>
+</dialog>
+
+<dialog class="drawer rp" id="roomPanel" aria-labelledby="rpTitle">
+  <header class="rp-head">
+    <div class="rp-title"><h2 id="rpTitle"></h2><p class="sub" id="rpSub"></p></div>
+    <button class="btn icon" id="rpClose" type="button" aria-label="Close the room panel">✕</button>
+  </header>
+  <div class="rp-actions">
+    <button class="btn primary" id="rpStart" type="button">Start agent here</button>
+    <button class="btn" id="rpCopy" type="button">Copy kubicle run command</button>
+    <span class="conn" id="rpCopyNote" role="status"></span>
+    <code class="rp-cmd" id="rpCmd" hidden></code>
+  </div>
+  <p class="rp-help" id="rpOutside">Agents started outside Kubicle keep their own setup.</p>
+  <p class="edit-note" id="rpArchived" hidden>This floor is archived. Restore it in the Lobby to change this room.</p>
+  <fieldset class="rp-scope" id="rpScope">
+    <legend>Applies to</legend>
+    <label><input type="radio" name="rpScope" id="rpScopeRoom" value="room"> <span id="rpScopeRoomText"></span></label>
+    <label id="rpScopeDivisionRow"><input type="radio" name="rpScope" id="rpScopeDivision" value="division"> <span id="rpScopeDivisionText"></span></label>
+  </fieldset>
+  <ul class="rp-problems" id="rpProblems" role="status" hidden></ul>
+  <form class="rp-form" id="rpForm" novalidate>
+    <fieldset class="rp-fields" id="rpFields">
+      <div class="rp-field" id="rpCleanRow">
+        <label class="bub-switch"><input type="checkbox" id="rpClean"> Clean room</label>
+        <p class="rp-help">Ignores your personal and project settings, and any other MCP servers.</p>
+        <p class="rp-note" id="rpCleanNote" hidden></p>
+      </div>
+      <div class="rp-field" id="rpModelRow">
+        <label for="rpModel">Model</label>
+        <select id="rpModel"><option value="">Default</option><option value="fable">fable</option><option value="opus">opus</option><option value="sonnet">sonnet</option><option value="haiku">haiku</option><option value="__other">Other…</option></select>
+        <div class="rp-field" id="rpModelOtherRow" hidden><label for="rpModelOther">Model name</label><input id="rpModelOther" autocomplete="off" spellcheck="false" placeholder="e.g. claude-opus-4"></div>
+        <p class="rp-note" id="rpModelNote" hidden></p>
+      </div>
+      <div class="rp-field" id="rpModeRow">
+        <label for="rpMode">Permission mode</label>
+        <select id="rpMode"><option value="">Default</option><option value="auto">Auto</option><option value="acceptEdits">Accept edits</option><option value="manual">Manual</option><option value="plan">Plan</option></select>
+        <p class="rp-note" id="rpModeNote" hidden></p>
+      </div>
+      <div class="rp-field" id="rpPromptRow">
+        <label for="rpPrompt">Prompt</label>
+        <p class="rp-note rp-pre" id="rpPromptNote" hidden></p>
+        <textarea id="rpPrompt" rows="4" placeholder="Added to the system prompt"></textarea>
+      </div>
+      <fieldset class="rp-field rp-group" id="rpToolsRow">
+        <legend>Tools</legend>
+        <div class="rp-radios">
+          <label><input type="radio" name="rpTools" id="rpToolsDefault" value="default"> Default set</label>
+          <label><input type="radio" name="rpTools" id="rpToolsOnly" value="only"> Only these</label>
+        </div>
+        <p class="rp-note" id="rpToolsNote" hidden></p>
+        <p class="rp-need" id="rpToolsEmpty" role="status" hidden></p>
+        <ul class="rp-list" id="rpTools"></ul>
+      </fieldset>
+      <div class="rp-field" id="rpAllowRow"><label for="rpAllow">Allow <span class="rp-help">one rule per line</span></label><textarea id="rpAllow" rows="2" spellcheck="false" placeholder="Bash(npm test:*)"></textarea><p class="rp-note" id="rpAllowNote" hidden></p></div>
+      <div class="rp-field" id="rpAskRow"><label for="rpAsk">Ask <span class="rp-help">one rule per line</span></label><textarea id="rpAsk" rows="2" spellcheck="false"></textarea><p class="rp-note" id="rpAskNote" hidden></p></div>
+      <div class="rp-field" id="rpDenyRow"><label for="rpDeny">Deny <span class="rp-help">one rule per line</span></label><textarea id="rpDeny" rows="2" spellcheck="false" placeholder="Bash(git push:*)"></textarea><p class="rp-note" id="rpDenyNote" hidden></p></div>
+      <fieldset class="rp-field rp-group" id="rpMcpRow">
+        <legend>MCP servers</legend>
+        <ul class="rp-list" id="rpMcp"></ul>
+      </fieldset>
+      <fieldset class="rp-field rp-group" id="rpSkillsRow">
+        <legend>Skills</legend>
+        <ul class="rp-list" id="rpSkills"></ul>
+        <button class="btn rp-import-btn" id="rpImportBtn" type="button" aria-expanded="false" aria-controls="rpImportList">Import…</button>
+        <ul class="rp-list" id="rpImportList" hidden></ul>
+      </fieldset>
+    </fieldset>
+    <details class="rp-where"><summary>Where each setting comes from</summary><ul class="rp-rows" id="rpRows"></ul></details>
+    <div class="rp-save" id="rpSaveBar">
+      <div class="edit-msg rp-msg" id="rpMsgBox" role="alert" hidden><p id="rpMsg"></p><button class="btn" id="rpReload" type="button" hidden>Reload</button></div>
+      <button class="btn primary" id="rpSave" type="submit">Save</button>
+    </div>
+  </form>
+  <section class="rp-add bub-sec" id="rpMcpAdd" aria-labelledby="rpMcpAddH">
+    <h3 id="rpMcpAddH">Add MCP server</h3>
+    <form class="bub-form" id="rpMcpForm" novalidate>
+      <fieldset class="rp-fields rp-mcp" id="rpMcpFields">
+        <div class="field wide"><label for="rpMcpName">Name</label><input id="rpMcpName" autocomplete="off" spellcheck="false" maxlength="32" placeholder="github"></div>
+        <div class="field wide"><label for="rpMcpType">Runs as</label><select id="rpMcpType"><option value="stdio">Command</option><option value="http">URL</option></select></div>
+        <div class="field wide" id="rpMcpCmdRow"><label for="rpMcpCommand">Command</label><input id="rpMcpCommand" autocomplete="off" spellcheck="false" placeholder="npx"></div>
+        <div class="field wide" id="rpMcpArgsRow"><label for="rpMcpArgs">Arguments <span class="rp-help">one per line</span></label><textarea id="rpMcpArgs" rows="2" spellcheck="false" placeholder="-y&#10;@modelcontextprotocol/server-github"></textarea></div>
+        <div class="field wide" id="rpMcpUrlRow" hidden><label for="rpMcpUrl">URL</label><input id="rpMcpUrl" autocomplete="off" spellcheck="false" placeholder="https://example.com/mcp"></div>
+        <div class="field wide rp-pairs">
+          <span class="rp-pairs-h" id="rpMcpPairsH">Environment</span>
+          <ul class="rp-pairs-list" id="rpMcpPairs"></ul>
+          <button class="btn" id="rpMcpAddPair" type="button">Add a variable</button>
+          <p class="rp-help">A value can be <code>secret:&lt;name&gt;</code>. Set the value with: kubicle secret set &lt;name&gt;</p>
+        </div>
+        <button class="btn" id="rpMcpSubmit" type="submit">Add MCP server</button>
+        <p class="bub-err rp-mcp-msg" id="rpMcpMsg" role="alert" hidden></p>
+      </fieldset>
+    </form>
+  </section>
+</dialog>
+
+<dialog class="start-dlg" id="settingsDlg" aria-labelledby="settingsTitle">
+  <form class="bub-form start-form" id="settingsForm">
+    <header class="start-head">
+      <div><h2 id="settingsTitle">Settings</h2></div>
+      <button class="btn icon" id="settingsClose" type="button" aria-label="Close settings">✕</button>
+    </header>
+    <div class="field wide"><label for="settingsMode">Default permission mode for new agents</label><select id="settingsMode"></select></div>
+    <p class="sub wide">Bubbles still asks you before pushes to protected branches, in every mode.</p>
+    <div class="edit-msg wide-row" id="settingsMsgBox" role="alert" hidden><p id="settingsMsg"></p><button class="btn" id="settingsReload" type="button" hidden>Reload</button></div>
+    <div class="start-actions"><button class="btn primary" type="submit" id="settingsSave">Save</button><button class="btn" type="button" id="settingsCancel">Cancel</button></div>
+  </form>
+</dialog>
+
+<dialog class="start-dlg" id="startDlg" aria-labelledby="startTitle">
+  <form class="bub-form start-form" id="startForm">
+    <header class="start-head">
+      <div><h2 id="startTitle">Start an agent</h2><p class="sub" id="startWhere"></p></div>
+      <button class="btn icon" id="startClose" type="button" aria-label="Close">✕</button>
+    </header>
+    <div class="field wide"><label for="startRoom">Room</label><div class="start-room"><select id="startRoom"></select><button class="btn" id="startSetup" type="button">Set up room</button></div>
+      <span class="opt" id="startHint" hidden>Type a task so Bubbles can choose</span></div>
+    <div class="field wide"><label for="startTask">Task <span class="opt">(optional)</span></label>
+      <textarea id="startTask" maxlength="4000" rows="5" spellcheck="true" placeholder="What should it work on? Leave empty to just open Claude there."></textarea></div>
+    <p class="sub wide">Opens a new Terminal window running <code>claude</code> on your subscription, with this as its first prompt. You talk to it in that window; it shows up in this room. <kbd>⌘</kbd><kbd>Enter</kbd> starts.</p>
+    <p class="bub-err" id="startMsg" role="alert" hidden></p>
+    <div class="start-actions"><button class="btn primary" type="submit" id="startGo">Start</button><button class="btn" type="button" id="startCancel">Cancel</button><button class="btn primary" type="button" id="startDone" hidden>Close</button></div>
+  </form>
 </dialog>
 
 <dialog class="wide log-view" id="logView" aria-labelledby="logTitle">

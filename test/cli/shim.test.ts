@@ -237,7 +237,7 @@ test('I2: hung listener -> perm shim (max 140) gives up within ~10 s', async () 
 
 test('I2: real server, opted-in wait with heartbeat: decision still delivered after > 3 s', async () => {
   const home = realpathSync(mkdtempSync('/tmp/ksr-'));
-  const srv = await startOffice({ ...loadConfig({ KUBICLE_HOME: home }), port: 0, approvalWaitMs: 8000 });
+  const srv = await startOffice({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0, approvalWaitMs: 8000 });
   try {
     const r0 = await fetch(srv.loginUrl, { redirect: 'manual' });
     const cookie = (r0.headers.get('set-cookie') ?? '').split(';')[0]!;
@@ -274,7 +274,7 @@ test('I2: real server, opted-in wait with heartbeat: decision still delivered af
 
 test('I2: real server, no office open: perm shim returns quickly with nothing (after Bubbles escalates)', async () => {
   const home = realpathSync(mkdtempSync('/tmp/ksr-'));
-  const srv = await startOffice({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 });
+  const srv = await startOffice({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0 });
   try {
     const r = await runShim({ KUBICLE_HOME: home }, ['140', 'perm'], permFixture);
     assert.equal(r.stdout, '');
@@ -306,6 +306,21 @@ test('KUBICLE_DIVISION / KUBICLE_ROOM with a bad pattern are not sent', async ()
       assert.equal(s.hits.length, 1, `still delivers for ${JSON.stringify(bad)}`);
       assert.equal(s.hits[0]!.headers['x-kubicle-division'], undefined, bad);
       assert.equal(s.hits[0]!.headers['x-kubicle-room'], undefined, bad);
+    } finally { s.close(); }
+  }
+});
+
+test('KUBICLE_LAUNCH is forwarded as X-Kubicle-Launch only when uuid-shaped', async () => {
+  const home = homeWithToken();
+  const id = 'abcdef12-2222-4333-8444-555555555555';
+  for (const [v, want] of [[id, id], ['x; rm -rf ~', undefined], ['11111111-2222-4333-8444-55555555555', undefined], [`${id}\nX-Evil: 1`, undefined], ['', undefined], [id.toUpperCase(), undefined]] as const) {
+    const s = await startServer(home, () => ({ status: 200 }));
+    try {
+      const r = await runShim({ KUBICLE_HOME: home, KUBICLE_LAUNCH: v });
+      assert.equal(r.code, 0);
+      assert.equal(s.hits.length, 1, `still delivers for ${JSON.stringify(v)}`);
+      assert.equal(s.hits[0]!.headers['x-kubicle-launch'], want, v);
+      assert.equal(s.hits[0]!.headers['x-evil'], undefined);
     } finally { s.close(); }
   }
 });
@@ -432,7 +447,7 @@ test('prompt: kind event (an older `kubicle-hook 1` line) never prints an intake
 test('prompt: real office, slow intake (> 3 s): heartbeats keep the shim waiting and the briefing is printed', async () => {
   const home = realpathSync(mkdtempSync('/tmp/ksr-'));
   const proj = realpathSync(mkdtempSync('/tmp/ksp-'));
-  const srv = await startOffice({ ...loadConfig({ KUBICLE_HOME: home }), port: 0 }, { bubbles: { env: { FAKE_CLAUDE_DELAY: '4000' } } });
+  const srv = await startOffice({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-test') }), port: 0 }, { bubbles: { env: { FAKE_CLAUDE_DELAY: '4000' } } });
   try {
     const ev = { ...JSON.parse(promptFixture), session_id: 'shim-intake', cwd: proj, prompt: 'fake-mode:intake-slow build the nav' };
     const r = await runShim({ KUBICLE_HOME: home }, ['10', 'prompt'], JSON.stringify(ev));

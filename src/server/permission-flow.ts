@@ -75,6 +75,9 @@ export function officeWaitMs(approvalWaitMs: number, triageMs: number): number {
   return Math.max(0, approvalWaitMs - Math.max(0, triageMs));
 }
 
+/** Claude Code's tool for asking the user a question: its PermissionRequest is the question itself. */
+const OWNER_QUESTION_TOOL = 'AskUserQuestion';
+
 const keyOf = (e: AgentEvent) => (e.agentId !== undefined ? `${e.sessionId}:${e.agentId}` : e.sessionId);
 
 function inputOf(e: AgentEvent, raw: unknown): unknown {
@@ -195,6 +198,9 @@ export class PermissionFlow {
     const id = keyOf(e);
     const agent = this.d.registry.get(id);
     if (!agent || agent.approvals === 'off' || !opts.canDeliver) return null;
+    // A question for the owner, not a permission: triage has nothing to decide and the office cannot answer it, so the
+    // terminal shows it at once (no model call, no 120 s office wait before the same question appears there).
+    if (e.toolName === OWNER_QUESTION_TOOL) return null;
 
     const input = inputOf(e, opts.input);
     const cwd = e.cwd ?? agent.cwd;

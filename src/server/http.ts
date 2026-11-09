@@ -1,13 +1,21 @@
+import { randomUUID } from 'node:crypto';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, join, resolve, sep } from 'node:path';
 import { normalizeHook, type AgentEvent } from '../shared/events.ts';
-import { ID_RE, type RoomDef } from '../shared/building.ts';
+import { BULLPEN, ID_RE, placeRoom, type RoomDef } from '../shared/building.ts';
 import type { BuildingService } from './building/service.ts';
 import { BuildingFileError, RevisionConflict } from './building/files.ts';
-import type { AgentView, BubblesState, FeedItem, ServerMsg } from '../shared/protocol.ts';
+import { OverrideNotFound } from './building/overrides.ts';
+import { mcpProblems } from './harness/catalog.ts';
+import { testMcp } from './harness/mcp-test.ts';
+import type { SecretStore } from './harness/secrets.ts';
+import { SkillImportError } from './harness/skills.ts';
+import type { McpServerDef } from '../shared/catalog.ts';
+import { harnessProblems, type Harness } from '../shared/harness.ts';
+import type { AgentView, BubblesState, FeedItem, ServerMsg, SessionCard } from '../shared/protocol.ts';
 import type { BubblesLog, LogKind, LogQuery } from './bubbles/log.ts';
-import { INTAKE_IDLE_MS, intakeResponse, type IntakeOutcome, type IntakeRequest } from './bubbles/intake.ts';
+import { INTAKE_ASSIGN_MIN, BRIEFING_PREFIX, INTAKE_IDLE_MS, intakeResponse, type IntakeOutcome, type IntakeRequest } from './bubbles/intake.ts';
 import { PolicyError, type PendingChange, type Policy } from './bubbles/policy.ts';
 import { GUARD_ASK, type PermissionFlow } from './permission-flow.ts';
 import { hookResponse, type Approvals } from './approvals.ts';
@@ -17,6 +25,10 @@ import type { Hub } from './hub.ts';
 import type { Projects } from './projects.ts';
 import type { Registry } from './registry.ts';
 import type { EventWriter, Store } from './store.ts';
+import { LaunchError, TASK_MAX, type Launch } from './launcher.ts';
+import { HarnessError, type LaunchSpec } from './harness/resolve.ts';
+import type { LaunchWatch } from './launch-watch.ts';
+import { permissionModeProblem, type PermissionMode } from '../shared/harness.ts';
 
 export const BODY_LIMIT = 2 * 1024 * 1024;
 export const BODY_TIMEOUT_MS = 10_000;
@@ -24,6 +36,7 @@ export const BODY_TIMEOUT_MS = 10_000;
 export const HEARTBEAT_MS = 500;
 export const LOGIN_HINT = 'This login link was already used. Restart the server for a new one.';
 const NAME_MAX = 80;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ORDER_MAX = 999;
 
 // connect-src names the bound port; frame-ancestors blocks clickjacking from other local ports
@@ -68,6 +81,14 @@ export interface HttpDeps {
     intake(r: IntakeRequest): Promise<IntakeOutcome>;
   };
   pushFeed(item: FeedItem): void;
+  /** "Start agent": opens a terminal running `kubicle agent <id>` for a built launch (absent: the route answers 501). */
+  launch?: Launch;
+  /** Builds a room's launch (buildLaunch with the current building and secret store). Throws HarnessError. */
+  prepareLaunch?(o: { projectId: string; roomId: string; task: string; briefing?: string; id?: string }): LaunchSpec;
+  /** The server's secret store, for the MCP test route (`get` only; opened per test, like launches). */
+  secrets?(): Pick<SecretStore, 'get'>;
+  /** Launches waiting for their session's first hook event (Review Focus 3). */
+  launchWatch?: LaunchWatch;
   /** A hook arrived with a missing or wrong ingest token (I4). */
   onBadToken?(): void;
   /**
@@ -225,6 +246,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       const { toolInput: _i, toolInputTruncated: _t, ...stored } = e;
       d.writer.push(stored);
     } else d.writer.push(e);
+    if (e.launch) d.launchWatch?.claim(e.launch);
     const r = d.registry.apply(e);
     broadcastAgents(r.changed);
     for (const x of r.removed) broadcast({ t: 'agentRemoved', id: x.id, reason: x.reason });
@@ -248,6 +270,8 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     const division = hint(req, 'x-kubicle-division'), room = hint(req, 'x-kubicle-room');
     if (division) e.division = division;
     if (room) e.room = room;
+    const launch = req.headers['x-kubicle-launch'];
+    if (typeof launch === 'string' && UUID_RE.test(launch)) e.launch = launch;
     const rawInput = isObj(raw) ? raw.tool_input : undefined;
     if (e.event === 'PreToolUse' && req.headers['x-kubicle-hook-kind'] === 'pre') {
       // The guard answers first and synchronously (no model, no wait); ingest happens after.
@@ -462,8 +486,31 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     if (m === 'GET' && p === '/cli/log') return sendJson(res, 200, d.bubbles.log.query(logQuery(url)));
     if (m === 'GET' && p === '/cli/log/verify') return sendJson(res, 200, d.bubbles.log.verify());
     if (m === 'GET' && p === '/cli/bubbles') return sendJson(res, 200, d.bubbles.state());
+    const sm = m === 'GET' ? /^\/cli\/session\/([^/]+)$/.exec(p) : null;
+    if (sm) {
+      const card = sessionCard(param(sm[1]));
+      return card ? sendJson(res, 200, card) : send(res, 404, 'no such session');
+    }
     req.resume();
     send(res, 404, 'not found');
+  }
+
+  function sessionCard(sessionId: string): SessionCard | null {
+    const v = d.registry.get(sessionId);
+    if (!v || v.kind !== 'session') return null;
+    const floor = v.projectId ? d.building.snapshot().floors[v.projectId] : undefined;
+    const placed = floor
+      ? placeRoom(floor, { label: v.roomLabel, room: v.room, division: v.division, assigned: v.bubblesRoom })
+      : { id: BULLPEN, by: 'default' as const };
+    const name = floor?.rooms.find((r) => r.id === placed.id)?.name ?? 'Bullpen';
+    const w = v.pending;
+    return {
+      room: { ...placed, name },
+      waiting: w ? { tool: w.toolName, activity: w.activity, ...(w.bubbles ? { reason: w.bubbles.reason } : {}) } : null,
+      questions: v.bubblesNote?.questions ?? [],
+      suggestions: v.bubblesNote?.subagents.length ?? 0,
+      bubbles: d.bubbles.state().status.state,
+    };
   }
 
   async function answer(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
@@ -542,6 +589,111 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     }
   }
 
+  async function divisionHarnessSave(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+    if (!guard(req, res)) return;
+    const b = await readJson(req);
+    if (!isObj(b) || !Number.isInteger(b.baseRevision) || (b.baseRevision as number) < 0 || !isObj(b.harness)) {
+      return send(res, 400, JSON.stringify({ error: 'body must be { baseRevision: integer >= 0, harness: object }' }), JSON_HDR);
+    }
+    const problems = harnessProblems(b.harness);
+    if (problems.length > 0) return send(res, 400, JSON.stringify({ error: problems.join('; ') }), JSON_HDR);
+    try {
+      const stored = d.building.saveDivisionHarness(id, b.harness as Harness, b.baseRevision as number);
+      send(res, 200, JSON.stringify(stored), JSON_HDR);
+    } catch (err) {
+      if (err instanceof RevisionConflict) {
+        d.building.refresh();
+        return send(res, 409, JSON.stringify({ error: 'conflict', current: err.current }), JSON_HDR);
+      }
+      if (err instanceof BuildingFileError) {
+        const status = err.message.endsWith('unknown division') ? 404 : 400;
+        return send(res, status, JSON.stringify({ error: err.message }), JSON_HDR);
+      }
+      throw err;
+    }
+  }
+
+  async function overrideSave(req: IncomingMessage, res: ServerResponse, projectId: string, roomId: string): Promise<void> {
+    if (!guard(req, res)) return;
+    const b = await readJson(req);
+    if (!isObj(b) || !Number.isInteger(b.baseRevision) || (b.baseRevision as number) < 0 || !(b.harness === null || isObj(b.harness))) {
+      return send(res, 400, JSON.stringify({ error: 'body must be { baseRevision: integer >= 0, harness: object or null }' }), JSON_HDR);
+    }
+    if (b.harness !== null) {
+      const problems = harnessProblems(b.harness, 'room');
+      if (problems.length > 0) return send(res, 400, JSON.stringify({ error: problems.join('; ') }), JSON_HDR);
+    }
+    try {
+      const stored = d.building.saveOverride(projectId, roomId, b.harness as Harness | null, b.baseRevision as number);
+      send(res, 200, JSON.stringify(stored), JSON_HDR);
+    } catch (err) {
+      if (err instanceof RevisionConflict) {
+        d.building.refresh();
+        return send(res, 409, JSON.stringify({ error: 'conflict', current: err.current }), JSON_HDR);
+      }
+      if (err instanceof OverrideNotFound) return send(res, 404, JSON.stringify({ error: err.message }), JSON_HDR);
+      if (err instanceof BuildingFileError) return send(res, 400, JSON.stringify({ error: err.message }), JSON_HDR);
+      throw err;
+    }
+  }
+
+  async function mcpSave(req: IncomingMessage, res: ServerResponse, name: string): Promise<void> {
+    if (!guard(req, res)) return;
+    const b = await readJson(req);
+    if (!isObj(b) || !Number.isInteger(b.baseRevision) || (b.baseRevision as number) < 0 || !(b.server === null || isObj(b.server))) {
+      return send(res, 400, JSON.stringify({ error: 'body must be { baseRevision: integer >= 0, server: object or null }' }), JSON_HDR);
+    }
+    if (!ID_RE.test(name)) return send(res, 400, JSON.stringify({ error: `server name "${name}" is invalid` }), JSON_HDR);
+    if (b.server !== null) {
+      const problems = mcpProblems(name, b.server);
+      if (problems.length > 0) return send(res, 400, JSON.stringify({ error: problems.join('; ') }), JSON_HDR);
+    }
+    try {
+      const stored = d.building.saveMcp(name, b.server as McpServerDef | null, b.baseRevision as number);
+      send(res, 200, JSON.stringify(stored), JSON_HDR);
+    } catch (err) {
+      if (err instanceof RevisionConflict) {
+        d.building.refresh();
+        return send(res, 409, JSON.stringify({ error: 'conflict', current: err.current }), JSON_HDR);
+      }
+      if (err instanceof BuildingFileError) return send(res, 400, JSON.stringify({ error: err.message }), JSON_HDR);
+      throw err;
+    }
+  }
+
+  const MCP_TEST_GAP_MS = 2000;
+  let lastMcpTest = Number.NEGATIVE_INFINITY;
+
+  /** The room panel's Test button. The child dies with the request: a client that leaves, or a server that closes, aborts the test. */
+  async function mcpTest(req: IncomingMessage, res: ServerResponse, name: string): Promise<void> {
+    if (!guard(req, res)) return;
+    req.resume(); // the body is not used
+    const servers = d.building.snapshot().mcp.servers;
+    if (!Object.hasOwn(servers, name)) return send(res, 404, JSON.stringify({ error: `no MCP server "${name}"` }), JSON_HDR);
+    const t = now();
+    if (t - lastMcpTest < MCP_TEST_GAP_MS) return send(res, 429, JSON.stringify({ error: 'Wait a moment before testing again.' }), JSON_HDR);
+    lastMcpTest = t;
+    const ac = new AbortController();
+    res.once('close', () => ac.abort());
+    let store: Pick<SecretStore, 'get'> | undefined;
+    try { store = d.secrets?.(); } catch { store = undefined; } // testMcp reports a server that needs it as "not available"
+    sendJson(res, 200, await testMcp(servers[name]!, process.env, 10_000, store, ac.signal));
+  }
+
+  async function skillImport(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!guard(req, res)) return;
+    const b = await readJson(req);
+    if (!isObj(b) || typeof b.source !== 'string') {
+      return send(res, 400, JSON.stringify({ error: 'body must be { source: string }' }), JSON_HDR);
+    }
+    try {
+      send(res, 200, JSON.stringify(d.building.importSkill(b.source)), JSON_HDR);
+    } catch (err) {
+      if (err instanceof SkillImportError) return send(res, 400, JSON.stringify({ error: err.message }), JSON_HDR);
+      throw err;
+    }
+  }
+
   async function agentRoom(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
     if (!guard(req, res)) return;
     const b = await readJson(req);
@@ -555,6 +707,130 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     }
     broadcastAgents(d.registry.setRoomLabel(id, b.room));
     send(res, 204);
+  }
+
+  const launches: number[] = []; // times of recent launches (rate limit: a burst can't open dozens of windows)
+  const LAUNCH_MAX = 6, LAUNCH_WINDOW_MS = 60_000;
+  const INTAKE_WAIT_MS = 20_000; // the whole wait for Bubbles before launch (his own call times out sooner)
+
+  async function agentStart(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!guard(req, res)) return;
+    const b = await readJson(req);
+    const err = (status: number, error: string) => send(res, status, JSON.stringify({ error }), JSON_HDR);
+    if (!isObj(b) || typeof b.projectId !== 'string' || typeof b.room !== 'string') return err(400, 'body must be { projectId, room, task }');
+    const task = b.task === undefined ? '' : b.task;
+    if (typeof task !== 'string' || Array.from(task).length > TASK_MAX) return err(400, `task must be text of at most ${TASK_MAX} characters`);
+    const project = d.projects.list().find((p) => p.id === b.projectId);
+    if (!project) return err(404, 'unknown project');
+    if (project.archived) return err(400, 'this floor is archived; restore it in the Lobby first');
+    const floor = d.building.snapshot().floors[project.id];
+    if (b.room !== '' && !floor?.rooms.some((r) => r.id === b.room)) return err(400, `no room "${b.room}" on this floor`);
+    try { if (!(await stat(project.id)).isDirectory()) throw new Error(); } catch { return err(400, `the project folder ${project.id} is missing`); }
+    if (!d.launch || !d.prepareLaunch) return err(501, 'starting agents is not available here');
+    const t = Date.now();
+    while (launches.length && t - launches[0] > LAUNCH_WINDOW_MS) launches.shift();
+    if (launches.length >= LAUNCH_MAX) return err(429, `at most ${LAUNCH_MAX} agents a minute; wait a moment`);
+    const room_ = b.room as string;
+    // Reserve the slot now (intake awaits below, so parallel requests must not all pass the check); released unless a terminal opened.
+    launches.push(t);
+    let launched = false;
+    try { await startReserved(); }
+    finally { if (!launched) { const i = launches.indexOf(t); if (i >= 0) launches.splice(i, 1); } }
+
+    async function startReserved(): Promise<void> {
+    const launch = d.launch!, project_ = project!, task_ = task as string, want = room_;
+    const id = randomUUID();
+    // Who picks the room: the owner, Bubbles (intake before launch, so the room's harness loads), or the default (Bullpen).
+    // Intake never blocks the launch: off, no task, a failure, a timeout or low confidence all mean the Bullpen.
+    let roomId = want, by: 'owner' | 'bubbles' | 'default' = 'owner', briefing: string | undefined;
+    if (want === '') {
+      roomId = BULLPEN; by = 'default';
+      if (task_.trim() && floor && d.bubbles.state().status.state === 'on') {
+        const picked = await launchIntake({ id, task: task_, project: project_, floor });
+        if (picked) { roomId = picked.room; by = 'bubbles'; briefing = picked.briefing; }
+      }
+    }
+    let room = floor?.rooms.find((r) => r.id === roomId);
+    if (!room) return err(400, `no room "${roomId}" on this floor`);
+    let spec: LaunchSpec;
+    let fallback: string | undefined; // set when Bubbles' pick could not start and the Bullpen took over
+    const prepare = (rid: string, brief?: string) => d.prepareLaunch!({ projectId: project_.id, roomId: rid, task: task_, id, ...(brief ? { briefing: brief } : {}) });
+    try { spec = prepare(room.id, briefing); }
+    catch (e) {
+      if (!(e instanceof HarnessError)) throw e;
+      const bullpen = floor?.rooms.find((r) => r.id === BULLPEN);
+      if (by !== 'bubbles' || !bullpen) return send(res, 400, JSON.stringify({ error: e.message, problems: e.problems }), JSON_HDR);
+      // Bubbles' pick cannot start (broken harness, missing secret): his pick never blocks a launch, so the Bullpen it is.
+      try { spec = prepare(BULLPEN); }
+      catch (e2) {
+        if (e2 instanceof HarnessError) return send(res, 400, JSON.stringify({ error: e2.message, problems: e2.problems }), JSON_HDR);
+        throw e2;
+      }
+      fallback = `Bubbles picked ${room.name}, but it can't start: ${e.problems[0] ?? e.message}. Started in the Bullpen instead.`;
+      spec.warnings = [fallback, ...spec.warnings];
+      room = bullpen; by = 'default';
+    }
+    // Registered before the terminal opens: a fast agent can check in before `launch` returns.
+    d.launchWatch?.add(spec.id, room.name, now());
+    try {
+      await launch(spec);
+    } catch (e) {
+      d.launchWatch?.claim(spec.id);
+      if (e instanceof LaunchError) return err(500, e.message);
+      throw e;
+    }
+    launched = true;
+    const feed = (detail: string): void => {
+      const item: FeedItem = { ts: t, event: 'Launch', agentName: 'Office', detail };
+      d.pushFeed(item);
+      broadcast({ t: 'feed', item });
+    };
+    feed(`Opened a terminal for a new agent in ${room.name}`);
+    for (const w of spec.warnings) feed(`Warning: ${w}`); // anything that did not load is shown, never just dropped
+    if (fallback !== undefined) {
+      // Bubbles already said which room he picked; this row is what corrects him on the floor.
+      try { d.bubbles.log.append({ ts: now(), kind: 'intake', projectId: project_.id, sessionId: `launch-${id}`, decision: BULLPEN, outcome: 'fallback', detail: fallback }); }
+      catch (e) { d.log(`launch fallback log failed: ${String(e)}`); }
+    }
+    sendJson(res, 202, { room: room.id, by, launch: spec.id, warnings: spec.warnings });
+    }
+  }
+
+  /** Bubbles' intake for a not-yet-started agent (session id `launch-<id>`); null unless it is confident. Never throws. */
+  async function launchIntake(o: { id: string; task: string; project: { id: string; name: string }; floor: { rooms: { id: string; name: string; division?: string }[] } }): Promise<{ room: string; briefing: string } | null> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const request: IntakeRequest = {
+        prompt: o.task, projectId: o.project.id, projectName: o.project.name, sessionId: `launch-${o.id}`, cwd: o.project.id,
+        rooms: o.floor.rooms.map((r) => ({ id: r.id, name: r.name, ...(r.division ? { division: r.division } : {}) })),
+      };
+      const wait = new Promise<null>((ok) => { timer = setTimeout(() => ok(null), INTAKE_WAIT_MS); });
+      const out = await Promise.race([d.bubbles.intake(request), wait]);
+      if (!out?.ok || out.verdict.confidence < INTAKE_ASSIGN_MIN || out.room === BULLPEN) return null;
+      return { room: out.room, briefing: out.context.startsWith(BRIEFING_PREFIX) ? out.context.slice(BRIEFING_PREFIX.length).trim() : out.context };
+    } catch (e) { d.log(`launch intake failed: ${String(e)}`); return null; }
+    finally { clearTimeout(timer); }
+  }
+
+  async function settingsSave(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!guard(req, res)) return;
+    const b = await readJson(req);
+    const err = (status: number, error: string) => send(res, status, JSON.stringify({ error }), JSON_HDR);
+    if (!isObj(b) || !Number.isInteger(b.baseRevision) || (b.baseRevision as number) < 0 || Object.keys(b).some((k) => k !== 'baseRevision' && k !== 'default_permission_mode')) {
+      return err(400, 'body must be { baseRevision: integer >= 0, default_permission_mode }');
+    }
+    const problem = permissionModeProblem('default_permission_mode', b.default_permission_mode);
+    if (problem) return err(400, problem);
+    try {
+      sendJson(res, 200, d.building.saveSettings({ default_permission_mode: b.default_permission_mode as PermissionMode }, b.baseRevision as number));
+    } catch (e) {
+      if (e instanceof RevisionConflict) {
+        d.building.refresh();
+        return send(res, 409, JSON.stringify({ error: 'conflict', current: e.current }), JSON_HDR);
+      }
+      if (e instanceof BuildingFileError) return err(400, e.message);
+      throw e;
+    }
   }
 
   function login(req: IncomingMessage, res: ServerResponse, url: URL): void {
@@ -608,6 +884,17 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       if (mm) return projectPatch(req, res, param(mm[1]));
       mm = /^\/api\/floors\/([^/]+)$/.exec(p);
       if (mm) return floorSave(req, res, param(mm[1]));
+      mm = /^\/api\/divisions\/([^/]+)\/harness$/.exec(p);
+      if (mm) return divisionHarnessSave(req, res, param(mm[1]));
+      mm = /^\/api\/overrides\/([^/]+)\/([^/]+)$/.exec(p);
+      if (mm) return overrideSave(req, res, param(mm[1]), param(mm[2]));
+      mm = /^\/api\/mcp\/([^/]+)\/test$/.exec(p);
+      if (mm) return mcpTest(req, res, param(mm[1]));
+      mm = /^\/api\/mcp\/([^/]+)$/.exec(p);
+      if (mm) return mcpSave(req, res, param(mm[1]));
+      if (p === '/api/skills/import') return skillImport(req, res);
+      if (p === '/api/agents/start') return agentStart(req, res);
+      if (p === '/api/settings') return settingsSave(req, res);
       mm = /^\/api\/agents\/([^/]+)\/room$/.exec(p);
       if (mm) return agentRoom(req, res, param(mm[1]));
       mm = /^\/api\/bubbles\/(enabled|instructions|grants|revoke)$/.exec(p);

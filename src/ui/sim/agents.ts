@@ -108,7 +108,7 @@ export class Sim {
     if (v.status === 'idle') { if (prev.status !== 'idle' || a.idleSince === null) a.idleSince = now; }
     else a.idleSince = null;
     if (v.activity && v.activity !== prev.activity && now - a.lastBubble >= BUBBLE_GAP_S) {
-      a.bubble = { text: v.activity, until: now + BUBBLE_S };
+      a.bubble = { text: v.summary || v.activity, until: now + BUBBLE_S };
       a.lastBubble = now;
     }
     if (a.mode === 'leaving') { // came back (e.g. a resumed session) before it got out

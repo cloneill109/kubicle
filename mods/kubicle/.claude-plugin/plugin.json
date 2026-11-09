@@ -1,0 +1,1 @@
+{ "name": "kubicle", "version": "0.1.0", "description": "Shows this session's Kubicle room and anything Bubbles is waiting on you for", "types": "./types/index.d.ts" }

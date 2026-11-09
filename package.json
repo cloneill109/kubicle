@@ -11,6 +11,7 @@
   },
   "scripts": {
     "test": "node --disable-warning=ExperimentalWarning --test 'test/**/*.test.ts'",
+    "test:mod": "claude plugin test mods/kubicle",
     "test:e2e": "node --disable-warning=ExperimentalWarning --test 'test/e2e/*.e2e.ts'",
     "typecheck": "tsc --noEmit",
     "build:ui": "esbuild src/ui/main.ts --bundle --format=esm --outfile=dist/ui/main.js",
@@ -20,6 +21,7 @@
     "uninstall-hooks": "bin/kubicle uninstall-hooks"
   },
   "dependencies": {
+    "@napi-rs/keyring": "2.1.2",
     "ws": "^8.22.0",
     "yaml": "^2.9.1"
   },

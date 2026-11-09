@@ -3,6 +3,7 @@ import { basename, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { parseDocument, stringify } from 'yaml';
 import { writeAtomic } from '../fsutil.ts';
+import { harnessProblems } from '../../shared/harness.ts';
 import {
   ID_RE, DEFAULT_DIVISIONS, validateFloor,
   type DivisionDef, type FloorDef, type RoomDef,
@@ -42,11 +43,11 @@ export class RevisionConflict extends Error {
   }
 }
 
-const FILE_MODE = 0o600;
-const DIR_MODE = 0o700;
+export const FILE_MODE = 0o600;
+export const DIR_MODE = 0o700;
 const COLOR_RE = /^#[0-9a-f]{6}$/;
-const isMap = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
-const validRev = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 1;
+export const isMap = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+export const validRev = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 1;
 
 export function slugFor(root: string): string {
   const base = basename(root).toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/^-+|-+$/g, '').slice(0, 24).replace(/-+$/, '');
@@ -97,7 +98,7 @@ function readText(file: string, origin: 'home' | 'repo'): string {
 /** yaml reports "<reason> at line N, column M:" plus a code frame; keep only "<reason>". */
 const yamlReason = (msg: string): string => msg.split('\n')[0]!.replace(/\s+at line \d+, column \d+:?\s*$/, '').replace(/:\s*$/, '');
 
-function parseFile(file: string, origin: 'home' | 'repo' = 'home'): Record<string, unknown> {
+export function parseFile(file: string, origin: 'home' | 'repo' = 'home'): Record<string, unknown> {
   const text = readText(file, origin);
   let data: unknown;
   try {
@@ -120,7 +121,7 @@ function divisionProblems(d: any): string[] {
   if (typeof d.id !== 'string' || !ID_RE.test(d.id)) errs.push(`division id "${d.id}" is invalid`);
   if (typeof d.name !== 'string' || d.name.length === 0 || d.name.length > 40) errs.push('name must be a non-empty string of at most 40 characters');
   if (typeof d.color !== 'string' || !COLOR_RE.test(d.color)) errs.push(`color "${d.color}" must look like #rrggbb`);
-  if (!isMap(d.harness)) errs.push('harness must be a mapping');
+  errs.push(...harnessProblems(d.harness));
   if (!validRev(d.revision)) errs.push('revision must be an integer >= 1');
   return errs;
 }
@@ -183,7 +184,7 @@ function currentRevision(file: string, origin: 'home' | 'repo'): number {
   return rev;
 }
 
-function checkBase(file: string, baseRevision: number, origin: 'home' | 'repo' = 'home'): void {
+export function checkBase(file: string, baseRevision: number, origin: 'home' | 'repo' = 'home'): void {
   if (!Number.isInteger(baseRevision) || baseRevision < 0) throw new BuildingFileError(file, 'base revision must be an integer >= 0');
   const cur = currentRevision(file, origin);
   if (cur !== baseRevision) throw new RevisionConflict(file, cur);

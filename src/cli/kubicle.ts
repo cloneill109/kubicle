@@ -4,10 +4,16 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../server/config.ts';
 import { BuildingFileError } from '../server/building/files.ts';
-import { CliError, USAGE, UsageError } from './args.ts';
+import { CliError, USAGE, UsageError, expectPositionals, parseArgs } from './args.ts';
 import { bubblesCommand } from './bubbles.ts';
 import { divisionCommand } from './division.ts';
 import { floorCommand } from './floor.ts';
+import { secretCommand } from './secret.ts';
+import { harnessCommand } from './harness.ts';
+import { mcpCommand } from './mcp.ts';
+import { runCommand } from './run.ts';
+import { skillCommand } from './skill.ts';
+import { agentMain } from './agent.ts';
 import { main as installMain } from './install.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -45,6 +51,16 @@ export async function main(argv: string[]): Promise<number> {
         return installMain([cmd === 'install-hooks' ? 'install' : 'uninstall', ...rest]);
       case 'floor': return floorCommand(rest, home);
       case 'division': return divisionCommand(rest, home);
+      case 'secret': return secretCommand(rest, home);
+      case 'run': return await runCommand(rest, cfg);
+      case 'harness': return harnessCommand(rest, cfg);
+      case 'mcp': return await mcpCommand(rest, cfg);
+      case 'skill': return skillCommand(rest, cfg);
+      case 'agent': {
+        const p = parseArgs(rest, ['home']);
+        expectPositionals(p, 1, '`agent <launch-id>`');
+        return await agentMain(p.positionals[0]!, p.flags.get('home') || home);
+      }
       case 'grant': case 'instruct': case 'revoke': case 'bubbles': case 'log':
         return await bubblesCommand(cmd, rest, cfg);
       default:

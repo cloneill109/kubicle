@@ -332,3 +332,69 @@ test('M3: a broken repo floor keeps its last good version (with a warning); a re
     assert.equal(s.svc.snapshot().floors[s.root]!.source, 'home', 'deleted repo floor is not last good');
   } finally { s.cleanup(); }
 });
+
+test('a division with a bad harness key keeps the last good division and warns; saveDivisionHarness bumps revision', () => {
+  const s = setup();
+  try {
+    const file = join(s.home, 'divisions', 'qa.yaml');
+    writeFileSync(file, 'id: qa\nname: QA\ncolor: "#62c4a0"\nharness: {}\nrevision: 1\n');
+    s.svc.refresh();
+    writeFileSync(file, 'id: qa\nname: QA\ncolor: "#62c4a0"\nharness: { mcps: [] }\nrevision: 2\n');
+    s.svc.refresh();
+    const b = s.svc.snapshot();
+    assert.equal(b.divisions.find((d) => d.id === 'qa')!.revision, 1);
+    assert.equal(b.warnings.length, 1);
+    assert.match(b.warnings[0]!, /harness has unknown key "mcps"/);
+    writeFileSync(file, 'id: qa\nname: QA\ncolor: "#62c4a0"\nharness: {}\nrevision: 1\n');
+    const stored = s.svc.saveDivisionHarness('qa', { model: 'sonnet' }, 1);
+    assert.equal(stored.revision, 2);
+    assert.equal(stored.name, 'QA');
+    assert.deepEqual(s.svc.snapshot().divisions.find((d) => d.id === 'qa')!.harness, { model: 'sonnet' });
+    assert.throws(() => s.svc.saveDivisionHarness('nope', {}, 1), /unknown division/);
+  } finally { s.cleanup(); }
+});
+
+test('secretsSet: only `has` is used, and a store that throws reads as not set', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kubicle-svc-'));
+  const home = join(dir, 'home');
+  mkdirSync(home);
+  writeFileSync(join(home, 'mcp.yaml'), 'revision: 1\nservers:\n  a: { command: x, env: { A: "secret:one", B: "secret:two" } }\n  b: { command: y, env: { C: "secret:three" } }\n');
+  const asked: string[] = [];
+  const store = {
+    has(n: string): boolean { asked.push(n); if (n === 'two') throw new Error('keyring exploded'); return n === 'one'; },
+    get(): string | null { throw new Error('get must never be called for this'); },
+  };
+  const svc = new BuildingService(home, { secrets: () => store });
+  try {
+    assert.deepEqual(svc.loadOnce([]).secretsSet, ['one']);
+    assert.deepEqual(asked.sort(), ['one', 'three', 'two']);
+    const opening = new BuildingService(home, { secrets: () => { throw new Error('cannot open'); } });
+    assert.deepEqual(opening.loadOnce([]).secretsSet, []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('secretsSet: with no secret references the store is never opened', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kubicle-svc-'));
+  const home = join(dir, 'home');
+  mkdirSync(home);
+  writeFileSync(join(home, 'mcp.yaml'), 'revision: 1\nservers:\n  a: { command: x }\n');
+  let opened = 0;
+  const svc = new BuildingService(home, { secrets: () => { opened++; return { has: () => false }; } });
+  try {
+    assert.deepEqual(svc.loadOnce([]).secretsSet, []);
+    assert.equal(opened, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('archived floors keep their stored overrides; a stale room in one does not warn', () => {
+  const { svc, home, root, list, cleanup } = setup();
+  try {
+    svc.saveOverride(root, 'qa', { model: 'haiku' }, 0);
+    list[0]!.archived = true;
+    svc.refresh();
+    assert.equal(svc.snapshot().overrides[root]?.rooms.qa?.model, 'haiku');
+    writeFileSync(join(home, 'overrides', `${slugFor(root)}.yaml`), 'revision: 2\nrooms:\n  gone-room: { model: opus }\n  qa: { model: haiku }\n');
+    svc.refresh();
+    assert.deepEqual(svc.snapshot().warnings, []);
+  } finally { cleanup(); }
+});

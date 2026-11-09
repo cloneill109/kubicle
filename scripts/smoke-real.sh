@@ -1,6 +1,6 @@
 #!/bin/bash
 # Real-session smoke test: runs one `claude -p` session (with a subagent) against a throwaway
-# server, repo, home and settings file, then checks Bubbles triage (real `claude`; a handful of `claude -p` runs in all: the session, up to 2 for the triage, a second session and its intake call). Never touches ~/.claude, ~/.kubicle or port 4317; hooks
+# server, repo, home and settings file, then checks Bubbles triage (real `claude`; a handful of `claude -p` runs in all: the session, up to 2 for the triage, a second session and its intake call, then one room-harness launch through `kubicle run`). Never touches ~/.claude, ~/.kubicle or port 7317; hooks
 # reach the throwaway server over its Unix socket in the temp home (the port is only for the UI).
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -49,7 +49,28 @@ rooms:
   - { id: backend, name: Back end, division: backend, band: bottom, width: 12 }
 YAML
 
+# A room setup for qa: the per-room override file (<home>/overrides/<slug>.yaml). Model haiku and a deny rule.
+SMOKE_DENY='Bash(rm:*)'
+SLUG="$(node --disable-warning=ExperimentalWarning -e '
+  import("'"$ROOT"'/src/server/building/files.ts").then((m) => console.log(m.slugFor(process.argv[1])));' "$REPO")"
+[ -n "$SLUG" ] || { echo "SMOKE FAILED: could not compute the floor slug" >&2; exit 1; }
+mkdir -p "$HOME_DIR/overrides"
+chmod 700 "$HOME_DIR" "$HOME_DIR/overrides"
+cat > "$HOME_DIR/overrides/$SLUG.yaml" <<YAML
+revision: 1
+rooms:
+  qa:
+    model: haiku
+    deny: ["$SMOKE_DENY"]
+YAML
+chmod 600 "$HOME_DIR/overrides/$SLUG.yaml"
+
 export KUBICLE_HOME="$HOME_DIR" KUBICLE_PORT="$PORT"
+# Subscription only: drop every ANTHROPIC_* and CLAUDE_CODE_USE_* variable (names read NUL-separated, so odd names are safe).
+while IFS= read -r -d '' _kv; do
+  case "${_kv%%=*}" in ANTHROPIC_*|CLAUDE_CODE_USE_*) unset "${_kv%%=*}" ;; esac
+done < <(env -0)
+export KUBICLE_SECRETS_STORE=file   # never the real OS keyring
 unset KUBICLE_CLAUDE_BIN   # Bubbles must use the real claude here
 
 # Server: debug route on, no browser, stdout captured for the login URL.
@@ -185,4 +206,79 @@ echo "$INTAKE"
 case "$INTAKE" in *PASS*) ;; *) echo "$LOGJSON" | grep '"intake"' >&2; fail "intake assertions not met (need a briefed intake entry and a non-bullpen bubblesRoom on the session)" ;; esac
 VERIFY="$($KUB log verify)" || fail "kubicle log verify failed after intake: $VERIFY"
 echo "log verify: $VERIFY"
+
+# --- A room harness launch: `kubicle run qa --print -- "reply ok"` (the same preparation the office's Start agent uses) ---
+# The claude binary is a wrapper that records what `kubicle agent` really launched (argv, the generated settings file, the
+# launch id) before cleanup removes the run dir, then runs the real claude. Set for this one command only.
+WRAP="$TMP/claude-wrap.sh"
+cat > "$WRAP" <<'WRAP'
+#!/bin/bash
+: "${SMOKE_REC:?}"
+printf '%s\n' "${KUBICLE_LAUNCH:-}" > "$SMOKE_REC/launch-id"
+printf '%s\n' "${KUBICLE_ROOM:-}" > "$SMOKE_REC/room"
+printf '%s\0' "$@" > "$SMOKE_REC/args"
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--settings" ]; then cp "$a" "$SMOKE_REC/settings.json"; fi
+  prev="$a"
+done
+exec claude "$@"
+WRAP
+chmod 700 "$WRAP"
+REC="$TMP/rec"; mkdir -p "$REC"
+
+echo "Harness: kubicle harness resolve qa ..."
+RESOLVED="$($KUB harness resolve qa --project "$REPO")" || fail "kubicle harness resolve qa failed"
+case "$RESOLVED" in *"model: haiku"*) ;; *) echo "$RESOLVED" >&2; fail "resolve did not show model: haiku" ;; esac
+case "$RESOLVED" in *"$SMOKE_DENY"*) ;; *) echo "$RESOLVED" >&2; fail "resolve did not show the deny rule" ;; esac
+
+SEEN3="$TMP/seen3.jsonl"
+: > "$SEEN3"
+(
+  while true; do
+    curl -s -m 2 -b "$JAR" -H "Origin: http://127.0.0.1:$PORT" "http://127.0.0.1:$PORT/api/debug/agents" >> "$SEEN3"
+    echo >> "$SEEN3"
+    sleep 0.3
+  done
+) &
+POLL_PID=$!
+echo "Running kubicle run qa --print (haiku) ..."
+( cd "$REPO" && SMOKE_REC="$REC" KUBICLE_CLAUDE_BIN="$WRAP" perl -e 'my $p = fork; if (!$p) { setpgrp(0, 0); exec @ARGV; exit 127 } $SIG{ALRM} = sub { kill "TERM", -$p; exit 124 }; alarm 180; waitpid($p, 0); exit($? >> 8)' -- "$KUB" run qa --print -- "reply ok" ) >"$TMP/run.out" 2>"$TMP/run.err"
+echo "kubicle run exit: $?"
+sleep 1
+kill "$POLL_PID" 2>/dev/null; wait "$POLL_PID" 2>/dev/null
+
+LAUNCH_ID="$(cat "$REC/launch-id" 2>/dev/null)"
+[ -n "$LAUNCH_ID" ] || { cat "$TMP/run.err" >&2; fail "the wrapper never ran: kubicle run did not start claude"; }
+echo "  launch id: $LAUNCH_ID"
+[ "$(cat "$REC/room")" = "qa" ] || fail "KUBICLE_ROOM was not qa"
+# What reached the launch: the model on argv, the deny rule in the generated settings, and the answer printed.
+ARGS_TXT="$(tr '\0' '\n' < "$REC/args")"
+printf '%s\n' "$ARGS_TXT" | grep -qx -- '--model' && printf '%s\n' "$ARGS_TXT" | grep -qx 'haiku' || fail "claude was not launched with --model haiku"
+printf '%s\n' "$ARGS_TXT" | awk 'p && $0=="auto" {ok=1} {p = ($0=="--permission-mode")} END {exit !ok}' || fail "claude was not launched with --permission-mode auto"
+printf '%s\n' "$ARGS_TXT" | grep -qx -- '-p' || fail "claude was not launched with -p"
+node -e '
+  const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+  if (!(s.permissions?.deny || []).includes(process.argv[2])) { console.error("deny rule missing from generated settings"); process.exit(1); }' \
+  "$REC/settings.json" "$SMOKE_DENY" || fail "the room's deny rule did not reach the generated settings"
+echo "  argv has --model haiku, --permission-mode auto and -p; generated settings deny ${SMOKE_DENY}"
+[ -s "$TMP/run.out" ] || { cat "$TMP/run.err" >&2; fail "the print-mode run printed nothing"; }
+echo "  claude printed: $(head -c 80 "$TMP/run.out" | tr '\n' ' ')"
+# The office saw it: a session carrying this launch id (X-Kubicle-Launch) in room qa. (SessionStart carries no model, so
+# the model is asserted above from the real argv.)
+HARN="$(node -e '
+  const [id, file] = [process.argv[1], process.argv[2]];
+  let hit;
+  for (const line of require("fs").readFileSync(file, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try { for (const a of JSON.parse(line)) if (a.kind === "session" && a.launch === id) hit = { ...hit, ...a }; } catch {}
+  }
+  if (!hit) { console.log("no session carried the launch id"); process.exit(0); }
+  console.log(`launch=${hit.launch === id} room=${hit.room}`);
+  if (hit.launch === id && hit.room === "qa") console.log("PASS");' "$LAUNCH_ID" "$SEEN3")"
+echo "$HARN"
+case "$HARN" in *PASS*) ;; *) fail "the SessionStart did not arrive with the launch id, and room qa" ;; esac
+[ ! -e "$HOME_DIR/run/$LAUNCH_ID" ] || fail "kubicle agent left its run dir behind"
+echo "  run dir removed after exit"
+
 echo "SMOKE OK"

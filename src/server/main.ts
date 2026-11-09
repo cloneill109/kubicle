@@ -2,7 +2,11 @@ import { spawn } from 'node:child_process';
 import { chmodSync, mkdirSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { makeLauncher, type Launch } from './launcher.ts';
+import { LaunchWatch, checkInMessage } from './launch-watch.ts';
+import { prepareLaunch } from './harness/prepare.ts';
+import { openSecrets } from './harness/secrets.ts';
 import { fileURLToPath } from 'node:url';
 import type { BubblesState, FeedItem } from '../shared/protocol.ts';
 import { loadBubblesConfig } from './bubbles/config.ts';
@@ -66,6 +70,8 @@ export interface RunningServer {
   loginUrl: string;
   ingestToken: string;
   close(): Promise<void>;
+  /** Test hook: whether the unclaimed-launch check timer is running (only while a launch is pending). */
+  launchCheckArmed(): boolean;
 }
 
 function listen(server: Server, port: number): Promise<number> {
@@ -111,6 +117,10 @@ export interface StartOpts {
   bubbles?: { bin?: string; env?: Record<string, string | undefined>; timeouts?: Partial<Timeouts> };
   /** Test hook: the clock for hook event timestamps and the intake idle gate. */
   now?: () => number;
+  /** Test hook: replaces opening a terminal for "Start agent". */
+  launch?: Launch;
+  /** Test hook: how often unclaimed launches are checked (default 5 s). */
+  launchCheckMs?: number;
 }
 
 export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<RunningServer> {
@@ -123,7 +133,7 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   const ingestToken = ensureIngestToken(cfg.home);
   const store = openStore(join(cfg.home, 'office.db'));
   const projects = new Projects(store);
-  const building = new BuildingService(cfg.home);
+  const building = new BuildingService(cfg.home, { claudeDir: cfg.claudeDir, secrets: () => openSecrets(cfg.home) });
   const registry = new Registry(projects, store, cfg, undefined, { divisions: () => building.snapshot().divisions });
   const writer = new EventWriter(store);
   registry.rebuild(store.eventsSince(Date.now() - cfg.expireMs));
@@ -225,8 +235,25 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
     onAgent: (a) => hub.broadcast({ t: 'agent', agent: a }),
     onError: log,
   });
+  const clock = opts.now ?? Date.now;
+  let launchCheck: NodeJS.Timeout | null = null;
+  const launchWatch = new LaunchWatch({
+    onActive: () => { if (!closing) launchCheck ??= startLaunchCheck(); },
+    onIdle: () => { if (launchCheck) { clearInterval(launchCheck); launchCheck = null; } },
+  });
   const handler = createHandler({
     cfg, ingestToken, auth, store, writer, projects, registry, building, approvals, hub, pushFeed, rootDir: ROOT, port, log, flow,
+    launch: opts.launch ?? makeLauncher({ home: cfg.home, app: process.env.KUBICLE_TERMINAL }),
+    // The secret store is opened per launch and only asked `has`: values are read by `kubicle agent`, never here.
+    prepareLaunch: ({ projectId, roomId, task, briefing, id }) => {
+      return prepareLaunch({
+        home: cfg.home, claudeDir: cfg.claudeDir, building: building.snapshot(), blockers: building.launchBlockers(projectId, roomId),
+        projectId, roomId, task, secrets: openSecrets(cfg.home),
+        ...(briefing ? { briefing } : {}), ...(id ? { id } : {}),
+      });
+    },
+    secrets: () => openSecrets(cfg.home),
+    launchWatch,
     bubbles: { policy, log: bubblesLog, state: bubblesState, ownerToggledOn: () => bubbles.ownerToggledOn(), changed: bubblesChanged, intake: (r) => bubbles.intake(r) },
     ...(opts.now ? { now: opts.now } : {}),
     onBadToken: () => {
@@ -280,6 +307,21 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
     } catch (err) { log(`tick failed: ${String(err)}`); }
   }, TICK_MS);
   tick.unref();
+  // Review Focus 3: a window that never ran `kubicle agent` (wrong terminal app, claude missing) is reported, once.
+  // Armed only while a launch is pending (LaunchWatch onActive/onIdle): no idle work.
+  function startLaunchCheck(): NodeJS.Timeout {
+    const t = setInterval(() => {
+      try {
+        for (const room of launchWatch.overdue(clock())) {
+          const item: FeedItem = { ts: clock(), event: 'Launch', agentName: 'Office', detail: checkInMessage(room) };
+          pushFeed(item);
+          hub.broadcast({ t: 'feed', item });
+        }
+      } catch (err) { log(`launch check failed: ${String(err)}`); }
+    }, opts.launchCheckMs ?? TICK_MS);
+    t.unref();
+    return t;
+  }
   const prune = () => { try { store.prune(Date.now() - KEEP_EVENTS_MS); } catch (err) { log(`prune failed: ${String(err)}`); } };
   prune();
   const pruner = setInterval(prune, PRUNE_MS);
@@ -297,6 +339,7 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   const close = () => closing ??= (async () => {
     clearInterval(tick);
     clearInterval(pruner);
+    if (launchCheck) clearInterval(launchCheck);
     approvals.releaseAll(); // pending hooks get an empty (no-decision) response
     await new Promise((r) => setImmediate(r));
     hub.close();
@@ -314,7 +357,7 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
     store.close();
   })();
 
-  return { url, hookSocket: cfg.hookSocket, loginUrl, ingestToken, close };
+  return { url, hookSocket: cfg.hookSocket, loginUrl, ingestToken, close, launchCheckArmed: () => launchCheck !== null };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

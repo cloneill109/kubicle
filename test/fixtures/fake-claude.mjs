@@ -2,13 +2,24 @@
 // Test stand-in for `claude -p ... --output-format json`. Never talks to a model.
 // Mode: a `fake-mode:<mode>` marker in stdin, else FAKE_CLAUDE_MODE, else approve-high.
 // FAKE_CLAUDE_LOG (optional): JSONL of {event:'start'|'end'|'child', pid, model, args, cwd, agent, stdin}.
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 
 const args = process.argv.slice(2);
 const model = args[args.indexOf('--model') + 1];
 const logFile = process.env.FAKE_CLAUDE_LOG;
 const note = (o) => { if (logFile) appendFileSync(logFile, JSON.stringify({ pid: process.pid, t: Date.now(), ...o }) + '\n'); };
+
+// Interactive (a terminal window from `kubicle agent`): say what it was given, never any secret value, and exit.
+if (process.stdin.isTTY) {
+  const secrets = Object.keys(process.env).filter((k) => k.startsWith('KUBICLE_SECRET_')).sort();
+  // A terminal window does not inherit FAKE_CLAUDE_LOG: then the record goes to .fake-claude.json in the (test) cwd.
+  const rec = { event: 'interactive', pid: process.pid, args, cwd: process.cwd(), launch: process.env.KUBICLE_LAUNCH ?? null, room: process.env.KUBICLE_ROOM ?? null,
+    secrets, secretLengths: secrets.map((k) => process.env[k].length), apiKey: 'ANTHROPIC_API_KEY' in process.env };
+  if (logFile) note(rec); else writeFileSync('.fake-claude.json', JSON.stringify(rec) + '\n');
+  process.stdout.write(`fake claude (interactive) in ${process.cwd()}\n  room=${process.env.KUBICLE_ROOM} launch=${process.env.KUBICLE_LAUNCH}\n  args=${JSON.stringify(args)}\n  secret vars set: ${secrets.join(', ') || 'none'}\n`);
+  process.exit(0);
+}
 
 let stdin = '';
 process.stdin.setEncoding('utf8');
