@@ -9,6 +9,8 @@ import { loadConfig } from '../../src/server/config.ts';
 import { startServer } from '../../src/server/main.ts';
 import { main } from '../../src/cli/kubicle.ts';
 
+process.env.KUBICLE_SECRETS_STORE = 'file'; // never the OS keyring in tests
+
 process.env.KUBICLE_CLAUDE_BIN = join(import.meta.dirname, '..', 'fixtures', 'fake-claude.mjs');
 process.env.FAKE_CLAUDE_MODE ??= 'escalate';
 

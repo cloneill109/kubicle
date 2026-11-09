@@ -15,6 +15,7 @@ import type { LogEntry } from '../../src/server/bubbles/log.ts';
 
 const FAKE = join(import.meta.dirname, '..', 'fixtures', 'fake-claude.mjs');
 process.env.KUBICLE_CLAUDE_BIN = FAKE; // belt and braces: nothing in this file may reach the real claude
+process.env.KUBICLE_SECRETS_STORE = 'file'; // never the OS keyring in tests
 
 const cleanup: (() => Promise<void> | void)[] = [];
 after(async () => { for (const f of cleanup.reverse()) await f(); });

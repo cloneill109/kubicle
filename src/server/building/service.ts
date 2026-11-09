@@ -250,12 +250,12 @@ export class BuildingService {
         try { this.overrideFiles.set(ovf, readOverrides(ovf)); } catch (e) { problem(ovf, e); }
       } else this.overrideFiles.delete(ovf);
       const ov = this.overrideFiles.get(ovf);
-      if (ov && !p.archived) {
+      if (ov) { // archived floors keep theirs too: the read-only panel shows what is stored
         const known = new Set(floor.rooms.map((r) => r.id));
         const rooms: Record<string, Harness> = {};
         for (const [id, h] of Object.entries(ov.rooms)) {
           if (known.has(id)) rooms[id] = h;
-          else warn.set(`${ovf}#${id}`, `override for unknown room "${id}" (${ovf})`);
+          else if (!p.archived) warn.set(`${ovf}#${id}`, `override for unknown room "${id}" (${ovf})`);
         }
         overrides[p.id] = { revision: ov.revision, rooms };
       }
@@ -290,10 +290,10 @@ export class BuildingService {
 
   /** Which secrets the catalog refers to are set: names only, through `has` only. A store that throws counts as not set. */
   private secretsSet(): string[] {
-    if (!this.secrets) return [];
+    const names = new Set(Object.values(this.catalog.servers).flatMap((s) => secretRefs(s)));
+    if (!this.secrets || names.size === 0) return [];
     let store: Pick<SecretStore, 'has'>;
     try { store = this.secrets(); } catch { return []; }
-    const names = new Set(Object.values(this.catalog.servers).flatMap((s) => secretRefs(s)));
     return [...names].filter((n) => { try { return store.has(n); } catch { return false; } }).sort();
   }
 

@@ -11,6 +11,8 @@ export interface StartAgentOptions {
   floor(): string;
   floorName(id: string): string;
   rooms(floor: string): { id: string; name: string }[];
+  /** "Set up room": this dialog has closed; open that room's panel, returning focus to `opener`. */
+  onSetup(room: string, opener: HTMLElement | null): void;
 }
 
 export class StartAgentUi {
@@ -21,6 +23,7 @@ export class StartAgentUi {
   #msg = $('startMsg');
   #hint = $('startHint');
   #go = $<HTMLButtonElement>('startGo');
+  #setup = $<HTMLButtonElement>('startSetup');
   #opener: HTMLElement | null = null;
   #busy = false;
 
@@ -30,6 +33,8 @@ export class StartAgentUi {
     $('startClose').addEventListener('click', () => this.close());
     $('startCancel').addEventListener('click', () => this.close());
     this.#task.addEventListener('input', () => this.#syncChoose());
+    this.#room.addEventListener('change', () => this.#syncChoose());
+    this.#setup.addEventListener('click', () => this.#setUp());
     this.#task.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void this.#start(); } });
     this.#dlg.addEventListener('close', () => { this.#opener?.focus?.(); this.#opener = null; });
   }
@@ -58,11 +63,23 @@ export class StartAgentUi {
   /** "Let Bubbles choose" reads the task, so it needs one: disabled (with a hint) while the task is empty. */
   #syncChoose(): void {
     const choose = this.#room.options[0];
-    if (!choose || choose.value !== '') return;
-    const empty = this.#task.value.trim() === '';
-    choose.disabled = empty;
-    this.#hint.hidden = !empty;
-    if (empty && this.#room.value === '') this.#room.value = this.#fallback();
+    if (choose?.value === '') {
+      const empty = this.#task.value.trim() === '';
+      choose.disabled = empty;
+      this.#hint.hidden = !empty;
+      if (empty && this.#room.value === '') this.#room.value = this.#fallback();
+    }
+    this.#setup.disabled = this.#room.value === ''; // "Set up room" needs a real room
+  }
+
+  /** The keyboard route to a room's panel (door signs are canvas-only). The typed task stays for when Start reopens. */
+  #setUp(): void {
+    const room = this.#room.value;
+    if (!room) return;
+    const opener = this.#opener;
+    this.#opener = null;
+    this.close();
+    this.#o.onSetup(room, opener);
   }
 
   /** The remembered room for this floor if it still exists, else the first room. */

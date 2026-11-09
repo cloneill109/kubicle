@@ -22,7 +22,7 @@ function problems(rooms: unknown, revision: unknown): string[] {
   if (!isMap(rooms)) { errs.push('rooms must be a mapping'); return errs; }
   for (const [id, h] of Object.entries(rooms)) {
     if (!ID_RE.test(id)) { errs.push(`rooms.${id}: room id is invalid`); continue; }
-    for (const p of harnessProblems(h)) errs.push(`rooms.${id}: ${p}`);
+    for (const p of harnessProblems(h, 'room')) errs.push(`rooms.${id}: ${p}`);
   }
   return errs;
 }

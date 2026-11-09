@@ -378,3 +378,12 @@ test('pidAlive: this process is alive, a reaped child is not, EPERM counts as al
   assert.equal(pidAlive(-1), false);
   assert.equal(pidAlive(2 ** 22 + 12345), false);
 });
+
+test('a room that removes tools from a division with no tools list cannot launch (never "no tools")', () => {
+  const b = building({ over: { qa: { tools: ['-Bash'] } } });
+  assert.throws(() => resolveHarness(b, PROJECT, 'qa'), (e: unknown) => e instanceof HarnessError && e.problems.includes('Room "qa" removes tools but its division lists none'));
+  const ok = building({ div: { qa: { tools: ['Read', 'Bash'] } }, over: { qa: { tools: ['-Bash'] } } });
+  assert.deepEqual(resolveHarness(ok, PROJECT, 'qa').tools, ['Read']);
+  const bad = building({ div: { qa: { tools: ['-Read'] } } });
+  assert.throws(() => resolveHarness(bad, PROJECT, 'qa'), (e: unknown) => e instanceof HarnessError && e.problems[0] === 'Division "qa": tools entry "-Read" only works in a room override');
+});

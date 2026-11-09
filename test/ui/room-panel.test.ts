@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formFrom, harnessFrom, harnessRows, needsSecrets, runCommand, type RoomForm } from '../../src/ui/room-panel.ts';
+import { defaultModeLabel, formFrom, harnessFrom, harnessRows, needsSecrets, promptNote, runCommand, toolsWarning, type RoomForm } from '../../src/ui/room-panel.ts';
 import { mergeHarness, type Harness } from '../../src/shared/harness.ts';
 
 const row = (rows: ReturnType<typeof harnessRows>, field: string) => rows.filter((r) => r.field === field);
@@ -84,4 +84,38 @@ test('runCommand quotes the project folder for the shell', () => {
   assert.equal(runCommand('qa', '/home/me/app'), 'kubicle run qa --project /home/me/app');
   assert.equal(runCommand('qa', "/home/me/my app's"), `kubicle run qa --project '/home/me/my app'\\''s'`);
   assert.equal(runCommand('qa', '/x/$(touch y)'), "kubicle run qa --project '/x/$(touch y)'");
+});
+
+test('harnessFrom: unchecking an inherited tool writes -Tool; the merge removes it', () => {
+  const div: Harness = { tools: ['Read', 'Bash'] };
+  const f = formFrom({}, div);
+  const h = harnessFrom({ ...f, tools: ['Read', 'Grep'] }, {}, div);
+  assert.deepEqual(h, { tools: ['Grep', '-Bash'] });
+  assert.deepEqual(mergeHarness(div, h).tools, ['Read', 'Grep']);
+  assert.deepEqual(formFrom(h, div).tools, ['Read', 'Grep'], 'reopening shows the same boxes');
+  const none = harnessFrom({ ...f, tools: [] }, {}, div);
+  assert.deepEqual(none, { tools: ['-Read', '-Bash'] });
+  assert.deepEqual(mergeHarness(div, none).tools, []);
+  assert.deepEqual(row(harnessRows(div, none), 'tools'), [{ field: 'tools', value: 'None', from: 'room' }]);
+});
+
+test('toolsWarning: says plainly when nothing is checked', () => {
+  assert.equal(toolsWarning(false, [], 'room', 'QA'), '');
+  assert.equal(toolsWarning(true, ['Read'], 'room', 'QA'), '');
+  assert.equal(toolsWarning(true, [], 'room', 'QA'), 'Nothing is checked: agents in this room will start with no tools at all.');
+  assert.equal(toolsWarning(true, [], 'division', 'QA'), 'Nothing is checked: agents in QA rooms will start with no tools at all.');
+});
+
+test('defaultModeLabel: names the mode the room would really get', () => {
+  assert.equal(defaultModeLabel('acceptEdits', 'QA', 'auto'), 'Default (Accept edits, from QA)');
+  assert.equal(defaultModeLabel(undefined, 'QA', 'plan'), 'Default (Plan, office setting)');
+  assert.equal(defaultModeLabel(undefined, '', 'auto'), 'Default (Auto, office setting)');
+});
+
+test('promptNote: inherited text, or that it is replaced', () => {
+  assert.equal(promptNote('QA', undefined, '', undefined), '');
+  assert.equal(promptNote('QA', 'be nice', '', undefined), 'from QA: be nice');
+  assert.equal(promptNote('QA', 'be nice', 'mine', undefined), 'from QA: be nice');
+  assert.equal(promptNote('QA', 'be nice', 'mine', 'replace'), 'Replaces the prompt from QA: be nice');
+  assert.equal(promptNote('QA', 'be nice', '   ', 'replace'), 'from QA: be nice', 'an empty prompt replaces nothing');
 });

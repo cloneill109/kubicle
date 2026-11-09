@@ -230,6 +230,7 @@
           <label><input type="radio" name="rpTools" id="rpToolsOnly" value="only"> Only these</label>
         </div>
         <p class="rp-note" id="rpToolsNote" hidden></p>
+        <p class="rp-need" id="rpToolsEmpty" role="status" hidden></p>
         <ul class="rp-list" id="rpTools"></ul>
       </fieldset>
       <div class="rp-field" id="rpAllowRow"><label for="rpAllow">Allow <span class="rp-help">one rule per line</span></label><textarea id="rpAllow" rows="2" spellcheck="false" placeholder="Bash(npm test:*)"></textarea><p class="rp-note" id="rpAllowNote" hidden></p></div>
@@ -293,7 +294,7 @@
       <div><h2 id="startTitle">Start an agent</h2><p class="sub" id="startWhere"></p></div>
       <button class="btn icon" id="startClose" type="button" aria-label="Close">✕</button>
     </header>
-    <div class="field wide"><label for="startRoom">Room</label><select id="startRoom"></select>
+    <div class="field wide"><label for="startRoom">Room</label><div class="start-room"><select id="startRoom"></select><button class="btn" id="startSetup" type="button">Set up room</button></div>
       <span class="opt" id="startHint" hidden>Type a task so Bubbles can choose</span></div>
     <div class="field wide"><label for="startTask">Task <span class="opt">(optional)</span></label>
       <textarea id="startTask" maxlength="4000" rows="5" spellcheck="true" placeholder="What should it work on? Leave empty to just open Claude there."></textarea></div>

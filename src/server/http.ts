@@ -620,7 +620,7 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       return send(res, 400, JSON.stringify({ error: 'body must be { baseRevision: integer >= 0, harness: object or null }' }), JSON_HDR);
     }
     if (b.harness !== null) {
-      const problems = harnessProblems(b.harness);
+      const problems = harnessProblems(b.harness, 'room');
       if (problems.length > 0) return send(res, 400, JSON.stringify({ error: problems.join('; ') }), JSON_HDR);
     }
     try {

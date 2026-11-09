@@ -447,3 +447,5 @@ body.editing #map:focus-visible { outline: 2px solid var(--accent); outline-offs
 @media (max-width: 560px) { .rp-row { grid-template-columns: minmax(0, 1fr); gap: 0; padding-bottom: 6px; } }
 .rp-add .bub-form { grid-template-columns: minmax(0, 1fr); }
 .rp-field > label .rp-help, .field > label .rp-help { margin-left: 6px; }
+.start-room { display: flex; gap: 8px; min-width: 0; }
+.start-room select { flex: 1; min-width: 0; }

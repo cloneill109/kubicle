@@ -81,8 +81,8 @@ export function harnessFrom(f: RoomForm, own: Harness, inherited: Harness | unde
   if (f.prompt.trim()) h.prompt = f.prompt;
   if (f.toolsOnly) {
     const base = inherited?.tools ?? [];
-    const add = f.tools.filter((t) => !base.includes(t));
-    if (add.length > 0 || !inherited?.tools) h.tools = add;
+    const out = [...f.tools.filter((t) => !base.includes(t)), ...base.filter((t) => !f.tools.includes(t)).map((t) => `-${t}`)];
+    if (out.length > 0 || !inherited?.tools) h.tools = out;
   }
   for (const k of ['allow', 'ask', 'deny'] as const) if (f[k].length > 0) h[k] = f[k];
   const names = (key: 'mcp' | 'skills'): void => {
@@ -92,6 +92,20 @@ export function harnessFrom(f: RoomForm, own: Harness, inherited: Harness | unde
   };
   names('mcp'); names('skills');
   return h;
+}
+
+/** The Default choice names the mode the room would really get: its division's, else the office setting. */
+export const defaultModeLabel = (inherited: PermissionMode | undefined, divName: string, global: PermissionMode): string =>
+  (inherited ? `Default (${PERMISSION_LABELS[inherited]}, from ${divName})` : `Default (${PERMISSION_LABELS[global]}, office setting)`);
+
+/** Shown while "Only these" has nothing checked, so an agent with no tools is never a surprise. */
+export const toolsWarning = (toolsOnly: boolean, tools: string[], scope: Scope, divName: string): string =>
+  (!toolsOnly || tools.length > 0 ? '' : `Nothing is checked: agents in ${scope === 'room' ? 'this room' : `${divName} rooms`} will start with no tools at all.`);
+
+/** The note over a room's prompt: the division's text, or that this room's prompt replaces it (prompt_mode: replace). */
+export function promptNote(divName: string, inherited: string | undefined, prompt: string, mode: Harness['prompt_mode']): string {
+  if (!inherited) return '';
+  return mode === 'replace' && prompt.trim() ? `Replaces the prompt from ${divName}: ${inherited}` : `from ${divName}: ${inherited}`;
 }
 
 /** Secrets this server refers to that are not set. */
@@ -113,7 +127,7 @@ export interface RoomPanelOptions {
   floorName(id: string): string;
   rooms(floor: string): RoomDef[];
   /** "Start agent here": the panel has closed. */
-  onStart(room: string): void;
+  onStart(room: string, opener: HTMLElement | null): void;
 }
 
 type TestState = { busy: boolean; ok: boolean; text: string };
@@ -131,6 +145,8 @@ export class RoomPanelUi {
   #scope: Scope = 'room';
   #base = JSON.stringify(formFrom({}, undefined));
   #baseRevision = 0;
+  /** The division harness the form was built from: a change makes the form's diff wrong, as a revision change does. */
+  #inheritedKey = 'null';
   #saving = false;
   #warned = false;
   #tests = new Map<string, TestState>();
@@ -144,13 +160,13 @@ export class RoomPanelUi {
     this.#dlg.addEventListener('close', () => this.#closed());
     // A click on the backdrop (outside the panel box) closes it.
     this.#dlg.addEventListener('mousedown', (e) => { if (e.target === this.#dlg) { const r = this.#dlg.getBoundingClientRect(); if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) this.#tryClose(); } });
-    $('rpStart').addEventListener('click', () => { const room = this.#room; if (room && !this.#blockDiscard()) { this.close(false); this.#o.onStart(room.id); } });
+    $('rpStart').addEventListener('click', () => { const room = this.#room; if (room && !this.#blockDiscard()) { const o = this.#opener; this.close(false); this.#o.onStart(room.id, o); } });
     $('rpCopy').addEventListener('click', () => void this.#copy());
     for (const r of [$<HTMLInputElement>('rpScopeRoom'), $<HTMLInputElement>('rpScopeDivision')]) r.addEventListener('change', () => this.#scopeChanged(r.value as Scope));
     this.#form.addEventListener('submit', (e) => { e.preventDefault(); void this.#save(); });
     this.#form.addEventListener('input', () => this.#userEdited());
     this.#form.addEventListener('change', () => this.#userEdited());
-    $('rpReload').addEventListener('click', () => { this.#load(); $('rpSave').focus(); });
+    $('rpReload').addEventListener('click', () => { this.#load(); $('rpClean').focus(); });
     $('rpImportBtn').addEventListener('click', () => this.#toggleImport());
     $('rpMcpForm').addEventListener('submit', (e) => { e.preventDefault(); void this.#addMcp(); });
     $('rpMcpType').addEventListener('change', () => this.#syncMcpType());
@@ -216,6 +232,7 @@ export class RoomPanelUi {
   #revision(): number {
     return this.#scope === 'room' ? this.#state.building.overrides[this.#floor]?.revision ?? 0 : this.#division()?.revision ?? 0;
   }
+  #inheritedNow(): string { return JSON.stringify(this.#inherited() ?? null); }
   #dirty(): boolean { return !!this.#room && JSON.stringify(this.#read()) !== this.#base; }
 
   // ---------------------------------------------------------------- render
@@ -242,6 +259,7 @@ export class RoomPanelUi {
 
     const f = formFrom(this.#own(), this.#inherited());
     this.#baseRevision = this.#revision();
+    this.#inheritedKey = this.#inheritedNow();
     $<HTMLInputElement>('rpClean').checked = f.clean;
     const known = MODEL_CHOICES.includes(f.model) || f.model === '';
     $<HTMLSelectElement>('rpModel').value = known ? f.model : OTHER;
@@ -294,7 +312,7 @@ export class RoomPanelUi {
     $('rpModelOtherRow').hidden = $<HTMLSelectElement>('rpModel').value !== OTHER;
     $('rpTools').hidden = !f.toolsOnly;
     const dflt = this.#state.building.settings.default_permission_mode;
-    $<HTMLSelectElement>('rpMode').options[0]!.textContent = `Default (${PERMISSION_LABELS[dflt]})`;
+    $<HTMLSelectElement>('rpMode').options[0]!.textContent = defaultModeLabel(inh?.permission_mode, divName, dflt);
     $<HTMLInputElement>('rpToolsDefault').disabled = !!inh?.tools;
     const roomScope = this.#scope === 'room';
     const scalar = (row: string, note: string, own: string, inherited: string | undefined) => {
@@ -312,9 +330,12 @@ export class RoomPanelUi {
     scalar('rpModelRow', 'rpModelNote', f.model, inh?.model);
     scalar('rpModeRow', 'rpModeNote', f.mode, inh?.permission_mode ? PERMISSION_LABELS[inh.permission_mode] : undefined);
     this.#mark('rpPromptRow', roomScope && f.prompt.trim() !== '');
-    this.#note('rpPromptNote', roomScope && inh?.prompt ? `from ${divName}: ${inh.prompt}` : '', 'from');
-    this.#mark('rpToolsRow', roomScope && f.tools.some((t) => !(inh?.tools ?? []).includes(t)));
-    this.#note('rpToolsNote', roomScope && inh?.tools ? `from ${divName}: ${inh.tools.join(', ')}. A room can add tools, not remove them.` : '', 'from');
+    const promptText = roomScope ? promptNote(divName, inh?.prompt, f.prompt, this.#own().prompt_mode) : '';
+    this.#note('rpPromptNote', promptText, promptText.startsWith('Replaces') ? 'set' : 'from');
+    const inhTools = inh?.tools ?? [];
+    this.#mark('rpToolsRow', roomScope && (f.tools.some((t) => !inhTools.includes(t)) || inhTools.some((t) => !f.tools.includes(t))));
+    this.#note('rpToolsNote', roomScope && inh?.tools ? `from ${divName}: ${inh.tools.join(', ')}. Uncheck one to remove it for this room.` : '', 'from');
+    this.#note('rpToolsEmpty', toolsWarning(f.toolsOnly, f.tools, this.#scope, this.#division()?.name ?? ''), '');
     for (const [key, row, note] of [['allow', 'rpAllowRow', 'rpAllowNote'], ['ask', 'rpAskRow', 'rpAskNote'], ['deny', 'rpDenyRow', 'rpDenyNote']] as const) {
       this.#mark(row, roomScope && f[key].length > 0);
       this.#note(note, roomScope && inh?.[key]?.length ? `from ${divName}: ${inh[key].join(', ')}` : '', 'from');
@@ -360,7 +381,11 @@ export class RoomPanelUi {
     const b = this.#state.building;
     const out: string[] = [];
     const div = this.#room?.division;
-    for (const w of b.warnings) if (w.includes('mcp.yaml') || (div && w.includes(`/divisions/${div}.yaml`))) out.push(w);
+    const slug = this.#state.project(this.#floor)?.slug;
+    for (const w of b.warnings) {
+      if (w.includes('mcp.yaml') || (div && w.includes(`/divisions/${div}.yaml`)) || (slug && /overrides[\\/]/.test(w) && w.includes(`${slug}.yaml`))) out.push(w);
+    }
+    if (this.#scope === 'room' && this.#own().tools?.some((t) => t.startsWith('-')) && !this.#inherited()?.tools?.length) out.push(`Room "${this.#room?.id}" removes tools but its division lists none`);
     for (const name of f.mcp) {
       if (!Object.hasOwn(b.mcp.servers, name)) { out.push(`MCP server "${name}" is not in mcp.yaml`); continue; }
       for (const s of needsSecrets(b.mcp.servers[name]!, b.secretsSet)) out.push(`Secret "${s}" is not set: run kubicle secret set ${s}`);
@@ -381,11 +406,11 @@ export class RoomPanelUi {
     li?.querySelector<HTMLElement>(`[class="${keep.cls}"]`)?.focus();
   }
 
-  #checkRow(key: string, cls: string, name: string, checked: boolean, opts: { disabled?: boolean; tag?: string; missing?: boolean } = {}): HTMLLIElement {
+  #checkRow(key: string, cls: string, name: string, checked: boolean, opts: { tag?: string } = {}): HTMLLIElement {
     const li = el('li', cls); li.dataset.key = key;
     if (opts.tag) li.classList.add('inherited');
     const label = el('label', 'rp-check');
-    const input = el('input', 'rp-box'); input.type = 'checkbox'; input.dataset.name = name; input.checked = checked; input.disabled = !!opts.disabled;
+    const input = el('input', 'rp-box'); input.type = 'checkbox'; input.dataset.name = name; input.checked = checked;
     label.append(input, el('span', 'rp-name', name));
     li.append(label);
     if (opts.tag) li.append(el('span', 'rp-tag', opts.tag));
@@ -396,7 +421,7 @@ export class RoomPanelUi {
     const inh = this.#inherited()?.tools ?? [];
     const names = [...new Set([...TOOL_CHOICES, ...checked])]; // an entry from a hand-edited file stays visible
     const tag = this.#scope === 'room' ? `from ${this.#division()?.name ?? ''}` : undefined;
-    this.#draw($('rpTools'), names.map((t) => this.#checkRow(t, 'rp-item', t, checked.includes(t), inh.includes(t) ? { disabled: true, ...(tag ? { tag } : {}) } : {})));
+    this.#draw($('rpTools'), names.map((t) => this.#checkRow(t, 'rp-item', t, checked.includes(t), inh.includes(t) && tag ? { tag } : {})));
   }
 
   /** Secrets, new servers and test results change while the panel is open: redraw without touching what is checked. */
@@ -415,7 +440,7 @@ export class RoomPanelUi {
         const t = this.#tests.get(name);
         const btn = el('button', 'btn rp-test', t?.busy ? 'Testing…' : 'Test'); btn.type = 'button';
         btn.setAttribute('aria-label', `Test ${name}`);
-        btn.disabled = !!t?.busy;
+        btn.setAttribute('aria-busy', String(!!t?.busy)); // not disabled: a disabled button would drop keyboard focus
         btn.addEventListener('click', () => void this.#test(name));
         li.append(btn);
         if (t && !t.busy) { const m = el('span', `rp-result ${t.ok ? 'ok' : 'err'}`, t.text); m.setAttribute('role', 'status'); li.append(m); }
@@ -480,7 +505,7 @@ export class RoomPanelUi {
     if (!room || !!this.#state.project(floor)?.archived !== this.#readOnly || (this.#scope === 'division' && !this.#division())) { this.close(); return; }
     this.#room = room;
     if (this.#saving) return;
-    if (this.#revision() !== this.#baseRevision) {
+    if (this.#revision() !== this.#baseRevision || this.#inheritedNow() !== this.#inheritedKey) {
       if (this.#dirty()) this.#msg(CONFLICT_TEXT, true);
       else this.#load();
       return;
@@ -503,6 +528,8 @@ export class RoomPanelUi {
   async #save(): Promise<void> {
     const room = this.#room;
     if (!room || this.#saving || this.#readOnly || !this.#dirty()) return;
+    // The form's lists are a diff against the division it was built from: never save one against a newer division.
+    if (this.#inheritedNow() !== this.#inheritedKey) { this.#msg(CONFLICT_TEXT, true); return; }
     const scope = this.#scope, floor = this.#floor, div = this.#division();
     const f = this.#read();
     const h = harnessFrom(f, this.#own(), this.#inherited());
@@ -532,6 +559,9 @@ export class RoomPanelUi {
       this.#base = sent; // what the owner typed during the save stays unsaved
       this.#redrawLists();
       this.#msg('Saved.');
+      this.#sync();
+      this.refresh(); // a division change that arrived during the save
+      return;
     } else if (r.status === 409) this.#msg(CONFLICT_TEXT, true);
     else if (r.status === 401 || r.status === 403) this.#msg(EXPIRED_TEXT);
     else if (r.status === 400 || r.status === 404) this.#msg(typeof data?.error === 'string' ? data.error : 'The server refused this setup.');
@@ -552,6 +582,7 @@ export class RoomPanelUi {
   }
 
   async #test(name: string): Promise<void> {
+    if (this.#tests.get(name)?.busy) return;
     const st: TestState = { busy: true, ok: false, text: '' };
     this.#tests.set(name, st);
     this.#redrawLists();

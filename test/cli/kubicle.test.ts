@@ -9,6 +9,7 @@ import { parse as parseYaml } from 'yaml';
 import { slugFor } from '../../src/server/building/files.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+process.env.KUBICLE_SECRETS_STORE = 'file'; // never the OS keyring in tests
 const BIN = join(root, 'bin', 'kubicle');
 const CONFLICT = 'This floor changed elsewhere. Reload to see the latest.';
 

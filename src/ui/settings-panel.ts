@@ -23,7 +23,7 @@ export class SettingsUi {
     $('settingsBtn').addEventListener('click', (e) => this.open(e.currentTarget as HTMLElement));
     $('settingsClose').addEventListener('click', () => this.close());
     $('settingsCancel').addEventListener('click', () => this.close());
-    $('settingsReload').addEventListener('click', () => { this.#load(); this.#save.focus(); });
+    $('settingsReload').addEventListener('click', () => { this.#load(); this.#mode.focus(); });
     $('settingsForm').addEventListener('submit', (e) => { e.preventDefault(); void this.#submit(); });
     this.#mode.addEventListener('change', () => this.#sync());
     this.#dlg.addEventListener('close', () => { if (this.#dlg.open) return; const o = this.#opener; this.#opener = null; o?.focus?.(); });

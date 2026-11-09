@@ -39,7 +39,7 @@ test('model and tools must look like a model id and tool names', () => {
   for (const m of ['sonnet', 'claude-opus-4-1', 'claude-sonnet-4-5[1m]', 'us.anthropic.claude:v1', 'opus_4.1']) assert.deepEqual(harnessProblems({ model: m }), [], m);
   for (const m of ['', '-p', '--dangerously-skip-permissions', 'a b', 'x\0', 'sonnet;rm']) assert.deepEqual(harnessProblems({ model: m }), [`model "${m}" is not a model name`], m);
   assert.deepEqual(harnessProblems({ tools: ['Read', 'Grep', 'NotebookEdit', 'mcp_x'] }), []);
-  for (const t of ['Bash(git:*)', '-Read', 'Read,Write', '1x', 'Re ad']) assert.deepEqual(harnessProblems({ tools: [t] }), [`tool name "${t}" is invalid`], t);
+  for (const t of ['Bash(git:*)', 'Read,Write', '1x', 'Re ad', '--Read', '-Re ad']) assert.deepEqual(harnessProblems({ tools: [t] }), [`tool name "${t}" is invalid`], t);
 });
 
 test('NUL is refused in the prompt and in permission rules', () => {
@@ -104,4 +104,28 @@ test('merge: scalars replaced, defaults, dedupe, no mutation', () => {
   assert.deepEqual(effective({ tools: ['Read'] }).tools, ['Read']);
   assert.deepEqual(effective({ skills: ['a', '-a', 'b', '-c'] }).skills, ['b']);
   assert.deepEqual([...effective({ optional: ['g'] }).optional], ['g']);
+});
+
+test('tools: a room may remove an inherited tool with -Name; a division may not', () => {
+  assert.deepEqual(harnessProblems({ tools: ['-Bash', 'Read'] }, 'room'), []);
+  assert.deepEqual(harnessProblems({ tools: ['-Bad Name'] }, 'room'), ['tool name "-Bad Name" is invalid']);
+  assert.deepEqual(harnessProblems({ tools: ['-Bash'] }), ['tools entry "-Bash" only works in a room override']);
+  assert.deepEqual(harnessProblems({ tools: ['-Bash'] }, 'division'), ['tools entry "-Bash" only works in a room override']);
+});
+
+test('tools merge: -Name removes from the division list; never turns into "no tools" by itself', () => {
+  assert.deepEqual(mergeHarness({ tools: ['Read', 'Bash'] }, { tools: ['-Bash', 'Grep'] }).tools, ['Read', 'Grep']);
+  assert.deepEqual(mergeHarness({ tools: ['Read'] }, { tools: ['-Read'] }).tools, [], 'removing every listed tool leaves none, on purpose');
+  assert.equal(mergeHarness({}, { tools: ['-Bash'] }).tools, undefined, 'nothing to remove from: not an empty list');
+  assert.deepEqual(mergeHarness({}, { tools: ['-Bash', 'Read'] }).tools, ['Read']);
+  assert.deepEqual(mergeHarness({}, { tools: [] }).tools, [], 'an explicit empty list still means none');
+});
+
+test('rules are add-only: -Rule is refused in allow, ask and deny', () => {
+  const msg = "a room can't remove an inherited rule; add a deny or ask rule instead";
+  for (const k of ['allow', 'ask', 'deny']) {
+    assert.deepEqual(harnessProblems({ [k]: ['-Bash(x)'] }, 'room'), [msg], k);
+    assert.deepEqual(harnessProblems({ [k]: ['-Bash(x)'] }), [msg], k);
+  }
+  assert.deepEqual(harnessProblems({ allow: ['Bash(a -b)'] }), [], 'a dash later in the rule is fine');
 });

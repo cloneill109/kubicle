@@ -78,3 +78,10 @@ test('service: unknown-room override warns and is left out; other rooms keep the
     assert.equal(existsSync(join(root, '.kubicle', 'overrides')), false);
   } finally { svc.stop(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('an override file may hold -Tool', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kub-tools-'));
+  const file = join(dir, 'o.yaml');
+  assert.equal(writeOverride(file, 'qa', { tools: ['-Bash'] }, 0).revision, 1);
+  rmSync(dir, { recursive: true, force: true });
+});

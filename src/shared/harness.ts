@@ -38,7 +38,10 @@ export const LIST_MAX = 50;
 const RULE_LISTS = ['tools', 'allow', 'ask', 'deny'] as const;
 const NAME_LISTS = ['mcp', 'skills', 'optional'] as const;
 
-export function harnessProblems(h: unknown): string[] {
+/** Where a harness lives: only a room override may remove an inherited tool (`-Name`). */
+export type HarnessLevel = 'division' | 'room';
+
+export function harnessProblems(h: unknown, level: HarnessLevel = 'division'): string[] {
   if (h === null || typeof h !== 'object' || Array.isArray(h)) return ['harness must be a mapping'];
   const o = h as Record<string, unknown>;
   const out: string[] = [];
@@ -67,7 +70,14 @@ export function harnessProblems(h: unknown): string[] {
     if (!v) continue;
     if (v.some((x) => typeof x !== 'string')) out.push(`${key} entries must be text`);
     else if (v.some((x) => (x as string).trim() === '')) out.push(`${key} entries must not be empty`);
-    else if (key === 'tools') { for (const x of v as string[]) if (!TOOL_RE.test(x)) out.push(`tool name "${x}" is invalid`); }
+    else if (key === 'tools') {
+      for (const x of v as string[]) {
+        const removal = x.startsWith('-');
+        if (!TOOL_RE.test(removal ? x.slice(1) : x)) out.push(`tool name "${x}" is invalid`);
+        else if (removal && level !== 'room') out.push(`tools entry "${x}" only works in a room override`);
+      }
+    }
+    else if (v.some((x) => (x as string).trimStart().startsWith('-'))) out.push("a room can't remove an inherited rule; add a deny or ask rule instead");
     else if (v.some((x) => (x as string).includes('\0'))) out.push(`${key} entries must not contain NUL characters`);
   }
   for (const key of NAME_LISTS) {
@@ -99,6 +109,14 @@ function mergeList(base: string[] | undefined, over: string[] | undefined): stri
   return uniq([...(base ?? []), ...(over ?? [])]);
 }
 
+/** `-Name` removes from the division's list. With no list there is nothing to remove from, and that must never read as "no tools" (resolve refuses it). */
+function mergeTools(base: string[] | undefined, over: string[] | undefined): string[] | undefined {
+  if (base) return mergeNames(base, over);
+  if (!over) return undefined;
+  const add = over.filter((t) => !t.startsWith('-'));
+  return over.length > 0 && add.length === 0 ? undefined : uniq(add);
+}
+
 export function mergeHarness(base: Harness, over: Harness): Harness {
   const out: Harness = {};
   const inherit = over.inherit ?? base.inherit;
@@ -114,7 +132,9 @@ export function mergeHarness(base: Harness, over: Harness): Harness {
   else if (base.prompt !== undefined && over.prompt !== undefined) prompt = `${base.prompt}\n\n${over.prompt}`;
   else prompt = over.prompt ?? base.prompt;
   if (prompt !== undefined) out.prompt = prompt;
-  for (const k of ['tools', 'allow', 'ask', 'deny', 'optional'] as const) {
+  const tools = mergeTools(base.tools, over.tools);
+  if (tools) out.tools = tools;
+  for (const k of ['allow', 'ask', 'deny', 'optional'] as const) {
     const v = mergeList(base[k], over[k]);
     if (v) out[k] = v;
   }

@@ -46,7 +46,7 @@ function resolve(b: Building, projectId: string, roomId: string): Resolved {
   const warnings: string[] = [];
   const override = b.overrides[projectId]?.rooms[roomId];
   const problems: string[] = [];
-  if (override !== undefined) for (const p of harnessProblems(override)) problems.push(`Override for room "${roomId}": ${p}`);
+  if (override !== undefined) for (const p of harnessProblems(override, 'room')) problems.push(`Override for room "${roomId}": ${p}`);
   let base: Harness = {};
   if (room.division && room.id !== BULLPEN) {
     const div = b.divisions.find((d) => d.id === room.division);
@@ -56,6 +56,7 @@ function resolve(b: Building, projectId: string, roomId: string): Resolved {
       base = div.harness as Harness;
     }
   }
+  if (override?.tools?.some((t) => t.startsWith('-')) && !base.tools?.length) problems.push(`Room "${roomId}" removes tools but its division lists none`);
   if (problems.length > 0) throw new HarnessError(problems);
   return { room, eff: effective(mergeHarness(base, override ?? {})), warnings };
 }

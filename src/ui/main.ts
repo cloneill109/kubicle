@@ -74,12 +74,13 @@ const startAgent = new StartAgentUi({
   floor: () => state.currentFloor,
   floorName: (id) => floorName(id),
   rooms: (id) => floorDef(id).rooms.map((r) => ({ id: r.id, name: r.name })),
+  onSetup: (room, opener) => roomPanel.open(room, opener ?? canvas),
 });
 $('startBtn').addEventListener('click', (e) => { closeMenu(); startAgent.open(undefined, e.currentTarget as HTMLElement); });
 const roomPanel = new RoomPanelUi(state, {
   floorName: (id) => floorName(id),
   rooms: (id) => floorDef(id).rooms,
-  onStart: (room) => startAgent.open(room, canvas),
+  onStart: (room, opener) => startAgent.open(room, opener ?? canvas),
 });
 const settingsUi = new SettingsUi(state);
 const openFromHash = () => { if (location.hash === '#bubbles') { closeMenu(); closePicker(false); if (logView.isOpen) $<HTMLDialogElement>('logView').close(); bubbles.open($('bubblesDot')); } };
