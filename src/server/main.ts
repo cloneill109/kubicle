@@ -238,7 +238,7 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   const clock = opts.now ?? Date.now;
   let launchCheck: NodeJS.Timeout | null = null;
   const launchWatch = new LaunchWatch({
-    onActive: () => { launchCheck ??= startLaunchCheck(); },
+    onActive: () => { if (!closing) launchCheck ??= startLaunchCheck(); },
     onIdle: () => { if (launchCheck) { clearInterval(launchCheck); launchCheck = null; } },
   });
   const handler = createHandler({

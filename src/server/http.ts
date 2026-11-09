@@ -707,39 +707,59 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     const t = Date.now();
     while (launches.length && t - launches[0] > LAUNCH_WINDOW_MS) launches.shift();
     if (launches.length >= LAUNCH_MAX) return err(429, `at most ${LAUNCH_MAX} agents a minute; wait a moment`);
+    const room_ = b.room as string;
+    // Reserve the slot now (intake awaits below, so parallel requests must not all pass the check); released unless a terminal opened.
+    launches.push(t);
+    let launched = false;
+    try { await startReserved(); }
+    finally { if (!launched) { const i = launches.indexOf(t); if (i >= 0) launches.splice(i, 1); } }
+
+    async function startReserved(): Promise<void> {
+    const launch = d.launch!, project_ = project!, task_ = task as string, want = room_;
     const id = randomUUID();
     // Who picks the room: the owner, Bubbles (intake before launch, so the room's harness loads), or the default (Bullpen).
     // Intake never blocks the launch: off, no task, a failure, a timeout or low confidence all mean the Bullpen.
-    let roomId = b.room, by: 'owner' | 'bubbles' | 'default' = 'owner', briefing: string | undefined;
-    if (b.room === '') {
+    let roomId = want, by: 'owner' | 'bubbles' | 'default' = 'owner', briefing: string | undefined;
+    if (want === '') {
       roomId = BULLPEN; by = 'default';
-      if (task.trim() && floor && d.bubbles.state().status.state === 'on') {
-        const picked = await launchIntake({ id, task, project, floor });
+      if (task_.trim() && floor && d.bubbles.state().status.state === 'on') {
+        const picked = await launchIntake({ id, task: task_, project: project_, floor });
         if (picked) { roomId = picked.room; by = 'bubbles'; briefing = picked.briefing; }
       }
     }
-    const room = floor?.rooms.find((r) => r.id === roomId);
+    let room = floor?.rooms.find((r) => r.id === roomId);
     if (!room) return err(400, `no room "${roomId}" on this floor`);
     let spec: LaunchSpec;
-    try { spec = d.prepareLaunch({ projectId: project.id, roomId: room.id, task, id, ...(briefing ? { briefing } : {}) }); }
+    const prepare = (rid: string, brief?: string) => d.prepareLaunch!({ projectId: project_.id, roomId: rid, task: task_, id, ...(brief ? { briefing: brief } : {}) });
+    try { spec = prepare(room.id, briefing); }
     catch (e) {
-      if (e instanceof HarnessError) return send(res, 400, JSON.stringify({ error: e.message, problems: e.problems }), JSON_HDR);
-      throw e;
+      if (!(e instanceof HarnessError)) throw e;
+      const bullpen = floor?.rooms.find((r) => r.id === BULLPEN);
+      if (by !== 'bubbles' || !bullpen) return send(res, 400, JSON.stringify({ error: e.message, problems: e.problems }), JSON_HDR);
+      // Bubbles' pick cannot start (broken harness, missing secret): his pick never blocks a launch, so the Bullpen it is.
+      try { spec = prepare(BULLPEN); }
+      catch (e2) {
+        if (e2 instanceof HarnessError) return send(res, 400, JSON.stringify({ error: e2.message, problems: e2.problems }), JSON_HDR);
+        throw e2;
+      }
+      spec.warnings = [`Bubbles picked ${room.name}, but it can't start: ${e.problems[0] ?? e.message}. Started in the Bullpen instead.`, ...spec.warnings];
+      room = bullpen; by = 'default';
     }
     // Registered before the terminal opens: a fast agent can check in before `launch` returns.
     d.launchWatch?.add(spec.id, room.name, now());
     try {
-      await d.launch(spec);
+      await launch(spec);
     } catch (e) {
       d.launchWatch?.claim(spec.id);
       if (e instanceof LaunchError) return err(500, e.message);
       throw e;
     }
-    launches.push(t);
+    launched = true;
     const item: FeedItem = { ts: t, event: 'Launch', agentName: 'Office', detail: `Opened a terminal for a new agent in ${room.name}` };
     d.pushFeed(item);
     broadcast({ t: 'feed', item });
     sendJson(res, 202, { room: room.id, by, launch: spec.id, warnings: spec.warnings });
+    }
   }
 
   /** Bubbles' intake for a not-yet-started agent (session id `launch-<id>`); null unless it is confident. Never throws. */

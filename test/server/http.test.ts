@@ -1561,3 +1561,36 @@ test('LaunchWatch: onActive on the first pending launch, onIdle when the last is
   w.add('c', 'C', 0); w.claim('c');
   assert.deepEqual(calls, ['active', 'idle', 'active', 'idle']);
 });
+
+test('Start agent: when the room Bubbles picked cannot launch, it starts in the Bullpen with a warning', async () => {
+  const { c, launched, go, s, cookie } = await startWithIntake();
+  const div = await control(s, cookie, '/api/divisions/frontend/harness', { baseRevision: 1, harness: { mcp: ['nope'] } });
+  assert.equal(div.status, 200);
+  await c.waitFor((m) => m.t === 'building' && JSON.stringify(m.building.divisions).includes('nope'));
+  const r = await go('', 'fake-mode:intake-frontend build the nav bar');
+  assert.equal(r.status, 202);
+  const b = await r.json() as { room: string; by: string; warnings: string[] };
+  assert.deepEqual([b.room, b.by], ['bullpen', 'default']);
+  assert.deepEqual(b.warnings, ['Bubbles picked Front end, but it can\'t start: MCP server "nope" is not in mcp.yaml. Started in the Bullpen instead.']);
+  assert.equal(launched.length, 1);
+  assert.equal(launched[0]!.room, 'bullpen');
+  assert.ok(!appended(launched[0]!).includes(BRIEFING_PREFIX), 'the briefing was for the other room');
+  // an owner's explicit pick of that room still fails with 400
+  assert.equal((await go('frontend', 'x')).status, 400);
+  assert.equal(launched.length, 1);
+  await c.close();
+});
+
+test('Start agent: parallel requests cannot exceed 6 a minute, and a failed one gives its slot back', async () => {
+  const { c, launched, go } = await startWithIntake();
+  const rs = await Promise.all(Array.from({ length: 9 }, () => go('', 'fake-mode:intake-frontend build the nav bar')));
+  const codes = rs.map((r) => r.status).sort();
+  assert.deepEqual(codes, [202, 202, 202, 202, 202, 202, 429, 429, 429]);
+  assert.equal(launched.length, 6);
+  await c.close();
+  const t = await startWithIntake();
+  assert.equal((await Promise.all(Array.from({ length: 6 }, () => t.go('nope', 'x')))).filter((r) => r.status === 400).length, 6);
+  const ok = await Promise.all(Array.from({ length: 6 }, () => t.go('frontend', 'x')));
+  assert.equal(ok.filter((r) => r.status === 202).length, 6, 'rejected requests did not use slots');
+  await t.c.close();
+});
