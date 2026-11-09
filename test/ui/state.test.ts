@@ -12,7 +12,7 @@ const proj = (id: string, order: number, o: Partial<ProjectRow> = {}): ProjectRo
 
 test('needs-you fires only on the transition into waiting', () => {
   const s = new OfficeState();
-  const first = s.apply({ t: 'snapshot', agents: [v('a', { status: 'waiting' })], projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' } }, bubbles: BUB });
+  const first = s.apply({ t: 'snapshot', agents: [v('a', { status: 'waiting' })], projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], secretsSet: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' } }, bubbles: BUB });
   assert.equal(first.newlyWaiting.length, 0, 'no alert for what was already waiting at page load');
   assert.equal(first.firstSnapshot, true);
   assert.equal(s.apply({ t: 'agent', agent: v('b') }).newlyWaiting.length, 0);
@@ -22,7 +22,7 @@ test('needs-you fires only on the transition into waiting', () => {
   assert.equal(titleFor(s.counts().needYou), '(2) Kubicle');
   assert.equal(titleFor(0), 'Kubicle');
   // Reconnect snapshot: c newly waiting alerts, a (still waiting) does not; b vanished → expired.
-  const re = s.apply({ t: 'snapshot', agents: [v('a', { status: 'waiting' }), v('c', { status: 'waiting' })], projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' } }, bubbles: BUB });
+  const re = s.apply({ t: 'snapshot', agents: [v('a', { status: 'waiting' }), v('c', { status: 'waiting' })], projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], secretsSet: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' } }, bubbles: BUB });
   assert.deepEqual(re.newlyWaiting.map((x) => x.id), ['c']);
   assert.deepEqual(re.removed.map((r) => [r.view.id, r.reason]), [['b', 'expired']]);
   assert.equal(re.firstSnapshot, false);
@@ -30,7 +30,7 @@ test('needs-you fires only on the transition into waiting', () => {
 
 test('counts, removal and feed cap', () => {
   const s = new OfficeState();
-  s.apply({ t: 'snapshot', agents: [v('a'), v('a:x', { kind: 'subagent', parentId: 'a' })], projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' } }, bubbles: BUB });
+  s.apply({ t: 'snapshot', agents: [v('a'), v('a:x', { kind: 'subagent', parentId: 'a' })], projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], secretsSet: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' } }, bubbles: BUB });
   assert.deepEqual(s.counts(), { sessions: 1, subagents: 1, needYou: 0 });
   const r = s.apply({ t: 'agentRemoved', id: 'a:x', reason: 'ended' });
   assert.deepEqual(r.removed.map((x) => x.view.id), ['a:x']);
@@ -57,7 +57,7 @@ const pend = (id: string, since: number, answerable: boolean) => ({ id, toolName
 
 test('I5: pickNeedsYou -> oldest answerable waiting; fallback oldest waiting; none -> undefined', () => {
   const s = new OfficeState();
-  s.apply({ t: 'snapshot', projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' } }, bubbles: BUB, agents: [
+  s.apply({ t: 'snapshot', projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], secretsSet: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' } }, bubbles: BUB, agents: [
     v('w-old', { status: 'waiting', pending: pend('p1', 10, false) }),
     v('a-new', { status: 'waiting', pending: pend('p2', 50, true) }),
     v('a-old', { status: 'waiting', pending: pend('p3', 30, true) }),
@@ -65,7 +65,7 @@ test('I5: pickNeedsYou -> oldest answerable waiting; fallback oldest waiting; no
   ] });
   assert.equal(pickNeedsYou(s.agents.values())?.id, 'a-old');
   const t = new OfficeState();
-  t.apply({ t: 'snapshot', projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' } }, bubbles: BUB, agents: [
+  t.apply({ t: 'snapshot', projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], secretsSet: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' } }, bubbles: BUB, agents: [
     v('w2', { status: 'waiting', pending: pend('p1', 20, false) }),
     v('w1', { status: 'waiting', lastSeen: 5 }), // waiting with no pending: ordered by lastSeen
     v('idle', { status: 'idle' }),
@@ -76,7 +76,7 @@ test('I5: pickNeedsYou -> oldest answerable waiting; fallback oldest waiting; no
 
 test('I5: newlyAnswerable reports a new answerable approval once (not on first snapshot)', () => {
   const s = new OfficeState();
-  const first = s.apply({ t: 'snapshot', projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' } }, bubbles: BUB, agents: [v('a', { status: 'waiting', pending: pend('p0', 1, true) })] });
+  const first = s.apply({ t: 'snapshot', projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], secretsSet: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' } }, bubbles: BUB, agents: [v('a', { status: 'waiting', pending: pend('p0', 1, true) })] });
   assert.equal(first.newlyAnswerable.length, 0);
   assert.equal(s.apply({ t: 'agent', agent: v('b', { status: 'waiting', pending: pend('p1', 2, false) }) }).newlyAnswerable.length, 0, 'unanswerable');
   assert.deepEqual(s.apply({ t: 'agent', agent: v('b', { status: 'waiting', pending: pend('p1', 2, true) }) }).newlyAnswerable.map((x) => x.id), ['b'], 'upgraded to answerable');
@@ -94,7 +94,7 @@ test('I5: shouldAutoSelect only when the current selection has no answerable pen
 });
 
 // ---------------------------------------------------------------- Bubbles (Task 9)
-const snap = (bubbles: BubblesState) => ({ t: 'snapshot' as const, agents: [], projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' as const } }, bubbles });
+const snap = (bubbles: BubblesState) => ({ t: 'snapshot' as const, agents: [], projects: [], feed: [], banner: null, building: { divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], secretsSet: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' as const } }, bubbles });
 const entry = (seq: number, o: Partial<LogEntry> = {}): LogEntry => ({ seq, ts: seq * 1000, kind: 'triage', prevHash: 'p', hash: `h${seq}`, ...o });
 
 test('bubbles: the snapshot sets it, a bubbles message replaces it wholesale', () => {

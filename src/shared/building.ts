@@ -24,6 +24,8 @@ export interface Building {
   skills: SkillInfo[];
   /** skills in the user's Claude config that can be imported */
   importable: SkillInfo[];
+  /** Names (never values) of the secrets mcp.yaml refers to that are set, so the room panel can warn before a launch. */
+  secretsSet: string[];
   warnings: string[];
 }
 

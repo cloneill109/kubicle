@@ -1,6 +1,6 @@
 // "Start agent": a small dialog (room + optional task) that asks the server to open a new Terminal
 // window running `claude` in that room (POST /api/agents/start). Opened from the header button or by
-// clicking a room's door sign. The agent then appears on the floor through the normal hooks.
+// from a room's panel (Start agent here). The agent then appears on the floor through the normal hooks.
 import { post } from './panel.ts';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;

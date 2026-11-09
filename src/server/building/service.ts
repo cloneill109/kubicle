@@ -7,7 +7,8 @@ import type { ProjectRow } from '../../shared/protocol.ts';
 import type { Harness } from '../../shared/harness.ts';
 import { readCatalog, writeServer } from '../harness/catalog.ts';
 import { importSkill, listImportable, listLibrary } from '../harness/skills.ts';
-import type { McpCatalog, McpServerDef, SkillInfo } from '../../shared/catalog.ts';
+import { secretRefs, type McpCatalog, type McpServerDef, type SkillInfo } from '../../shared/catalog.ts';
+import type { SecretStore } from '../harness/secrets.ts';
 import { readOverrides, writeOverride, OverrideNotFound } from './overrides.ts';
 import { DEFAULT_SETTINGS, readSettings, settingsFile, writeSettings } from '../settings.ts';
 import type { KubicleSettings } from '../../shared/building.ts';
@@ -23,6 +24,7 @@ export class BuildingService {
   private debounceMs: number;
   private sweepMs: number;
   private claudeDir: string | null;
+  private secrets: (() => Pick<SecretStore, 'has'>) | null;
   private projects: () => ProjectRow[] = () => [];
   private started = false;
 
@@ -33,7 +35,7 @@ export class BuildingService {
   private overrideFiles = new Map<string, RoomOverrides>();
   private catalog: McpCatalog = { revision: 0, servers: {} };
   private settings: KubicleSettings = { ...DEFAULT_SETTINGS };
-  private built: Building = { settings: { ...DEFAULT_SETTINGS }, divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], warnings: [] };
+  private built: Building = { settings: { ...DEFAULT_SETTINGS }, divisions: [], floors: {}, overrides: {}, mcp: { revision: 0, servers: {} }, skills: [], importable: [], secretsSet: [], warnings: [] };
   private builtJson = JSON.stringify(this.built);
   /** Files that failed to load at the last reload (their last good version is in use). */
   private broken = new Set<string>();
@@ -43,8 +45,9 @@ export class BuildingService {
   private debounce: NodeJS.Timeout | null = null;
   private sweep: NodeJS.Timeout | null = null;
 
-  constructor(home: string, opts: { debounceMs?: number; sweepMs?: number; claudeDir?: string } = {}) {
+  constructor(home: string, opts: { debounceMs?: number; sweepMs?: number; claudeDir?: string; secrets?: () => Pick<SecretStore, 'has'> } = {}) {
     this.claudeDir = opts.claudeDir ?? null;
+    this.secrets = opts.secrets ?? null;
     this.home = home;
     this.debounceMs = opts.debounceMs ?? 100;
     this.sweepMs = opts.sweepMs ?? 60_000;
@@ -280,8 +283,18 @@ export class BuildingService {
       mcp: this.catalog,
       skills: listLibrary(this.home),
       importable: this.claudeDir ? listImportable(this.claudeDir) : [],
+      secretsSet: this.secretsSet(),
       warnings: [...warn.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([, m]) => m),
     };
+  }
+
+  /** Which secrets the catalog refers to are set: names only, through `has` only. A store that throws counts as not set. */
+  private secretsSet(): string[] {
+    if (!this.secrets) return [];
+    let store: Pick<SecretStore, 'has'>;
+    try { store = this.secrets(); } catch { return []; }
+    const names = new Set(Object.values(this.catalog.servers).flatMap((s) => secretRefs(s)));
+    return [...names].filter((n) => { try { return store.has(n); } catch { return false; } }).sort();
   }
 
   private emitIfChanged(): void {
@@ -296,7 +309,7 @@ export class BuildingService {
     const files = [...this.divisionFiles()];
     try { files.push(this.divisionsDir()); } catch { /* ignore */ }
     for (const p of this.projects()) { files.push(this.homeFile(p.id), this.repoFile(p.id), this.overrideFile(p.id)); }
-    files.push(this.mcpFile(), this.skillsDir(), settingsFile(this.home));
+    files.push(this.mcpFile(), this.skillsDir(), settingsFile(this.home), join(this.home, 'secret-names.yaml'));
     try {
       for (const n of readdirSync(this.skillsDir()).sort()) files.push(join(this.skillsDir(), n), join(this.skillsDir(), n, 'SKILL.md'));
     } catch { /* no library yet */ }
@@ -317,7 +330,7 @@ export class BuildingService {
     if (name === null) return true;
     const n = name.split('\\').join('/');
     if (!isHome) return n === 'floor.yaml';
-    return n === 'divisions' || n === 'floors' || n === 'overrides' || n === 'mcp.yaml' || n === 'settings.yaml' || n === 'skills' || n.startsWith('skills/')
+    return n === 'divisions' || n === 'floors' || n === 'overrides' || n === 'mcp.yaml' || n === 'settings.yaml' || n === 'secret-names.yaml' || n === 'skills' || n.startsWith('skills/')
       || /^(divisions|floors|overrides)\/[^/]*\.yaml$/.test(n);
   }
 

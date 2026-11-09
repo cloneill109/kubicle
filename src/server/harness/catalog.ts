@@ -7,6 +7,7 @@ import type { McpCatalog, McpServerDef } from '../../shared/catalog.ts';
 import { BuildingFileError, DIR_MODE, FILE_MODE, checkBase, isMap, parseFile, validRev } from '../building/files.ts';
 
 export type { McpServerDef, McpCatalog } from '../../shared/catalog.ts';
+export { secretRefs } from '../../shared/catalog.ts';
 
 const KEYS = ['type', 'command', 'args', 'env', 'url', 'headers'];
 const TOKEN_RE = /^(sk-|ghp_|xox[bp]-|glpat-)/;
@@ -50,15 +51,6 @@ export function mcpProblems(name: string, s: unknown): string[] {
     }
   }
   return out;
-}
-
-/** Names referenced as secret:<name> in env and header values, in first-seen order. */
-export function secretRefs(s: McpServerDef): string[] {
-  const seen = new Set<string>();
-  for (const m of [s.env, s.headers]) {
-    for (const v of Object.values(m ?? {})) for (const x of v.matchAll(SECRET_RE)) seen.add(x[1]!);
-  }
-  return [...seen];
 }
 
 const envName = (n: string): string => `KUBICLE_SECRET_${n.toUpperCase().replace(/-/g, '_')}`;

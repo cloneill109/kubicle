@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -351,4 +351,24 @@ test('fix round 2: multi-line / tab / CRLF secrets echoed by the server are scru
       try { none(await testMcp({ type: 'http', url: refusing.url, headers: { 'X-K': 'secret:k' } }, {}, 5000, st)); } finally { refusing.close(); }
     } finally { /* servers closed above */ }
   }
+});
+
+test('testMcp: an abort kills the child at once; aborted before start spawns nothing', async () => {
+  const pidFile = join(tmpdir(), `mcp-abort-${process.pid}-${Date.now()}`);
+  try {
+    const ac = new AbortController();
+    const running = testMcp({ command: process.execPath, args: [FIXTURE, 'silent'] }, { ...process.env, FIXTURE_PIDFILE: pidFile }, 60_000, undefined, ac.signal);
+    for (let i = 0; i < 200 && !existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 20));
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    ac.abort();
+    assert.deepEqual(await running, { ok: false, error: 'the test was cancelled' });
+    let dead = false;
+    for (let i = 0; i < 100 && !dead; i++) { try { process.kill(pid, 0); await new Promise((r) => setTimeout(r, 20)); } catch { dead = true; } }
+    assert.ok(dead, 'child gone');
+    rmSync(pidFile);
+    const before = new AbortController();
+    before.abort();
+    assert.deepEqual(await testMcp({ command: process.execPath, args: [FIXTURE] }, { ...process.env, FIXTURE_PIDFILE: pidFile }, 5000, undefined, before.signal), { ok: false, error: 'the test was cancelled' });
+    assert.ok(!existsSync(pidFile), 'nothing was started');
+  } finally { rmSync(pidFile, { force: true }); }
 });

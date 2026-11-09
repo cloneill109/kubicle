@@ -133,7 +133,7 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
   const ingestToken = ensureIngestToken(cfg.home);
   const store = openStore(join(cfg.home, 'office.db'));
   const projects = new Projects(store);
-  const building = new BuildingService(cfg.home, { claudeDir: cfg.claudeDir });
+  const building = new BuildingService(cfg.home, { claudeDir: cfg.claudeDir, secrets: () => openSecrets(cfg.home) });
   const registry = new Registry(projects, store, cfg, undefined, { divisions: () => building.snapshot().divisions });
   const writer = new EventWriter(store);
   registry.rebuild(store.eventsSince(Date.now() - cfg.expireMs));
@@ -252,6 +252,7 @@ export async function startServer(cfg: Config, opts: StartOpts = {}): Promise<Ru
         ...(briefing ? { briefing } : {}), ...(id ? { id } : {}),
       });
     },
+    secrets: () => openSecrets(cfg.home),
     launchWatch,
     bubbles: { policy, log: bubblesLog, state: bubblesState, ownerToggledOn: () => bubbles.ownerToggledOn(), changed: bubblesChanged, intake: (r) => bubbles.intake(r) },
     ...(opts.now ? { now: opts.now } : {}),

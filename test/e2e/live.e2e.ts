@@ -422,7 +422,7 @@ test('live office: state, floors, approvals, rooms, lobby, styles, narrow view, 
   assert.ok(await page.locator('#mapScroll').isVisible());
   await settle(page);
 
-  // ---- door signs: one per room, not clickable in 1b ----
+  // ---- door signs: one per room ----
   await page.waitForFunction(() => window.__office.signs().length === 9, null, { timeout: 3000 }); // drawn on the next frame (8 rooms + Bubbles' office)
   const p = await page.evaluate(() => {
     const r = window.__office.signs().find((x) => x.roomId === 'bullpen')!;
@@ -432,11 +432,12 @@ test('live office: state, floors, approvals, rooms, lobby, styles, narrow view, 
   await page.mouse.click(p.x, p.y);
   await page.waitForTimeout(200);
   assert.ok(await page.locator('#floorMenu').isHidden(), 'a door sign opens no move menu');
-  // ...it opens Start agent for that room instead
-  await page.locator('#startDlg').waitFor({ state: 'visible', timeout: 3000 });
-  assert.equal(await page.locator('#startRoom').inputValue(), 'bullpen');
-  await page.locator('#startCancel').click();
-  await page.locator('#startDlg').waitFor({ state: 'hidden', timeout: 3000 });
+  // ...it opens that room's panel (the Bullpen has no division, so only "this room")
+  await page.locator('#roomPanel').waitFor({ state: 'visible', timeout: 3000 });
+  assert.equal(await page.locator('#rpTitle').innerText(), 'Bullpen');
+  assert.ok(await page.locator('#rpScope').isHidden(), 'the Bullpen has no division to apply to');
+  await page.keyboard.press('Escape');
+  await page.locator('#roomPanel').waitFor({ state: 'hidden', timeout: 3000 });
   await settle(page);
 
   // ---- every style renders without errors; screenshot each ----
@@ -1146,7 +1147,7 @@ test('Bubbles intake: the inspector says who placed the session and shows sugges
   await ctx.close();
 });
 
-test('Start agent: header button and door sign open the dialog; Start asks the server to open a Terminal in that room', async () => {
+test('Start agent: header button and the panel from a door sign open the dialog; Start asks the server to open a Terminal in that room', async () => {
   await srv?.close();
   const home = join(tmp, 'home-start');
   const launched: { cwd: string; room: string; task: string }[] = [];
@@ -1192,6 +1193,9 @@ test('Start agent: header button and door sign open the dialog; Start asks the s
     return { x: c.left + r.x + r.w / 2, y: c.top + r.y + r.h / 2 };
   });
   await page.mouse.click(sign.x, sign.y);
+  await page.locator('#roomPanel').waitFor({ state: 'visible', timeout: 3000 });
+  await page.locator('#rpStart').click();
+  await page.locator('#roomPanel').waitFor({ state: 'hidden', timeout: 3000 });
   await page.locator('#startDlg').waitFor({ state: 'visible', timeout: 3000 });
   assert.equal(await page.locator('#startRoom').inputValue(), 'qa');
   await page.screenshot({ path: join(outDir, 'live-start-dialog.png') });
@@ -1221,19 +1225,328 @@ test('Start agent: header button and door sign open the dialog; Start asks the s
   assert.equal(launched.length, 2);
   await page.screenshot({ path: join(outDir, 'live-start-problems.png') });
   await page.locator('#startCancel').click();
-  // Bubbles' office sign does not start agents
+  // Bubbles' office sign opens his panel, not Start
   const bsign = await page.evaluate(() => {
     const r = window.__office.signs().find((x) => x.roomId === '@bubbles')!;
     const c = document.getElementById('map')!.getBoundingClientRect();
     return { x: c.left + r.x + r.w / 2, y: c.top + r.y + r.h / 2 };
   });
   await page.mouse.click(bsign.x, bsign.y);
-  await page.waitForTimeout(200);
+  await page.locator('#bubblesPanel').waitFor({ state: 'visible', timeout: 3000 });
   assert.ok(await page.locator('#startDlg').isHidden());
+  await page.locator('#bubblesClose').click();
+  await page.locator('#bubblesPanel').waitFor({ state: 'hidden', timeout: 3000 });
   // edit mode hides the button
   await page.locator('#editBtn').click();
   assert.ok(await page.locator('#startBtn').isHidden());
   await page.locator('#editCancel').click();
   assert.ok(await page.locator('#startBtn').isVisible());
+  assert.deepEqual(errors, []);
+});
+
+test('Room panel: door signs, per-room and division saves, conflicts, MCP warnings and test, skills, permission modes, Settings, archived, phone', async () => {
+  await srv?.close();
+  const home = join(tmp, 'home-room');
+  const claudeDir = join(tmp, 'claude-room');
+  mkdirSync(join(home), { recursive: true });
+  mkdirSync(join(claudeDir, 'skills', 'importable-one'), { recursive: true });
+  writeFileSync(join(claudeDir, 'skills', 'importable-one', 'SKILL.md'), '---\nname: importable-one\ndescription: A skill to import\n---\nbody\n');
+  const fixture = join(root, 'test', 'fixtures', 'mcp-fixture.mjs');
+  writeFileSync(join(home, 'mcp.yaml'), yamlText({ revision: 1, servers: {
+    gh: { command: process.execPath, args: [fixture], env: { TOK: 'secret:github' } },
+    okfix: { command: process.execPath, args: [fixture] },
+  } }));
+  let launched = 0;
+  srv = await startServer({ ...loadConfig({ KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: claudeDir }), port: 0 }, { openBrowser: false, launch: async () => { launched++; } });
+  const zeta = repo('zeta');
+  await postOk({ session_id: 'ffffffff-0000-4000-8000-00000000000a', hook_event_name: 'SessionStart', cwd: zeta, source: 'startup' });
+  const kubicle = (args: string[]) => spawnSync(join(root, 'bin', 'kubicle'), args, { cwd: zeta, encoding: 'utf8', env: { ...process.env, KUBICLE_HOME: home, CLAUDE_CONFIG_DIR: claudeDir } });
+  const slug = () => readdirSync(join(home, 'overrides'))[0]!;
+  const overrides = () => parseYaml(readFileSync(join(home, 'overrides', slug()), 'utf8')) as { revision: number; rooms: Record<string, Record<string, unknown>> };
+
+  const page = await (await browser.newContext({ viewport: { width: 1400, height: 1000 } })).newPage();
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+  page.on('console', (m) => { if (m.type() === 'error' && !/fonts\.(googleapis|gstatic)|Failed to load resource/.test(m.text())) errors.push(m.text()); });
+  await page.goto(srv.loginUrl);
+  await page.waitForFunction(() => !!window.__office && document.body.dataset.conn === 'open', null, { timeout: 10000 });
+
+  // ---- Settings exists on the Lobby too ----
+  await goFloor(page, 'Lobby');
+  assert.ok(await page.locator('#settingsBtn').isVisible(), 'Settings in the Lobby');
+  await page.locator('#settingsBtn').click();
+  await page.locator('#settingsDlg').waitFor({ state: 'visible', timeout: 3000 });
+  assert.equal(await page.evaluate(() => document.activeElement?.id), 'settingsMode', 'focus moves in');
+  assert.equal(await page.locator('#settingsMode').inputValue(), 'auto');
+  assert.deepEqual(await page.locator('#settingsMode option').allInnerTexts(), ['Auto', 'Accept edits', 'Manual', 'Plan']);
+  assert.match(await page.locator('#settingsDlg').innerText(), /Bubbles still asks you before pushes to protected branches, in every mode\./);
+  assert.equal(await page.locator('label[for="settingsMode"]').innerText(), 'Default permission mode for new agents');
+  await page.waitForTimeout(100);
+  await page.screenshot({ path: join(outDir, 'live-settings.png') });
+  await page.locator('#settingsMode').selectOption('plan');
+  await page.locator('#settingsSave').click();
+  await page.locator('#settingsDlg').waitFor({ state: 'hidden', timeout: 3000 });
+  assert.equal(await page.evaluate(() => document.activeElement?.id), 'settingsBtn', 'focus returns');
+  assert.equal((parseYaml(readFileSync(join(home, 'settings.yaml'), 'utf8')) as { default_permission_mode: string }).default_permission_mode, 'plan');
+  // a stale save is told so: another tab changed it, and this page has a change in progress
+  await page.locator('#settingsBtn').click();
+  await page.locator('#settingsMode').selectOption('manual');
+  writeFileSync(join(home, 'settings.yaml'), yamlText({ revision: 2, default_permission_mode: 'manual' }));
+  await page.waitForFunction(() => /changed elsewhere/.test(document.getElementById('settingsMsg')!.textContent ?? ''), null, { timeout: 3000 });
+  await page.locator('#settingsReload').click();
+  assert.equal(await page.locator('#settingsMode').inputValue(), 'manual');
+  await page.keyboard.press('Escape');
+  await page.locator('#settingsDlg').waitFor({ state: 'hidden', timeout: 3000 });
+  writeFileSync(join(home, 'settings.yaml'), yamlText({ revision: 3, default_permission_mode: 'auto' }));
+  await page.waitForFunction(() => (window.__office.state.building as unknown as { settings: { revision: number } }).settings.revision === 3, null, { timeout: 3000 });
+
+  await goFloor(page, 'zeta');
+  await settle(page);
+  await page.waitForFunction(() => window.__office.signs().some((s) => s.roomId === 'qa'), null, { timeout: 3000 });
+  const signPoint = (id: string) => page.evaluate((rid) => {
+    document.getElementById('map')!.scrollIntoView({ block: 'nearest' });
+    const r = window.__office.signs().find((x) => x.roomId === rid)!;
+    const c = document.getElementById('map')!.getBoundingClientRect();
+    return { x: c.left + r.x + r.w / 2, y: c.top + r.y + r.h / 2 };
+  }, id);
+  const openSign = async (id: string) => { const p = await signPoint(id); await page.mouse.click(p.x, p.y); await page.locator('#roomPanel').waitFor({ state: 'visible', timeout: 3000 }); };
+  const saved = async (re: RegExp) => { try { await page.waitForFunction((src) => new RegExp(src).test(document.getElementById('rpMsg')!.textContent ?? ''), re.source, { timeout: 3000 }); } catch { assert.fail(`no save message; panel says: ${await page.locator("#rpMsg").textContent()}; errors ${errors.join("|")}; saving ${await page.locator("#rpSave").textContent()}`); } };
+
+  // ---- open: focus, heading, scope, every field labelled ----
+  await openSign('qa');
+  assert.equal(await page.evaluate(() => document.activeElement?.id), 'rpClose', 'focus moves into the dialog');
+  assert.equal(await page.locator('#rpTitle').innerText(), 'QA');
+  assert.equal(await page.locator('#rpScopeRoomText').innerText(), 'This room on zeta');
+  assert.equal(await page.locator('#rpScopeDivisionText').innerText(), 'QA everywhere');
+  assert.ok(await page.locator('#rpScopeRoom').isChecked());
+  const unlabeled = await page.evaluate(() => [...document.querySelectorAll<HTMLInputElement>('#roomPanel input, #roomPanel select, #roomPanel textarea')].filter((i) => !i.labels?.length && !i.getAttribute('aria-label')).map((i) => i.id || i.outerHTML));
+  assert.deepEqual(unlabeled, []);
+  assert.deepEqual(await page.locator('#rpMode option').allInnerTexts(), ['Default (Auto)', 'Auto', 'Accept edits', 'Manual', 'Plan']);
+  assert.deepEqual(await page.locator('#rpModel option').allInnerTexts(), ['Default', 'fable', 'opus', 'sonnet', 'haiku', 'Other…']);
+
+  // Esc closes; focus returns to the canvas
+  await page.keyboard.press('Escape');
+  await page.locator('#roomPanel').waitFor({ state: 'hidden', timeout: 3000 });
+  assert.equal(await page.evaluate(() => document.activeElement?.id), 'map', 'focus returns to the opener');
+
+  await openSign('qa');
+  // ---- a missing secret warns before launch ----
+  const ghNeed = page.locator('#rpMcp li[data-key="gh"] .rp-need');
+  assert.equal(await ghNeed.innerText(), 'needs secret github (not set)');
+  assert.ok(await page.locator('#rpProblems').isHidden());
+  await page.locator('#rpMcp li[data-key="gh"] input[type=checkbox]').check();
+  assert.match(await page.locator('#rpProblems').innerText(), /Secret "github" is not set: run kubicle secret set github/);
+  await page.locator('#rpMcp li[data-key="gh"] input[type=checkbox]').uncheck();
+
+  // ---- model haiku, for this room only ----
+  assert.ok(await page.locator('#rpSave').isDisabled(), 'nothing to save yet');
+  await page.locator('#rpModel').selectOption('haiku');
+  assert.ok(await page.locator('#rpSave').isEnabled());
+  assert.equal(await page.locator('#rpModelNote').innerText(), 'set for this room');
+  assert.ok(await page.locator('#rpModelRow').evaluate((n) => n.classList.contains('over')), 'overridden values are highlighted');
+  await page.locator('#rpSave').click();
+  await saved(/^Saved\.$/);
+  assert.equal(overrides().rooms.qa!.model, 'haiku');
+  const res = kubicle(['harness', 'resolve', 'qa', '--project', zeta]);
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /^model: haiku$/m);
+  await page.waitForFunction(() => document.getElementById('rpSave')!.hasAttribute('disabled'), null, { timeout: 3000 });
+
+  // ---- permission mode writes the key; Default clears it ----
+  await page.locator('#rpMode').selectOption('plan');
+  await page.locator('#rpSave').click();
+  await saved(/^Saved\.$/);
+  assert.equal(overrides().rooms.qa!.permission_mode, 'plan');
+  await page.locator('#rpMode').selectOption('');
+  await page.locator('#rpSave').click();
+  await saved(/^Saved\.$/);
+  assert.equal(overrides().rooms.qa!.permission_mode, undefined, 'Default removes the key');
+
+  // ---- Other…: the server's validation problem shows up ----
+  assert.ok(await page.locator('#rpModelOtherRow').isHidden());
+  await page.locator('#rpModel').selectOption('__other');
+  assert.ok(await page.locator('#rpModelOtherRow').isVisible());
+  await page.locator('#rpModelOther').fill('bad name!');
+  await page.locator('#rpSave').click();
+  await page.waitForFunction(() => /is not a model name/.test(document.getElementById('rpMsg')!.textContent ?? ''), null, { timeout: 3000 });
+  assert.match(await page.locator('#rpMsg').innerText(), /model "bad name!" is not a model name/);
+  await page.locator('#rpModelOther').fill('claude-custom-1');
+  await page.locator('#rpSave').click();
+  await saved(/^Saved\.$/);
+  assert.equal(overrides().rooms.qa!.model, 'claude-custom-1');
+  await page.locator('#rpModel').selectOption('haiku');
+  await page.locator('#rpSave').click();
+  await saved(/^Saved\.$/);
+
+  // ---- revision conflict: another writer changed this floor's overrides ----
+  await page.locator('#rpPrompt').fill('my unsaved prompt');
+  const elsewhere = await page.evaluate(([f, b]) => fetch(`/api/overrides/${encodeURIComponent(f!)}/security`, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'X-Kubicle-CSRF': '1' }, body: JSON.stringify({ baseRevision: Number(b), harness: { model: 'opus' } }) }).then((r) => r.status), [zeta, String(overrides().revision)]);
+  assert.equal(elsewhere, 200);
+  await page.waitForFunction(() => /changed elsewhere/.test(document.getElementById('rpMsg')!.textContent ?? ''), null, { timeout: 3000 });
+  assert.equal(await page.locator('#rpMsg').innerText(), "This room's setup changed elsewhere. Reload to see the latest.");
+  assert.equal(await page.locator('#rpPrompt').inputValue(), 'my unsaved prompt', 'edits are kept');
+  await page.locator('#rpSave').click();
+  await page.waitForTimeout(150);
+  assert.equal(await page.locator('#rpMsg').innerText(), "This room's setup changed elsewhere. Reload to see the latest.");
+  assert.equal(overrides().rooms.qa!.prompt, undefined, 'the stale save was refused');
+  await page.locator('#rpReload').click();
+  assert.equal(await page.locator('#rpPrompt').inputValue(), '');
+  assert.ok(await page.locator('#rpMsgBox').isHidden());
+
+  // ---- unsaved edits: the first Esc warns, the second discards ----
+  await page.locator('#rpPrompt').fill('draft');
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => /unsaved changes/.test(document.getElementById('rpMsg')!.textContent ?? ''), null, { timeout: 3000 });
+  assert.ok(await page.locator('#roomPanel').isVisible());
+  await page.keyboard.press('Escape');
+  await page.locator('#roomPanel').waitFor({ state: 'hidden', timeout: 3000 });
+  await openSign('qa');
+  assert.equal(await page.locator('#rpPrompt').inputValue(), '');
+
+  // ---- division scope; inherited values show as from QA ----
+  await page.locator('#rpScopeDivision').check();
+  assert.equal(await page.locator('#rpModel').inputValue(), '', 'the division has no model');
+  await page.locator('#rpPrompt').fill('division prompt');
+  await page.locator('#rpMode').selectOption('acceptEdits');
+  await page.locator('#rpAllow').fill('Bash(npm test:*)\n\n  Bash(ls)  ');
+  await page.locator('#rpMcp li[data-key="okfix"] input[type=checkbox]').check();
+  await page.locator('#rpToolsOnly').check();
+  await page.locator('#rpTools input[data-name="Read"]').check();
+  await page.locator('#rpSave').click();
+  await saved(/^Saved\.$/);
+  const qaFile = parseYaml(readFileSync(join(home, 'divisions', 'qa.yaml'), 'utf8')) as { revision: number; harness: Record<string, unknown> };
+  assert.deepEqual(qaFile.harness, { permission_mode: 'acceptEdits', prompt: 'division prompt', tools: ['Read'], allow: ['Bash(npm test:*)', 'Bash(ls)'], mcp: ['okfix'] });
+  await page.locator('#rpScopeRoom').check();
+  assert.equal(await page.locator('#rpPromptNote').innerText(), 'from QA: division prompt');
+  assert.equal(await page.locator('#rpModeNote').innerText(), 'from QA: Accept edits');
+  assert.equal(await page.locator('#rpAllowNote').innerText(), 'from QA: Bash(npm test:*), Bash(ls)');
+  assert.ok(await page.locator('#rpMcp li[data-key="okfix"] input[type=checkbox]').isChecked());
+  assert.equal(await page.locator('#rpMcp li[data-key="okfix"] .rp-tag').innerText(), 'from QA');
+  assert.ok(await page.locator('#rpTools input[data-name="Read"]').isDisabled(), 'a room cannot remove an inherited tool');
+  assert.equal(await page.locator('#rpRows .rp-row.room').first().locator('.rp-rf').textContent(), 'this room');
+  // unchecking an inherited server removes it for this room only, as "-okfix"
+  await page.locator('#rpMcp li[data-key="okfix"] input[type=checkbox]').uncheck();
+  await page.locator('#rpSave').click();
+  await saved(/^Saved\.$/);
+  assert.deepEqual(overrides().rooms.qa!.mcp, ['-okfix']);
+  assert.match(kubicle(['harness', 'resolve', 'qa', '--project', zeta]).stdout, /^prompt: division prompt$/m);
+  await page.locator('#rpMcp li[data-key="okfix"] input[type=checkbox]').check();
+  await page.locator('#rpSave').click();
+  await saved(/^Saved\.$/);
+
+  // ---- Test button: runs the fixture; a rate limit answer is shown ----
+  await page.locator('#rpMcp li[data-key="okfix"] .rp-test').click();
+  await page.waitForFunction(() => /Connected: fixture/.test(document.querySelector('#rpMcp li[data-key="okfix"]')!.textContent ?? ''), null, { timeout: 8000 });
+  await page.locator('#rpMcp li[data-key="gh"] .rp-test').click();
+  await page.waitForFunction(() => /Wait a moment|not set/.test(document.querySelector('#rpMcp li[data-key="gh"] .rp-result')?.textContent ?? ''), null, { timeout: 8000 });
+
+  // ---- the CLI sets the secret: the warning goes away live, without a value reaching the page ----
+  const secretValue = 'super-secret-e2e-value';
+  const set = spawnSync(join(root, 'bin', 'kubicle'), ['secret', 'set', 'github'], { cwd: zeta, encoding: 'utf8', input: secretValue, env: { ...process.env, KUBICLE_HOME: home } });
+  assert.equal(set.status, 0, set.stderr);
+  await ghNeed.waitFor({ state: 'detached', timeout: 3000 });
+  assert.ok(!(await page.content()).includes(secretValue));
+  assert.ok(!JSON.stringify(await page.evaluate(() => window.__office.state.building)).includes(secretValue));
+
+  // ---- Add MCP server: reports the server's problem, then adds it; a secret env shows the hint and the warning ----
+  await page.locator('#rpMcpName').fill('tool-box');
+  await page.locator('#rpMcpSubmit').click();
+  await page.waitForFunction(() => /needs a command/.test(document.getElementById('rpMcpMsg')!.textContent ?? ''), null, { timeout: 3000 });
+  await page.locator('#rpMcpCommand').fill('echo');
+  await page.locator('#rpMcpArgs').fill('one\ntwo');
+  await page.locator('#rpMcpAddPair').click();
+  await page.locator('#rpMcpPairs .rp-pk').fill('API_KEY');
+  await page.locator('#rpMcpPairs .rp-pv').fill('secret:toolbox');
+  assert.match(await page.locator('#rpMcpForm').innerText(), /Set the value with: kubicle secret set <name>/);
+  await page.locator('#rpMcpSubmit').click();
+  await page.locator('#rpMcp li[data-key="tool-box"]').waitFor({ state: 'visible', timeout: 3000 });
+  assert.equal(await page.locator('#rpMcp li[data-key="tool-box"] .rp-need').innerText(), 'needs secret toolbox (not set)');
+  assert.deepEqual((parseYaml(readFileSync(join(home, 'mcp.yaml'), 'utf8')) as { servers: Record<string, unknown> }).servers['tool-box'], { command: 'echo', args: ['one', 'two'], env: { API_KEY: 'secret:toolbox' } });
+  // the same name again is refused, nothing is overwritten
+  await page.locator('#rpMcpName').fill('tool-box');
+  await page.locator('#rpMcpCommand').fill('other');
+  await page.locator('#rpMcpSubmit').click();
+  await page.waitForFunction(() => /already a server/.test(document.getElementById('rpMcpMsg')!.textContent ?? ''), null, { timeout: 3000 });
+
+  // ---- Import…: lists what Claude has, copies it to the library ----
+  await page.locator('#rpImportBtn').click();
+  assert.equal(await page.locator('#rpImportList li').first().locator('.rp-name').innerText(), 'importable-one');
+  await page.locator('#rpImportList .rp-import').click();
+  await page.locator('#rpSkills li[data-key="importable-one"]').waitFor({ state: 'visible', timeout: 3000 });
+  assert.ok(readFileSync(join(home, 'skills', 'importable-one', 'SKILL.md'), 'utf8').includes('A skill to import'));
+
+  // ---- Start agent here opens Start with this room; Esc comes back to the floor ----
+  await page.locator('#rpStart').click();
+  await page.locator('#startDlg').waitFor({ state: 'visible', timeout: 3000 });
+  assert.equal(await page.locator('#startRoom').inputValue(), 'qa');
+  assert.equal(launched, 0);
+  await page.locator('#startCancel').click();
+  await page.locator('#startDlg').waitFor({ state: 'hidden', timeout: 3000 });
+
+  // ---- Bubbles' office sign opens his panel; the Bullpen gets a panel, room scope only ----
+  const bp = await signPoint('@bubbles');
+  await page.mouse.click(bp.x, bp.y);
+  await page.locator('#bubblesPanel').waitFor({ state: 'visible', timeout: 3000 });
+  await page.locator('#bubblesClose').click();
+  await page.locator('#bubblesPanel').waitFor({ state: 'hidden', timeout: 3000 });
+  await openSign('bullpen');
+  assert.equal(await page.locator('#rpTitle').innerText(), 'Bullpen');
+  assert.ok(await page.locator('#rpScope').isHidden());
+  await page.locator('#rpClose').click();
+  await page.locator('#roomPanel').waitFor({ state: 'hidden', timeout: 3000 });
+
+  // ---- text from a hostile mcp.yaml or skill stays text ----
+  writeFileSync(join(home, 'mcp.yaml'), yamlText({ revision: 9, servers: { ['safe-name']: { command: '<img src=x onerror=window.__pwn=1>' } } }));
+  await openSign('qa');
+  await page.locator('#rpMcp li[data-key="safe-name"]').waitFor({ state: 'visible', timeout: 3000 });
+  assert.equal(await page.evaluate(() => (window as unknown as { __pwn?: number }).__pwn), undefined);
+  writeFileSync(join(home, 'mcp.yaml'), yamlText({ revision: 10, servers: { gh: { command: process.execPath, args: [fixture], env: { TOK: 'secret:github' } }, 'needs-key': { command: 'x', env: { K: 'secret:another' } }, okfix: { command: process.execPath, args: [fixture] } } }));
+  await page.locator('#rpMcp li[data-key="needs-key"]').waitFor({ state: 'visible', timeout: 3000 });
+
+  // ---- phone width: no sideways scroll ----
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForTimeout(150);
+  const wide = await page.evaluate(() => { const d = document.getElementById('roomPanel')!; return { dlg: d.scrollWidth - d.clientWidth, doc: document.documentElement.scrollWidth - innerWidth }; });
+  assert.ok(wide.dlg <= 0, `dialog overflows by ${wide.dlg}px`);
+  assert.ok(wide.doc <= 0, `page overflows by ${wide.doc}px`);
+  await page.screenshot({ path: join(outDir, 'live-room-panel-phone.png') });
+  await page.setViewportSize({ width: 1400, height: 1000 });
+  await page.locator('#rpClose').click();
+  await page.locator('#roomPanel').waitFor({ state: 'hidden', timeout: 3000 });
+
+  // ---- all four styles: the panel looks right over each ----
+  for (const style of STYLES) {
+    await page.locator(`#styleTabs button[data-style="${style}"]`).click();
+    await settle(page);
+    await page.waitForFunction(() => window.__office.signs().some((s) => s.roomId === 'qa'), null, { timeout: 3000 });
+    await page.waitForTimeout(150);
+    await openSign('qa');
+    await page.waitForTimeout(100);
+    await page.screenshot({ path: join(outDir, `live-room-panel-${style}.png`) });
+    if (style === 'pixel') {
+      await page.locator('#rpMcpAdd').scrollIntoViewIfNeeded();
+      await page.waitForTimeout(100);
+      await page.screenshot({ path: join(outDir, 'live-room-panel-lower.png') });
+    }
+    await page.locator('#rpClose').click();
+    await page.locator('#roomPanel').waitFor({ state: 'hidden', timeout: 3000 });
+  }
+
+  // ---- archived floor: visible, but nothing can be changed or started ----
+  const arch = await page.evaluate((id) => fetch(`/api/projects/${encodeURIComponent(id)}`, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'X-Kubicle-CSRF': '1' }, body: JSON.stringify({ archived: true }) }).then((r) => r.status), zeta);
+  assert.equal(arch, 200);
+  await goFloor(page, 'Lobby');
+  await page.locator('#lobbyArchived li', { has: page.locator('.name', { hasText: /^zeta$/ }) }).locator('.go').click();
+  await page.waitForFunction((id) => window.__office.floor() === id, zeta, { timeout: 3000 });
+  await settle(page);
+  await page.waitForFunction(() => window.__office.signs().some((s) => s.roomId === 'qa'), null, { timeout: 3000 });
+  await openSign('qa');
+  assert.ok(await page.locator('#rpArchived').isVisible());
+  assert.ok(await page.locator('#rpSaveBar').isHidden());
+  assert.ok(await page.locator('#rpStart').isHidden());
+  assert.ok(await page.locator('#rpMcpAdd').isHidden());
+  assert.ok(await page.locator('#rpModel').isDisabled());
+  await page.keyboard.press('Escape');
+  await page.locator('#roomPanel').waitFor({ state: 'hidden', timeout: 3000 });
   assert.deepEqual(errors, []);
 });

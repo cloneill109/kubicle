@@ -353,3 +353,22 @@ test('a division with a bad harness key keeps the last good division and warns; 
     assert.throws(() => s.svc.saveDivisionHarness('nope', {}, 1), /unknown division/);
   } finally { s.cleanup(); }
 });
+
+test('secretsSet: only `has` is used, and a store that throws reads as not set', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kubicle-svc-'));
+  const home = join(dir, 'home');
+  mkdirSync(home);
+  writeFileSync(join(home, 'mcp.yaml'), 'revision: 1\nservers:\n  a: { command: x, env: { A: "secret:one", B: "secret:two" } }\n  b: { command: y, env: { C: "secret:three" } }\n');
+  const asked: string[] = [];
+  const store = {
+    has(n: string): boolean { asked.push(n); if (n === 'two') throw new Error('keyring exploded'); return n === 'one'; },
+    get(): string | null { throw new Error('get must never be called for this'); },
+  };
+  const svc = new BuildingService(home, { secrets: () => store });
+  try {
+    assert.deepEqual(svc.loadOnce([]).secretsSet, ['one']);
+    assert.deepEqual(asked.sort(), ['one', 'three', 'two']);
+    const opening = new BuildingService(home, { secrets: () => { throw new Error('cannot open'); } });
+    assert.deepEqual(opening.loadOnce([]).secretsSet, []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

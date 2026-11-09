@@ -12,6 +12,7 @@ import { hookResponse } from '../../src/server/approvals.ts';
 import { BRIEFING_PREFIX } from '../../src/server/bubbles/intake.ts';
 import { STALE_HOOKS_BANNER, STALE_PROMPT_HOOK_BANNER } from '../../src/server/main.ts';
 import { shouldIntake } from '../../src/server/http.ts';
+import { openSecrets, listSecretNames } from '../../src/server/harness/secrets.ts';
 import type { AgentEvent } from '../../src/shared/events.ts';
 import type { ServerMsg, AgentView } from '../../src/shared/protocol.ts';
 import type { LaunchSpec } from '../../src/server/harness/resolve.ts';
@@ -1593,4 +1594,113 @@ test('Start agent: parallel requests cannot exceed 6 a minute, and a failed one 
   const ok = await Promise.all(Array.from({ length: 6 }, () => t.go('frontend', 'x')));
   assert.equal(ok.filter((r) => r.status === 202).length, 6, 'rejected requests did not use slots');
   await t.c.close();
+});
+
+// ---- POST /api/mcp/:name/test (the room panel's Test button) ----
+const MCP_FIXTURE = join(import.meta.dirname, '..', 'fixtures', 'mcp-fixture.mjs');
+
+const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
+async function pollUntil(cond: () => boolean, ms = 4000): Promise<boolean> {
+  const t = Date.now();
+  while (Date.now() - t < ms) { if (cond()) return true; await new Promise((r) => setTimeout(r, 25)); }
+  return cond();
+}
+const saveMcp = async (s: Srv, cookie: string, name: string, server: unknown, rev: number) => {
+  const r = await control(s, cookie, `/api/mcp/${name}`, { baseRevision: rev, server });
+  assert.equal(r.status, 200, await r.clone().text());
+};
+
+test('POST /api/mcp/:name/test: owner only, unknown 404, 1 per 2 s, uses the secret store, no Anthropic env, result scrubbed', async () => {
+  let clock = 1_000_000;
+  const s = await start(undefined, {}, { now: () => clock, openBrowser: false, launch: async () => {} });
+  const cookie = await login(s);
+  const secret = 'tok-http-route-value';
+  openSecrets(s.home).set('github', secret);
+  const envFile = join(s.home, 'env.json');
+  await saveMcp(s, cookie, 'fix', { command: process.execPath, args: [MCP_FIXTURE, 'env'], env: { FIXTURE_ENVFILE: envFile, FIXTURE_TOK: 'secret:github' } }, 0);
+  const path = '/api/mcp/fix/test';
+  const raw = (headers: Record<string, string>) => fetch(`${s.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', origin: s.url, ...headers }, body: '{}' });
+  assert.equal((await raw({})).status, 401);
+  assert.equal((await raw({ cookie })).status, 403);
+  assert.equal((await raw({ cookie, 'x-kubicle-csrf': '1', origin: 'http://evil.example' })).status, 403);
+  for (const bad of ['nope', '__proto__', 'constructor']) assert.equal((await control(s, cookie, `/api/mcp/${bad}/test`, {})).status, 404, bad);
+
+  process.env.ANTHROPIC_API_KEY = 'sk-not-for-mcp';
+  process.env.CLAUDE_CODE_USE_BEDROCK = '1';
+  try {
+    const r = await control(s, cookie, path, {});
+    assert.equal(r.status, 200);
+    const text = await r.text();
+    assert.deepEqual(JSON.parse(text), { ok: true, name: '***' }, 'the secret reached the child and was scrubbed from its answer');
+    assert.ok(!text.includes(secret));
+    assert.deepEqual(JSON.parse(readFileSync(envFile, 'utf8')), { a: null, c: null, tok: secret });
+  } finally {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.CLAUDE_CODE_USE_BEDROCK;
+  }
+  const limited = await control(s, cookie, path, {});
+  assert.equal(limited.status, 429);
+  assert.deepEqual(await limited.json(), { error: 'Wait a moment before testing again.' });
+  clock += 1999;
+  assert.equal((await control(s, cookie, path, {})).status, 429);
+  clock += 1;
+  assert.equal((await control(s, cookie, path, {})).status, 200);
+
+  // a secret that was never set is named, and the server is not left guessing
+  clock += 2000;
+  await saveMcp(s, cookie, 'unset', { command: process.execPath, args: [MCP_FIXTURE], env: { X: 'secret:missing' } }, 1);
+  const missing = await control(s, cookie, '/api/mcp/unset/test', {});
+  assert.deepEqual(await missing.json(), { ok: false, error: 'Secret "missing" is not set' });
+});
+
+test('POST /api/mcp/:name/test: a client disconnect or a server close kills the child at once', async () => {
+  let clock = 2_000_000;
+  const s = await start(undefined, {}, { now: () => { clock += 5000; return clock; }, openBrowser: false, launch: async () => {} });
+  const cookie = await login(s);
+  const pidFile = join(s.home, 'pid');
+  await saveMcp(s, cookie, 'hang', { command: process.execPath, args: [MCP_FIXTURE, 'silent'], env: { FIXTURE_PIDFILE: pidFile } }, 0);
+  const readPid = async (): Promise<number> => {
+    assert.ok(await pollUntil(() => existsSync(pidFile)), 'the child started');
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    rmSync(pidFile);
+    return pid;
+  };
+
+  const ac = new AbortController();
+  const gone = fetch(`${s.url}/api/mcp/hang/test`, { method: 'POST', headers: { 'content-type': 'application/json', cookie, origin: s.url, 'x-kubicle-csrf': '1' }, body: '{}', signal: ac.signal }).catch(() => null);
+  const pid1 = await readPid();
+  assert.ok(alive(pid1));
+  ac.abort();
+  await gone;
+  assert.ok(await pollUntil(() => !alive(pid1), 2000), 'client disconnect killed the child');
+
+  void fetch(`${s.url}/api/mcp/hang/test`, { method: 'POST', headers: { 'content-type': 'application/json', cookie, origin: s.url, 'x-kubicle-csrf': '1' }, body: '{}' }).catch(() => null);
+  const pid2 = await readPid();
+  assert.ok(alive(pid2));
+  await s.close();
+  assert.ok(await pollUntil(() => !alive(pid2), 2000), 'server close killed the child');
+});
+
+test('building.secretsSet: names of set secrets the catalog uses, never values; follows kubicle secret set/remove', async () => {
+  const s = await start();
+  const cookie = await login(s);
+  const secret = 'value-not-for-the-ui';
+  const store = openSecrets(s.home);
+  store.set('github', secret);
+  store.set('unused', 'other-value');
+  const { c } = await withProject(s, cookie);
+  await saveMcp(s, cookie, 'gh', { command: 'x', env: { A: 'secret:github', B: 'secret:linear' } }, 0);
+  const b = await c.waitFor((m) => m.t === 'building' && Object.hasOwn(m.building.mcp.servers, 'gh'));
+  assert.ok(b.t === 'building');
+  assert.deepEqual(b.building.secretsSet, ['github']);
+  assert.ok(!JSON.stringify(b).includes(secret));
+  assert.deepEqual(listSecretNames(s.home), ['github', 'unused']);
+  // the CLI runs in another process: the office hears it through the names file
+  store.set('linear', 'v2');
+  const after = await c.waitFor((m) => m.t === 'building' && m.building.secretsSet.includes('linear'));
+  assert.ok(after.t === 'building');
+  assert.deepEqual(after.building.secretsSet, ['github', 'linear']);
+  store.remove('github');
+  await c.waitFor((m) => m.t === 'building' && !m.building.secretsSet.includes('github'));
+  await c.close();
 });

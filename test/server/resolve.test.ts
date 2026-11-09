@@ -44,7 +44,7 @@ function building(o: { div?: Record<string, Harness>; over?: Record<string, Harn
     floors: {},
     overrides: o.over ? { [PROJECT]: { revision: 1, rooms: o.over } } : {},
     mcp: { revision: 1, servers: o.servers ?? {} },
-    skills: [], importable: [], warnings: [],
+    skills: [], importable: [], secretsSet: [], warnings: [],
   };
 }
 

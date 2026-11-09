@@ -8,6 +8,8 @@ import type { BuildingService } from './building/service.ts';
 import { BuildingFileError, RevisionConflict } from './building/files.ts';
 import { OverrideNotFound } from './building/overrides.ts';
 import { mcpProblems } from './harness/catalog.ts';
+import { testMcp } from './harness/mcp-test.ts';
+import type { SecretStore } from './harness/secrets.ts';
 import { SkillImportError } from './harness/skills.ts';
 import type { McpServerDef } from '../shared/catalog.ts';
 import { harnessProblems, type Harness } from '../shared/harness.ts';
@@ -83,6 +85,8 @@ export interface HttpDeps {
   launch?: Launch;
   /** Builds a room's launch (buildLaunch with the current building and secret store). Throws HarnessError. */
   prepareLaunch?(o: { projectId: string; roomId: string; task: string; briefing?: string; id?: string }): LaunchSpec;
+  /** The server's secret store, for the MCP test route (`get` only; opened per test, like launches). */
+  secrets?(): Pick<SecretStore, 'get'>;
   /** Launches waiting for their session's first hook event (Review Focus 3). */
   launchWatch?: LaunchWatch;
   /** A hook arrived with a missing or wrong ingest token (I4). */
@@ -657,6 +661,25 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
     }
   }
 
+  const MCP_TEST_GAP_MS = 2000;
+  let lastMcpTest = Number.NEGATIVE_INFINITY;
+
+  /** The room panel's Test button. The child dies with the request: a client that leaves, or a server that closes, aborts the test. */
+  async function mcpTest(req: IncomingMessage, res: ServerResponse, name: string): Promise<void> {
+    if (!guard(req, res)) return;
+    req.resume(); // the body is not used
+    const servers = d.building.snapshot().mcp.servers;
+    if (!Object.hasOwn(servers, name)) return send(res, 404, JSON.stringify({ error: `no MCP server "${name}"` }), JSON_HDR);
+    const t = now();
+    if (t - lastMcpTest < MCP_TEST_GAP_MS) return send(res, 429, JSON.stringify({ error: 'Wait a moment before testing again.' }), JSON_HDR);
+    lastMcpTest = t;
+    const ac = new AbortController();
+    res.once('close', () => ac.abort());
+    let store: Pick<SecretStore, 'get'> | undefined;
+    try { store = d.secrets?.(); } catch { store = undefined; } // testMcp reports a server that needs it as "not available"
+    sendJson(res, 200, await testMcp(servers[name]!, process.env, 10_000, store, ac.signal));
+  }
+
   async function skillImport(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!guard(req, res)) return;
     const b = await readJson(req);
@@ -854,6 +877,8 @@ export function createHandler(d: HttpDeps): (req: IncomingMessage, res: ServerRe
       if (mm) return divisionHarnessSave(req, res, param(mm[1]));
       mm = /^\/api\/overrides\/([^/]+)\/([^/]+)$/.exec(p);
       if (mm) return overrideSave(req, res, param(mm[1]), param(mm[2]));
+      mm = /^\/api\/mcp\/([^/]+)\/test$/.exec(p);
+      if (mm) return mcpTest(req, res, param(mm[1]));
       mm = /^\/api\/mcp\/([^/]+)$/.exec(p);
       if (mm) return mcpSave(req, res, param(mm[1]));
       if (p === '/api/skills/import') return skillImport(req, res);

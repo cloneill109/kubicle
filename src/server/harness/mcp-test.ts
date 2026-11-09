@@ -12,6 +12,7 @@ export type McpTestResult = { ok: true; name: string } | { ok: false; error: str
 const SECRET_RE = /secret:([a-z0-9][a-z0-9-]{0,31})/g;
 const INIT = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'kubicle', version: '1' } } };
 const MAX_ERR = 200;
+const CANCELLED: McpTestResult = { ok: false, error: 'the test was cancelled' };
 
 const seconds = (ms: number): string => String(Number((ms / 1000).toFixed(1)));
 
@@ -45,15 +46,17 @@ function reply(v: unknown): McpTestResult | undefined {
 
 /**
  * `env` is the environment the server would inherit (callers pass process.env); ANTHROPIC_* and CLAUDE_CODE_USE_* are dropped
- * and the server's own env, with secret:<n> resolved from `secrets`, is added. Never throws.
+ * and the server's own env, with secret:<n> resolved from `secrets`, is added. `signal` ends the test early (the child is killed
+ * at once): the office aborts it when the client leaves or the server closes. Never throws.
  */
-export async function testMcp(server: McpServerDef, env: Record<string, string | undefined>, timeoutMs = 10000, secrets?: Pick<SecretStore, 'get'>): Promise<McpTestResult> {
+export async function testMcp(server: McpServerDef, env: Record<string, string | undefined>, timeoutMs = 10000, secrets?: Pick<SecretStore, 'get'>, signal?: AbortSignal): Promise<McpTestResult> {
   const values = new Set<string>();
   let r: McpTestResult;
   try {
     const type = server.type ?? 'stdio';
-    if (type === 'stdio') r = await testStdio(server, env, timeoutMs, secrets, values);
-    else if (type === 'http') r = await testHttp(server, timeoutMs, secrets, values);
+    if (signal?.aborted) r = CANCELLED;
+    else if (type === 'stdio') r = await testStdio(server, env, timeoutMs, secrets, values, signal);
+    else if (type === 'http') r = await testHttp(server, timeoutMs, secrets, values, signal);
     else r = { ok: false, error: 'sse servers cannot be tested here' };
   } catch (e) {
     r = { ok: false, error: e instanceof Fail ? e.message : 'the test failed unexpectedly' };
@@ -68,7 +71,7 @@ function clean(s: string, values: Set<string>): string {
   return out.length > MAX_ERR ? `${out.slice(0, MAX_ERR)}...` : out;
 }
 
-async function testStdio(server: McpServerDef, base: Record<string, string | undefined>, timeoutMs: number, secrets: Pick<SecretStore, 'get'> | undefined, values: Set<string>): Promise<McpTestResult> {
+async function testStdio(server: McpServerDef, base: Record<string, string | undefined>, timeoutMs: number, secrets: Pick<SecretStore, 'get'> | undefined, values: Set<string>, signal?: AbortSignal): Promise<McpTestResult> {
   if (!server.command) throw new Fail('a stdio server needs a command');
   const childEnv: Record<string, string> = {};
   for (const [k, v] of Object.entries(base)) if (v !== undefined && !STRIPPED_ENV.test(k)) childEnv[k] = v;
@@ -100,6 +103,7 @@ async function testStdio(server: McpServerDef, base: Record<string, string | und
       if (done) return;
       done = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       kill();
       unhook();
       child.stdin!.destroy();
@@ -107,6 +111,8 @@ async function testStdio(server: McpServerDef, base: Record<string, string | und
       resolve(r);
     };
     const timer = setTimeout(() => finish({ ok: false, error: `no answer within ${seconds(timeoutMs)} s` }), timeoutMs);
+    const onAbort = (): void => finish(CANCELLED);
+    signal?.addEventListener('abort', onAbort, { once: true });
     child.once('error', (e: NodeJS.ErrnoException) => finish({ ok: false, error: e.code === 'ENOENT' ? `cannot start the server: "${server.command}" was not found` : `cannot start the server (${e.code ?? 'error'})` }));
     child.once('exit', (code) => finish({ ok: false, error: `the server exited${code === null ? '' : ` (code ${code})`} before answering` }));
     child.stdin!.on('error', () => { /* the exit handler reports it */ });
@@ -135,11 +141,13 @@ function scrubAll(s: string, values: Set<string>): string {
   return out;
 }
 
-async function testHttp(server: McpServerDef, timeoutMs: number, secrets: Pick<SecretStore, 'get'> | undefined, values: Set<string>): Promise<McpTestResult> {
+async function testHttp(server: McpServerDef, timeoutMs: number, secrets: Pick<SecretStore, 'get'> | undefined, values: Set<string>, signal?: AbortSignal): Promise<McpTestResult> {
   if (!server.url) throw new Fail('an http server needs a url');
   const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...resolveSecrets(server.headers, secrets, values) };
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
+  const onAbort = (): void => ac.abort();
+  signal?.addEventListener('abort', onAbort, { once: true });
   try {
     const res = await fetch(server.url, { method: 'POST', headers, body: JSON.stringify(INIT), signal: ac.signal, redirect: 'error' });
     if (!res.ok) { void res.body?.cancel().catch(() => {}); return { ok: false, error: `the server answered HTTP ${res.status}` }; }
@@ -157,10 +165,12 @@ async function testHttp(server: McpServerDef, timeoutMs: number, secrets: Pick<S
     }
     return { ok: false, error: 'the server did not answer initialize' };
   } catch (e) {
+    if (signal?.aborted) return CANCELLED;
     if (ac.signal.aborted) return { ok: false, error: `no answer within ${seconds(timeoutMs)} s` };
     return { ok: false, error: e instanceof Fail ? e.message : 'could not connect to the server' };
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
     ac.abort();
   }
 }

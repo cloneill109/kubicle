@@ -25,7 +25,7 @@ function building(mcp: string[] = ['github']): Building {
     divisions: DEFAULT_DIVISIONS.map((d) => ({ ...d, harness: d.id === 'qa' ? { mcp } : {}, revision: 1 })),
     floors: {}, overrides: {},
     mcp: { revision: 1, servers: { github: { command: 'npx', args: ['-y', 'gh'], env: { GITHUB_PERSONAL_ACCESS_TOKEN: 'secret:github' } } } },
-    skills: [], importable: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' },
+    skills: [], importable: [], secretsSet: [], warnings: [], settings: { revision: 0, default_permission_mode: 'auto' },
   };
 }
 

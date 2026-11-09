@@ -19,6 +19,8 @@ import { drawOverlays, bubblesMarks, type SignRect } from './render/overlays.ts'
 import { BubblesUi } from './bubbles-panel.ts';
 import { LogView } from './log-view.ts';
 import { StartAgentUi } from './start-agent.ts';
+import { RoomPanelUi } from './room-panel.ts';
+import { SettingsUi } from './settings-panel.ts';
 
 const STYLE_KEY = 'kubicle-style';
 const CHIME_KEY = 'kubicle-chime';
@@ -74,6 +76,12 @@ const startAgent = new StartAgentUi({
   rooms: (id) => floorDef(id).rooms.map((r) => ({ id: r.id, name: r.name })),
 });
 $('startBtn').addEventListener('click', (e) => { closeMenu(); startAgent.open(undefined, e.currentTarget as HTMLElement); });
+const roomPanel = new RoomPanelUi(state, {
+  floorName: (id) => floorName(id),
+  rooms: (id) => floorDef(id).rooms,
+  onStart: (room) => startAgent.open(room, canvas),
+});
+const settingsUi = new SettingsUi(state);
 const openFromHash = () => { if (location.hash === '#bubbles') { closeMenu(); closePicker(false); if (logView.isOpen) $<HTMLDialogElement>('logView').close(); bubbles.open($('bubblesDot')); } };
 window.addEventListener('hashchange', openFromHash);
 
@@ -81,6 +89,7 @@ window.addEventListener('hashchange', openFromHash);
 let style: StyleId = 'pixel';
 let R: Renderer = STYLES.pixel.make();
 const canvas = $<HTMLCanvasElement>('map');
+canvas.tabIndex = -1; // focusable from script, so a dialog opened from the floor can return focus here
 const ctx = canvas.getContext('2d')!;
 const scroller = $('mapScroll');
 let cw = 0, ch = 0, dpr = 1;
@@ -174,11 +183,11 @@ function elevatorRect(): { x: number; y: number; w: number; h: number } {
   return { x: Math.min(...xs), y: top, w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - top };
 }
 const inRect = (r: { x: number; y: number; w: number; h: number }, x: number, y: number) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
-/** A real room's door sign under (x, y) on a live floor: clicking it starts an agent there. */
-function startSign(x: number, y: number): string | undefined {
+/** A door sign under (x, y): a room's id, or COORDINATOR for Bubbles' office. Clicking one opens that room's panel (or Bubbles'). */
+function signAt(x: number, y: number): string | undefined {
   const id = state.currentFloor;
-  if (id === LOBBY || state.project(id)?.archived) return undefined;
-  return signs.find((s) => inRect(s, x, y) && floorDef(id).rooms.some((r) => r.id === s.roomId))?.roomId;
+  if (id === LOBBY) return undefined;
+  return signs.find((s) => inRect(s, x, y) && (s.roomId === COORDINATOR || floorDef(id).rooms.some((r) => r.id === s.roomId)))?.roomId;
 }
 
 /** Pulse around the elevator while someone on another floor needs the owner (static under reduced motion). */
@@ -203,17 +212,18 @@ function drawGlow(now: number): void {
   ctx.restore();
 }
 
-// A door sign starts an agent in that room (not Bubbles' office). The elevator opens the picker.
+// A door sign opens that room's panel (Bubbles' office sign: his panel). The elevator opens the picker.
 canvas.addEventListener('mousemove', (e) => {
   if (editing) return; // edit mode sets its own cursor (pointer handlers below)
   const [x, y] = rel(e);
   const a = hitAgent(x, y);
   hovered = a?.view.id;
   const onElevator = !a && inRect(elevatorRect(), x, y);
-  const sign = !a && !onElevator ? startSign(x, y) : undefined;
+  const sign = !a && !onElevator ? signAt(x, y) : undefined;
   canvas.style.cursor = a || onElevator || sign ? 'pointer' : 'default';
   canvas.title = onElevator ? 'Elevator: go to another floor (E)' : a && a === coord.agent ? 'Bubbles: open his panel'
-    : sign ? `Start an agent in ${floorDef(state.currentFloor).rooms.find((r) => r.id === sign)?.name ?? sign}` : '';
+    : sign === COORDINATOR ? 'Bubbles: open his panel'
+    : sign ? `Set up ${floorDef(state.currentFloor).rooms.find((r) => r.id === sign)?.name ?? sign}` : '';
 });
 canvas.addEventListener('mouseleave', () => { hovered = undefined; });
 canvas.addEventListener('click', (e) => {
@@ -224,7 +234,11 @@ canvas.addEventListener('click', (e) => {
   if (a && a === coord.agent) bubbles.open(canvas); // Bubbles himself: his panel
   else if (a) inspector.select(a.view.id);
   else if (inRect(elevatorRect(), x, y)) showPicker();
-  else { const room = startSign(x, y); if (room) startAgent.open(room, canvas); }
+  else {
+    const sign = signAt(x, y);
+    if (sign === COORDINATOR) bubbles.open(canvas);
+    else if (sign) roomPanel.open(sign, canvas);
+  }
 });
 
 // ---------------------------------------------------------------- header, feed, legend, banner
@@ -608,6 +622,7 @@ function onMessage(m: ServerMsg): void {
   // Counts also drive the floor button, glow, empty hint and Lobby. Not on feed-only messages,
   // so a focused "need you" chip isn't replaced on every hook event.
   if (c.snapshot || c.floor || c.projects || c.building || c.upserted.length || c.removed.length) renderCounts();
+  if (c.building || c.projects) { roomPanel.refresh(); settingsUi.refresh(); }
   if (c.bubbles) { bubbles.render(); coord.setOnDuty(state.bubbles?.status.state === 'on'); }
   if (c.projects) { bubbles.render(); logView.projectsChanged(); }
   if (c.log.length && state.currentFloor !== LOBBY) {
